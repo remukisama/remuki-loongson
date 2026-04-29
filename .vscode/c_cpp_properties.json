@@ -1,0 +1,34 @@
+﻿{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/main",
+                "${workspaceFolder}/libraries/app",
+                "${workspaceFolder}/libraries/app/gyro",
+                "${workspaceFolder}/libraries/app/display",
+                "${workspaceFolder}/libraries/common/inc",
+                "${workspaceFolder}/libraries/drv/inc",
+                "${workspaceFolder}/example/inc",
+                "${workspaceFolder}/user_app/include",
+                "${workspaceFolder}/user_app/src",
+                "${workspaceFolder}/example/src",
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/tools/loongson-gnu-toolchain-8.3-x86_64-loongarch64-linux-gnu-rc1.6/loongarch64-linux-gnu/sysroot/usr/include/**",
+                "${workspaceFolder}/tools/LQ_Dep_libs/opencv_install/include/opencv4"
+            ],
+            "defines": [
+                "LQ_HAVE_OPENCV"
+            ],
+            "compilerPath": "${workspaceFolder}/tools/loongson-gnu-toolchain-8.3-x86_64-loongarch64-linux-gnu-rc1.6/bin/loongarch64-linux-gnu-gcc",
+            "cStandard": "c17",
+            "cppStandard": "gnu++17",
+            "intelliSenseMode": "linux-gcc-loongarch64",
+            "compilerArgs": [
+                "-O3",
+                "-ffast-math"
+            ]
+        }
+    ],
+    "version": 4
+}

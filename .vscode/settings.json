@@ -1,0 +1,28 @@
+{
+    "cmake.sourceDirectory": "${workspaceFolder}/main",
+    "cmake.configureSettings": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+    },
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/main/build_intellisense/compile_commands.json",
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+    "C_Cpp.default.compilerPath": "${workspaceFolder}/tools/loongson-gnu-toolchain-8.3-x86_64-loongarch64-linux-gnu-rc1.6/bin/loongarch64-linux-gnu-g++",
+    "C_Cpp.default.cppStandard": "gnu++17",
+    "C_Cpp.default.cStandard": "c17",
+    "C_Cpp.default.intelliSenseMode": "linux-gcc-x64",
+    "C_Cpp.default.defines": [
+        "LQ_HAVE_OPENCV"
+    ],
+    "C_Cpp.default.includePath": [
+        "${workspaceFolder}/main",
+        "${workspaceFolder}/libraries/app",
+        "${workspaceFolder}/libraries/app/gyro",
+        "${workspaceFolder}/libraries/app/display",
+        "${workspaceFolder}/libraries/common/inc",
+        "${workspaceFolder}/libraries/drv/inc",
+        "${workspaceFolder}/example/inc",
+        "${workspaceFolder}/user_app/include",
+        "${workspaceFolder}/user_app/src",
+        "${workspaceFolder}/example/src",
+        "${workspaceFolder}/**"
+    ]
+}

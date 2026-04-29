@@ -1,0 +1,31 @@
+# Build outputs
+main/build*/
+main/.cache/
+driver/**/build/
+driver/**/.tmp_versions/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# Kernel module build artifacts
+driver/**/*.o
+driver/**/*.ko
+driver/**/*.mod
+driver/**/*.mod.c
+driver/**/*.mod.o
+driver/**/*.cmd
+driver/**/Module.symvers
+driver/**/modules.order
+
+# Local toolchains and extracted dependency packages
+tools/
+main/toolchain_path.cmake
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
