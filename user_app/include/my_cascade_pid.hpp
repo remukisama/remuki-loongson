@@ -21,6 +21,7 @@ class AttitudeCascade {
 public:
     AttitudeCascade();
     void init();
+    void reset_runtime_state();
 
     /**
      * @brief 级联PID计算函数
@@ -30,6 +31,9 @@ public:
      * @return 返回分配给左右轮的差速量(diff_speed)，送入内层速度环
      */
     float calc_diff_speed(float target_angle, const Mpu6050Data& imu_data, float dt);
+    float calc_target_gyro_for_yaw(float target_angle, const Mpu6050Data& imu_data, float dt);
+    float calc_target_gyro_for_yaw(float target_angle, const Mpu6050Data& imu_data, float dt, float max_gyro_dps);
+    bool yaw_target_reached(float target_angle, const Mpu6050Data& imu_data) const;
 
     /**
      * @brief 级联PID计算函数（旁路角度环，直接控制角速度环）
@@ -39,11 +43,17 @@ public:
      * @return 返回分配给左右轮的差速量(diff_speed)
      */
     float calc_diff_speed_bypass_angle(float target_gyro_z, const Mpu6050Data& imu_data, float dt);
+    float last_filtered_gyro_z() const { return gyro_z_filtered_; }
 
     GeneralPID angle_pid; // [最外环]：角度环
     GeneralPID gyro_pid;  // [中间环]：角速度环
     
     float current_yaw;    // 航向角积分值
+
+private:
+    float gyro_z_filtered_;
+    float last_gyro_z_measurement_;
+    float last_gyro_output_;
 };
 
 #endif
