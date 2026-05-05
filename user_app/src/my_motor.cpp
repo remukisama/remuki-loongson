@@ -291,6 +291,13 @@ void speed_dif_cascade()
         alpha = car_config::kSteerFastFlipAlpha;
     }
     steer_error = steer_error * (1.0f - alpha) + raw_steer_error * alpha;
+    bool extreme_exit_unwind =
+        (std::fabs(raw_steer_error) <= car_config::kExtremeTurnExitRawThreshold) &&
+        (std::fabs(steer_error) >= car_config::kExtremeTurnExitFiltThreshold);
+    if (extreme_exit_unwind) {
+        steer_error = steer_error * (1.0f - car_config::kExtremeTurnExitFilterAlpha) +
+                      raw_steer_error * car_config::kExtremeTurnExitFilterAlpha;
+    }
 
     // 【开机防暴走保护】
     static bool camera_is_ready = false;
@@ -331,6 +338,9 @@ void speed_dif_cascade()
         --s_curve_hold_frames;
     }
     bool s_curve_active = s_curve_prepare || (s_curve_hold_frames > 0);
+    bool extreme_turn_active =
+        (std::fabs(raw_steer_error) > car_config::kExtremeTurnRawThreshold) ||
+        (std::fabs(steer_error) > car_config::kExtremeTurnFiltThreshold);
 
     // 弯道大偏角强制降速保护
     if (abs(steer_error) > car_config::kSharpTurnSteerError) {
@@ -338,6 +348,9 @@ void speed_dif_cascade()
     }
     if (Speed_Goal > car_config::kSCurveSpeedGoal && s_curve_active) {
         Speed_Goal = car_config::kSCurveSpeedGoal;
+    }
+    if (Speed_Goal > car_config::kExtremeTurnSpeedGoal && extreme_turn_active) {
+        Speed_Goal = car_config::kExtremeTurnSpeedGoal;
     }
     last_effective_speed_goal = Speed_Goal;
 
@@ -347,6 +360,7 @@ void speed_dif_cascade()
         float visual_pd_out = 0.0f;
         float delta_target = 0.0f;
         static float last_target_gyro_z = 0.0f;
+        static int opposing_gyro_recovery_frames = 0;
         dbg_imu_ok = 1;
         dbg_real_gyro_z = imu_data.gyro_z;
         
@@ -363,6 +377,9 @@ void speed_dif_cascade()
             if (std::fabs(target_gyro_z) < car_config::kGyroDeadBandDps) {
                 target_gyro_z = 0.0f;
                 delta_target = -last_target_gyro_z;
+                opposing_gyro_recovery_frames = 0;
+            } else if (opposing_gyro_recovery_frames > 0) {
+                --opposing_gyro_recovery_frames;
             }
             last_target_gyro_z = target_gyro_z;
             last_steer_error = steer_error;
@@ -383,10 +400,34 @@ void speed_dif_cascade()
                 (visual_pd_out < 0.0f && last_target_gyro_z > 0.0f)) {
                 max_delta_target = car_config::kTargetGyroSignFlipMaxDeltaDps;
             }
+            if (extreme_exit_unwind &&
+                max_delta_target < car_config::kExtremeTurnExitTargetDeltaDps) {
+                max_delta_target = car_config::kExtremeTurnExitTargetDeltaDps;
+            }
             delta_target = visual_pd_out - last_target_gyro_z;
             if (delta_target > max_delta_target) delta_target = max_delta_target;
             if (delta_target < -max_delta_target) delta_target = -max_delta_target;
             target_gyro_z = last_target_gyro_z + delta_target;
+            const float filtered_gyro_before_update = cascade_ctrl.last_filtered_gyro_z();
+            bool opposing_gyro_limited = false;
+            if (s_curve_active &&
+                target_gyro_z * filtered_gyro_before_update < 0.0f &&
+                std::fabs(filtered_gyro_before_update) > car_config::kOpposingGyroHoldDps &&
+                std::fabs(target_gyro_z) > car_config::kOpposingGyroTargetLimitDps) {
+                target_gyro_z = std::copysign(car_config::kOpposingGyroTargetLimitDps, target_gyro_z);
+                delta_target = target_gyro_z - last_target_gyro_z;
+                opposing_gyro_recovery_frames = car_config::kOpposingGyroRecoveryFrames;
+                opposing_gyro_limited = true;
+            }
+            if (!opposing_gyro_limited && s_curve_active && opposing_gyro_recovery_frames > 0) {
+                if (std::fabs(target_gyro_z) > car_config::kOpposingGyroRecoveryLimitDps) {
+                    target_gyro_z = std::copysign(car_config::kOpposingGyroRecoveryLimitDps, target_gyro_z);
+                    delta_target = target_gyro_z - last_target_gyro_z;
+                }
+                --opposing_gyro_recovery_frames;
+            } else if (!s_curve_active) {
+                opposing_gyro_recovery_frames = 0;
+            }
             last_target_gyro_z = target_gyro_z;
             last_steer_error = steer_error;
         }
@@ -410,6 +451,12 @@ void speed_dif_cascade()
 
         // 【关键修复】恢复 motor.cpp 中的最大差速限幅，防止内环输出的差速过大导致转弯太早/过猛内切
         float max_diff = Speed_Goal * MAX_DIFF_RATIO;
+        if (s_curve_active && max_diff < car_config::kSCurveMinDiff) {
+            max_diff = car_config::kSCurveMinDiff;
+        }
+        if (extreme_turn_active && max_diff < car_config::kExtremeTurnMinDiff) {
+            max_diff = car_config::kExtremeTurnMinDiff;
+        }
         dbg_max_diff = max_diff;
         dbg_diff_limited = 0;
         if (diff_speed > max_diff)  {
@@ -476,6 +523,12 @@ void speed_dif_cascade()
             last_steer_error = steer_error;
             
             float max_diff = Speed_Goal * MAX_DIFF_RATIO;
+            if (s_curve_active && max_diff < car_config::kSCurveMinDiff) {
+                max_diff = car_config::kSCurveMinDiff;
+            }
+            if (extreme_turn_active && max_diff < car_config::kExtremeTurnMinDiff) {
+                max_diff = car_config::kExtremeTurnMinDiff;
+            }
             dbg_max_diff = max_diff;
             dbg_diff_limited = 0;
             if (fallback_diff > max_diff)  {
