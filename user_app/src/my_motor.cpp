@@ -281,23 +281,54 @@ void speed_dif_cascade()
     dbg_raw_steer_error = raw_steer_error;
     dbg_dt = dt;
 
+    // 限制单帧视觉跳边：真实 Raw 仍写入调试量，控制链路使用限速后的值。
+    static bool raw_steer_initialized = false;
+    static float last_control_raw_steer_error = 0.0f;
+    float control_raw_steer_error = raw_steer_error;
+    if (!raw_steer_initialized) {
+        raw_steer_initialized = true;
+        last_control_raw_steer_error = raw_steer_error;
+    } else {
+        float raw_delta = raw_steer_error - last_control_raw_steer_error;
+        if (std::fabs(raw_delta) > car_config::kSteerRawJumpThreshold) {
+            raw_delta = (raw_delta > 0.0f) ?
+                        car_config::kSteerRawMaxStepPerFrame :
+                        -car_config::kSteerRawMaxStepPerFrame;
+            control_raw_steer_error = last_control_raw_steer_error + raw_delta;
+        }
+        last_control_raw_steer_error = control_raw_steer_error;
+    }
+
     // 【新增低通滤波】彻底解决摄像头噪点引起的齿轮咔咔响！
     static float steer_error = 0;
     float alpha = car_config::kSteerFilterAlpha;
-    bool fast_flip = (raw_steer_error * steer_error < 0.0f) &&
-                     (std::fabs(raw_steer_error) > car_config::kSteerFastFlipRawThreshold) &&
-                     (std::fabs(raw_steer_error - steer_error) > car_config::kSteerFastFlipGap);
+    bool fast_flip = (control_raw_steer_error * steer_error < 0.0f) &&
+                     (std::fabs(control_raw_steer_error) > car_config::kSteerFastFlipRawThreshold) &&
+                     (std::fabs(control_raw_steer_error - steer_error) > car_config::kSteerFastFlipGap);
     if (fast_flip) {
         alpha = car_config::kSteerFastFlipAlpha;
     }
-    steer_error = steer_error * (1.0f - alpha) + raw_steer_error * alpha;
+    float next_steer_error = steer_error * (1.0f - alpha) + control_raw_steer_error * alpha;
     bool extreme_exit_unwind =
-        (std::fabs(raw_steer_error) <= car_config::kExtremeTurnExitRawThreshold) &&
+        (std::fabs(control_raw_steer_error) <= car_config::kExtremeTurnExitRawThreshold) &&
         (std::fabs(steer_error) >= car_config::kExtremeTurnExitFiltThreshold);
     if (extreme_exit_unwind) {
-        steer_error = steer_error * (1.0f - car_config::kExtremeTurnExitFilterAlpha) +
-                      raw_steer_error * car_config::kExtremeTurnExitFilterAlpha;
+        next_steer_error = steer_error * (1.0f - car_config::kExtremeTurnExitFilterAlpha) +
+                           control_raw_steer_error * car_config::kExtremeTurnExitFilterAlpha;
     }
+    float max_steer_step = car_config::kSteerFilterMaxStepPerFrame;
+    if ((next_steer_error * steer_error < 0.0f) &&
+        (std::fabs(next_steer_error) > car_config::kSCurveRawMinError) &&
+        (std::fabs(steer_error) > car_config::kSCurveRawMinError)) {
+        max_steer_step = car_config::kSteerFilterSignFlipMaxStepPerFrame;
+    }
+    if (extreme_exit_unwind && max_steer_step < car_config::kSteerRawMaxStepPerFrame) {
+        max_steer_step = car_config::kSteerRawMaxStepPerFrame;
+    }
+    float steer_step = next_steer_error - steer_error;
+    if (steer_step > max_steer_step) steer_step = max_steer_step;
+    if (steer_step < -max_steer_step) steer_step = -max_steer_step;
+    steer_error += steer_step;
 
     // 【开机防暴走保护】
     static bool camera_is_ready = false;
@@ -319,17 +350,17 @@ void speed_dif_cascade()
     dbg_diff_steer = diff_steer;
     dbg_deadband_active = (abs(steer_error) < DEAD_BAND) ? 1 : 0;
 
-    bool raw_filter_gap = (std::fabs(raw_steer_error - steer_error) > car_config::kSCurveRawFiltGap) &&
-                          (std::fabs(raw_steer_error) > car_config::kSCurveRawMinError);
-    bool raw_filter_sign_conflict = (raw_steer_error * steer_error < 0.0f) &&
-                                    (std::fabs(raw_steer_error) > car_config::kSCurveRawMinError);
-    bool early_sign_cross = (raw_steer_error * steer_error < 0.0f) &&
-                            (std::fabs(raw_steer_error) > car_config::kSCurveEarlyRawMinError) &&
+    bool raw_filter_gap = (std::fabs(control_raw_steer_error - steer_error) > car_config::kSCurveRawFiltGap) &&
+                          (std::fabs(control_raw_steer_error) > car_config::kSCurveRawMinError);
+    bool raw_filter_sign_conflict = (control_raw_steer_error * steer_error < 0.0f) &&
+                                    (std::fabs(control_raw_steer_error) > car_config::kSCurveRawMinError);
+    bool early_sign_cross = (control_raw_steer_error * steer_error < 0.0f) &&
+                            (std::fabs(control_raw_steer_error) > car_config::kSCurveEarlyRawMinError) &&
                             (std::fabs(steer_error) > car_config::kSCurveEarlyFiltMinError) &&
                             (std::fabs(diff_steer) > car_config::kSCurveEarlyDerivativeThreshold);
     bool fast_steer_change = (std::fabs(diff_steer) > car_config::kSCurveDerivativeThreshold) &&
-                             (std::fabs(raw_steer_error) > car_config::kSCurveRawMinError);
-    bool sharp_raw_error = std::fabs(raw_steer_error) > car_config::kSCurveSharpRawThreshold;
+                             (std::fabs(control_raw_steer_error) > car_config::kSCurveRawMinError);
+    bool sharp_raw_error = std::fabs(control_raw_steer_error) > car_config::kSCurveSharpRawThreshold;
     bool s_curve_prepare = raw_filter_gap || raw_filter_sign_conflict ||
                            early_sign_cross || fast_steer_change || sharp_raw_error;
     if (s_curve_prepare) {
@@ -356,6 +387,13 @@ void speed_dif_cascade()
 
     Mpu6050Data imu_data;
     if(imu.read_processed_data(imu_data)) {
+        static float last_valid_gyro_z = 0.0f;
+        if (std::fabs(imu_data.gyro_z) > car_config::kGyroRawSpikeRejectDps) {
+            imu_data.gyro_z = last_valid_gyro_z;
+        } else {
+            last_valid_gyro_z = imu_data.gyro_z;
+        }
+
         float target_gyro_z = 0.0f;
         float visual_pd_out = 0.0f;
         float delta_target = 0.0f;
