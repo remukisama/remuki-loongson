@@ -43,5 +43,23 @@ void lq_pos_pid_tuning_demo(void);  // 31. 联合调参位置环和角速度环
 void lq_gyro_loop_verify_demo(void); // 29. 角速度环输出差速验证Demo
 void lq_camera_capture_demo(void); // 摄像头拍照测试
 void lq_udp_img_trans_ex_demo(void); // 32. UDP 图像传输测试（增强版摄像头）
+void lq_parameter_step_tuning_demo(void); // 33. PARAMETER_TUNING_METHODS.md 一体化分步调参Demo
+int lq_param_test_00_precheck_config(void);
+int lq_param_test_01_motor_encoder_direction(void);
+int lq_param_test_02_camera_center_angle_static(void);
+int lq_param_test_03_exposure_otsu_quality(void);
+int lq_param_test_03_exposure_hsv_quality(void);
+int lq_param_test_04_roi_scan_straight(void);
+int lq_param_test_05_speed_loop_airborne(void);
+int lq_param_test_06_low_speed_visual_gyro_closed_loop(void);
+int lq_param_test_07_speed_up_regression(void);
+int lq_param_test_08_element_debug(void);
+int lq_param_test_09_voltage_light_regression(void);
+int lq_param_test_10_gyro_static_noise(void);
+int lq_param_flow_visual(void);
+int lq_param_flow_airborne(void);
+int lq_param_flow_sensor(void);
+int lq_param_flow_low_speed(void);
+int lq_param_flow_element(void);
 
 #endif
