@@ -17,6 +17,8 @@ int imgdisplay[60][80];//打印到中端图像数组
 
 uint8 Garage_Location_Flag=0;//斑马线累积初始次数
 bool g_enable_element_process = true; // 默认启用元素判断与元素处理
+ElementScene_e g_element_scene = ElementScene_Normal; // 当前元素场景锁
+uint8 g_element_cooldown_frames = 0;                  // 元素退出后的识别冷却
 uint8 Garage_num=2;//斑马线设定次数
 int Zebra_num1=10000;//斑马线编码器计数设定值
 int Zebra_num2=1000;//停车斑马线编码器计数设定值
@@ -51,6 +53,8 @@ int Right_RingsFlag_Point1_Ysite, Right_RingsFlag_Point2_Ysite; //右圆环判�
 uint8 Ring_Help_Flag = 0;                      //进环辅助标志
 static uint8 left_ring_confirm_frames = 0;     // 左圆环连续确认帧数
 static uint8 right_ring_confirm_frames = 0;    // 右圆环连续确认帧数
+static uint8 left_ring_exit_confirm_frames = 0; // 左圆环退出连续确认帧数
+static uint8 right_ring_exit_confirm_frames = 0;// 右圆环退出连续确认帧数
 ImageFlagtypedef ImageFlag;
 int Point_Xsite,Point_Ysite;                   //拐点横纵坐标
 int Repair_Point_Xsite,Repair_Point_Ysite;     //补线点横纵坐标
@@ -62,6 +66,61 @@ uint8 Half_Road_Wide[60] =                      //直到赛道半宽
        23,23,23,24,24,25,25,25,26,26,
        27,28,28,28,29,30,31,31,31,32,
 };
+
+static void Element_SyncStatusFromFlag(void)
+{
+  ImageStatus.image_element_rings = ImageFlag.image_element_rings;
+  ImageStatus.image_element_rings_flag = ImageFlag.image_element_rings_flag;
+  ImageStatus.ring_big_small = ImageFlag.ring_big_small;
+}
+
+static void Element_ResetRingCounters(void)
+{
+  left_ring_confirm_frames = 0;
+  right_ring_confirm_frames = 0;
+  left_ring_exit_confirm_frames = 0;
+  right_ring_exit_confirm_frames = 0;
+}
+
+static void Element_ResetRingEntryCounters(void)
+{
+  left_ring_confirm_frames = 0;
+  right_ring_confirm_frames = 0;
+}
+
+static void Element_BeginRing(uint8 ring_side)
+{
+  ImageFlag.image_element_rings = ring_side;
+  ImageFlag.image_element_rings_flag = 1;
+  ImageFlag.ring_big_small = 1;
+  g_element_scene = (ring_side == 1) ? ElementScene_LeftRing : ElementScene_RightRing;
+  ImageStatus.Road_type = (ring_side == 1) ? LeftCirque : RightCirque;
+  Element_ResetRingCounters();
+  Element_SyncStatusFromFlag();
+}
+
+static void Element_FinishRing(void)
+{
+  ImageFlag.image_element_rings_flag = 0;
+  ImageFlag.image_element_rings = 0;
+  ImageFlag.ring_big_small = 0;
+  g_element_scene = ElementScene_Normal;
+  g_element_cooldown_frames = car_config::kElementCooldownFrames;
+  ImageStatus.Road_type = Normol;
+  Element_ResetRingCounters();
+  Element_SyncStatusFromFlag();
+  circle_num++;
+}
+
+static bool Element_CanDetectNewScene(void)
+{
+  return g_enable_element_process
+      && g_element_scene == ElementScene_Normal
+      && g_element_cooldown_frames == 0
+      && ImageFlag.image_element_rings == 0
+      && ImageStatus.Road_type != Ramp
+      && ImageStatus.Road_type != Barn_in;
+}
 
 void Data_Settings(void)           //参数赋值
 {
@@ -81,6 +140,13 @@ void Data_Settings(void)           //参数赋值
   ImageStatus.Barn_Flag = 0;
   ImageStatus.straight_acc = 0;
   ImageStatus.Road_type= zero ;
+  ImageFlag.image_element_rings = 0;
+  ImageFlag.image_element_rings_flag = 0;
+  ImageFlag.ring_big_small = 0;
+  g_element_scene = ElementScene_Normal;
+  g_element_cooldown_frames = 0;
+  Element_ResetRingCounters();
+  Element_SyncStatusFromFlag();
 
   ImageStatus.TowPoint = car_config::kImageTowPoint;                //前瞻          前瞻29 速度 220
   ImageStatus.Threshold_static = car_config::kImageThresholdStatic;  //静态阈值  40-80
@@ -1324,7 +1390,7 @@ void Element_Judgment_Left_Rings()
 
     if (left_candidate && !right_side_suspicious)
     {
-        if (left_ring_confirm_frames < 3)
+        if (left_ring_confirm_frames < car_config::kElementRingConfirmFrames)
             left_ring_confirm_frames++;
     }
     else
@@ -1332,14 +1398,9 @@ void Element_Judgment_Left_Rings()
         left_ring_confirm_frames = 0;
     }
 
-    if (left_ring_confirm_frames >= 2)
+    if (left_ring_confirm_frames >= car_config::kElementRingConfirmFrames)
     {
-        ImageFlag.image_element_rings = 1;
-        ImageFlag.image_element_rings_flag = 1;
-        ImageFlag.ring_big_small = 1;
-        ImageStatus.Road_type = LeftCirque;
-        left_ring_confirm_frames = 0;
-        right_ring_confirm_frames = 0;
+        Element_BeginRing(1);
     }
 
     Ring_Help_Flag = 0;
@@ -1492,7 +1553,7 @@ void Element_Judgment_Right_Rings()
 
     if (right_candidate && !left_side_suspicious)
     {
-        if (right_ring_confirm_frames < 3)
+        if (right_ring_confirm_frames < car_config::kElementRingConfirmFrames)
             right_ring_confirm_frames++;
     }
     else
@@ -1500,14 +1561,9 @@ void Element_Judgment_Right_Rings()
         right_ring_confirm_frames = 0;
     }
 
-    if (right_ring_confirm_frames >= 2)
+    if (right_ring_confirm_frames >= car_config::kElementRingConfirmFrames)
     {
-        ImageFlag.image_element_rings = 2;
-        ImageFlag.image_element_rings_flag = 1;
-        ImageFlag.ring_big_small = 1;
-        ImageStatus.Road_type = RightCirque;
-        right_ring_confirm_frames = 0;
-        left_ring_confirm_frames = 0;
+        Element_BeginRing(2);
     }
 
     Ring_Help_Flag = 0;
@@ -1673,13 +1729,18 @@ void Element_Handle_Left_Rings()
             }
             if(num < 5)
             {
-//                ImageStatus.Road_type = 0;   //出环处理完道路类型清0
-                ImageFlag.image_element_rings_flag = 0;
-                ImageFlag.image_element_rings = 0;
-                ImageFlag.ring_big_small = 0;
-                ImageStatus.Road_type = Normol;
+                if (left_ring_exit_confirm_frames < car_config::kElementRingExitConfirmFrames)
+                    left_ring_exit_confirm_frames++;
+            }
+            else
+            {
+                left_ring_exit_confirm_frames = 0;
+            }
+
+            if (left_ring_exit_confirm_frames >= car_config::kElementRingExitConfirmFrames)
+            {
+                Element_FinishRing();
                 //wireless_uart_send_byte(0);
-                circle_num ++;
             }
     }
 
@@ -1971,13 +2032,18 @@ void Element_Handle_Right_Rings()
         // szr=num;
         if(num < 10)
         {
-           // ImageStatus.Road_type = 0;   //出环处理完道路类型清0
-            ImageFlag.image_element_rings_flag = 0;
-            ImageFlag.image_element_rings = 0;
-            ImageFlag.ring_big_small = 0;
-            ImageStatus.Road_type = Normol;
+            if (right_ring_exit_confirm_frames < car_config::kElementRingExitConfirmFrames)
+                right_ring_exit_confirm_frames++;
+        }
+        else
+        {
+            right_ring_exit_confirm_frames = 0;
+        }
+
+        if (right_ring_exit_confirm_frames >= car_config::kElementRingExitConfirmFrames)
+        {
+            Element_FinishRing();
 //            Front_Ring_Continue_Count++;
-            circle_num ++;
         }
     }
     /***************************************处理**************************************/
@@ -2212,6 +2278,7 @@ void Element_Handle()
       Element_Handle_Right_Rings();
  
 //      Element_Handle_Zebra(); //斑马线停车处理
+  Element_SyncStatusFromFlag();
 }
 
 //用于加速的直道检测
@@ -2308,11 +2375,19 @@ void Element_Test()
 //    Element_Judgment_Zebra();
 //  }
 
+  if (!Element_CanDetectNewScene())
+  {
+    Element_ResetRingEntryCounters();
+    return;
+  }
 
   if (ImageStatus.Road_type != Ramp)/*&& circle_num < 2 */    //圆环检测//&& ImageStatus.Road_type != Ramp    
   {
     Element_Judgment_Left_Rings();           //左圆环检测
-    Element_Judgment_Right_Rings();          //右圆环检测
+    if (g_element_scene == ElementScene_Normal)
+    {
+      Element_Judgment_Right_Rings();        //右圆环检测
+    }
   }
 
   
@@ -2369,6 +2444,11 @@ static void get_imgdisplay()
 
 void imageprocess(void)
 {
+    if (g_element_cooldown_frames > 0)
+    {
+      g_element_cooldown_frames--;
+    }
+
     ImageStatus.OFFLine = 2;  //这个值根据真实距离得到，必须进行限制//图像顶边
     ImageStatus.WhiteLine = 0;//双边丢边数
     for (Ysite = 59; Ysite >= ImageStatus.OFFLine; Ysite--)

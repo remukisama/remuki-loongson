@@ -31,6 +31,8 @@ extern ImageStatustypedef ImageStatus;
 extern ImageDealDatatypedef ImageDeal[60];
 extern ImageFlagtypedef ImageFlag;
 extern bool g_enable_element_process;
+extern ElementScene_e g_element_scene;
+extern uint8 g_element_cooldown_frames;
 extern int img1[60][80];
 extern int imgdisplay[60][80];
 extern int Left_RingsFlag_Point1_Ysite;
@@ -77,6 +79,7 @@ extern void timer_thread_1();
 extern void emergency_stop();
 extern bool image_cv_Init(void);
 extern bool image_cv_zip(void);
+extern void image_cv_Deinit(void);
 extern void imageprocess(void);
 extern void motor_Init(void);
 extern void Speed_decision(void);
@@ -87,8 +90,6 @@ extern int encoder_num_L(void);
 extern int encoder_num_R(void);
 extern void motor_Duty_L(int duty);
 extern void motor_Duty_R(int duty);
-
-static void image_cv_Deinit(void) {}
 
 namespace param_step_demo {
 
@@ -192,6 +193,17 @@ static const char *vision_algorithm_name() {
     return "HSV_BLUE_INVERT";
 }
 
+static const char *element_scene_name(ElementScene_e scene) {
+    switch (scene) {
+        case ElementScene_Normal: return "Normal";
+        case ElementScene_LeftRing: return "LeftRing";
+        case ElementScene_RightRing: return "RightRing";
+        case ElementScene_Zebra: return "Zebra";
+        case ElementScene_Garage: return "Garage";
+        default: return "Unknown";
+    }
+}
+
 static void print_config_snapshot() {
     printf("\n[CFG] camera: %dx%d fps=%d roi=(%d,%d,%d,%d) exposure=%d algo=%s HSV=[H%d-%d S%d-%d V%d-%d]\n",
            car_config::kCameraWidth, car_config::kCameraHeight, car_config::kCameraFps,
@@ -200,12 +212,23 @@ static void print_config_snapshot() {
            car_config::kBlueHueLower, car_config::kBlueHueUpper,
            car_config::kBlueSaturationLower, car_config::kBlueSaturationUpper,
            car_config::kBlueValueLower, car_config::kBlueValueUpper);
+    printf("[CFG] vision_binary: algorithm=%d(0=HSV 1=GRAY_STATIC 2=OTSU) otsu_blur=%d morph=%d\n",
+           car_config::kImageAlgorithm,
+           car_config::kImageOtsuBlurKernel,
+           car_config::kImageMorphKernel);
     printf("[CFG] image: middle=%d tow=%d scan=%d cross_scan=%d static_th=%d straight(var<%d off<=%d L<%d R<%d)\n",
            car_config::kImageMiddleLine, car_config::kImageTowPoint,
            car_config::kImageScanInterval, car_config::kImageScanIntervalCross,
            car_config::kImageThresholdStatic,
            car_config::kStraightVarianceAccThreshold, car_config::kStraightOfflineMax,
            car_config::kStraightLeftLineMax, car_config::kStraightRightLineMax);
+    printf("[CFG] element: ring_confirm=%d exit_confirm=%d cooldown=%d enable_runtime=%d scene=%s cooldown_now=%u\n",
+           car_config::kElementRingConfirmFrames,
+           car_config::kElementRingExitConfirmFrames,
+           car_config::kElementCooldownFrames,
+           g_enable_element_process,
+           element_scene_name(g_element_scene),
+           g_element_cooldown_frames);
     printf("[CFG] control: speed(P/I/D=%.1f/%.1f/%.1f curve=%d straight=%d maxDiff=%.2f minWheel=%d) steer(Kp=%.2f Kd=%.2f alpha=%.2f) gyro(P=%.3f D=%.4f alpha=%.2f ff=%.3f)\n\n",
            car_config::kSpeedPidP, car_config::kSpeedPidI, car_config::kSpeedPidD,
            car_config::kCurveSpeedGoal, car_config::kStraightSpeedGoal,
@@ -773,14 +796,21 @@ int test_07_speed_up_regression(int seconds = 12) {
 // -----------------------------------------------------------------------------
 int test_08_element_debug(int seconds = 25) {
     printf("\n========== TEST 08 element_debug 元素判断/处理 ==========" "\n");
-    printf("[运行] 只在普通循迹稳定后调用。开启元素判断，低速经过十字/圆环区域，输出Road_type状态变化。seconds=%d\n", seconds);
+    printf("[运行] 只在普通循迹稳定后调用。开启元素判断，低速经过十字/圆环区域，输出Road_type、Scene、ring/cooldown状态。seconds=%d\n", seconds);
+    printf("[CFG_T08] ring_confirm=%d exit_confirm=%d cooldown=%d。入口误判多就增大confirm；出环卡住就减小exit_confirm；刚出环复触发就增大cooldown。\n",
+           car_config::kElementRingConfirmFrames,
+           car_config::kElementRingExitConfirmFrames,
+           car_config::kElementCooldownFrames);
     if (!ensure_camera_ready()) return -1;
     init_control_for_motor_tests();
     g_enable_element_process = true;
 
     std::thread ctrl_thread(timer_thread_1);
     int last_road = -999;
-    int changes = 0, special_cnt = 0, unknown_cnt = 0, img_bad_cnt = 0, img_warn_cnt = 0, samples = 0;
+    ElementScene_e last_scene = ElementScene_Normal;
+    bool has_last_scene = false;
+    int changes = 0, scene_changes = 0, special_cnt = 0, scene_special_cnt = 0, cooldown_cnt = 0;
+    int unknown_cnt = 0, img_bad_cnt = 0, img_warn_cnt = 0, samples = 0;
     auto start = std::chrono::steady_clock::now();
     auto last_print = start;
     while (!exit_flag) {
@@ -797,10 +827,27 @@ int test_08_element_debug(int seconds = 25) {
             last_road = ImageStatus.Road_type;
             changes++;
         }
+        if (!has_last_scene) {
+            last_scene = g_element_scene;
+            has_last_scene = true;
+        } else if (g_element_scene != last_scene) {
+            printf("[T08_EVENT] t=%.2f SceneChange %s -> %s Road=%s ring=%d/%d Cool=%u Err=%d OFF=%d L/R=%d/%d\n",
+                   std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() / 1000.0,
+                   element_scene_name(last_scene), element_scene_name(g_element_scene),
+                   road_type_name(ImageStatus.Road_type),
+                   ImageFlag.image_element_rings, ImageFlag.image_element_rings_flag,
+                   g_element_cooldown_frames,
+                   ImageStatus.MiddleLine - ImageStatus.Det_True,
+                   ImageStatus.OFFLine, ImageStatus.Left_Line, ImageStatus.Right_Line);
+            last_scene = g_element_scene;
+            scene_changes++;
+        }
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_print).count() >= 200) {
             last_print = now;
             samples++;
             if (ImageStatus.Road_type == zero) unknown_cnt++;
+            if (g_element_scene != ElementScene_Normal) scene_special_cnt++;
+            if (g_element_cooldown_frames > 0) cooldown_cnt++;
             bool special_seen = (ImageStatus.Road_type == Cross ||
                                  ImageStatus.Road_type == Cross_ture ||
                                  ImageStatus.Road_type == Ramp ||
@@ -816,8 +863,10 @@ int test_08_element_debug(int seconds = 25) {
                                    std::abs(ImageStatus.MiddleLine - ImageStatus.Det_True) > 26);
             if (edge_warn) img_warn_cnt++;
             if (severe_img_bad) img_bad_cnt++;
-            printf("[T08] Road=%s Det=%d Err=%d OFF=%d L/R=%d/%d ring=%d/%d lp=%d/%d rp=%d/%d straight=%d/%d D=%.1f Tgt=%.1f GErr=%.1f Enc=%.0f/%.0f\n",
-                   road_type_name(ImageStatus.Road_type), ImageStatus.Det_True,
+            printf("[T08] Road=%s Scene=%s Cool=%u Det=%d Err=%d OFF=%d L/R=%d/%d ring=%d/%d lp=%d/%d rp=%d/%d straight=%d/%d D=%.1f Tgt=%.1f GErr=%.1f Enc=%.0f/%.0f\n",
+                   road_type_name(ImageStatus.Road_type),
+                   element_scene_name(g_element_scene), g_element_cooldown_frames,
+                   ImageStatus.Det_True,
                    ImageStatus.MiddleLine - ImageStatus.Det_True, ImageStatus.OFFLine,
                    ImageStatus.Left_Line, ImageStatus.Right_Line,
                    ImageFlag.image_element_rings, ImageFlag.image_element_rings_flag,
@@ -837,13 +886,19 @@ int test_08_element_debug(int seconds = 25) {
     double img_warn_rate = samples ? (double)img_warn_cnt / samples : 0.0;
     double unknown_rate = samples ? (double)unknown_cnt / samples : 0.0;
     double special_rate = samples ? (double)special_cnt / samples : 0.0;
-    printf("[T08_SUMMARY] samples=%d road_changes=%d special_rate=%.2f unknown_rate=%.2f img_bad_rate=%.2f img_warn_rate=%.2f\n", samples, changes, special_rate, unknown_rate, img_bad_rate, img_warn_rate);
-    printf("[调参意义] road_changes过多=误判/抖动；special_rate=0 表示本轮没跑到元素或元素漏检；img_bad=严重丢线/检测贴边；img_warn=元素区单侧边界警告，需结合是否稳定通过。\n");
+    double scene_special_rate = samples ? (double)scene_special_cnt / samples : 0.0;
+    double cooldown_rate = samples ? (double)cooldown_cnt / samples : 0.0;
+    printf("[T08_SUMMARY] samples=%d road_changes=%d scene_changes=%d special_rate=%.2f scene_special_rate=%.2f cooldown_rate=%.2f unknown_rate=%.2f img_bad_rate=%.2f img_warn_rate=%.2f final_scene=%s final_cool=%u\n",
+           samples, changes, scene_changes, special_rate, scene_special_rate, cooldown_rate,
+           unknown_rate, img_bad_rate, img_warn_rate,
+           element_scene_name(g_element_scene), g_element_cooldown_frames);
+    printf("[调参意义] road_changes/scene_changes过多=误判或状态抖动；scene_special_rate能看场景锁是否进入元素；cooldown_rate能看出环后保护是否生效；special_rate=0 表示本轮没跑到元素或元素漏检；img_bad=严重丢线/检测贴边。\n");
+    printf("[元素参数] kElementRingConfirmFrames 控制入环连续确认；kElementRingExitConfirmFrames 控制出环连续确认；kElementCooldownFrames 控制元素退出后多久不再识别新元素。\n");
     printf("[RETURN] 0=元素状态可继续细调；1=误判频繁；2=疑似漏检；3=图像不稳。\n");
     if (img_bad_rate > 0.20) return 3;
-    if (changes > seconds * 2) return 1;
-    if (special_cnt == 0) return 2;
-    if (changes <= 1 && unknown_rate < 0.10) return 2;
+    if (changes > seconds * 2 || scene_changes > seconds) return 1;
+    if (special_cnt == 0 && scene_special_cnt == 0) return 2;
+    if (changes <= 1 && scene_changes == 0 && unknown_rate < 0.10) return 2;
     return 0;
 }
 

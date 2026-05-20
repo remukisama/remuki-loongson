@@ -2,6 +2,7 @@
 #include <opencv2/opencv.hpp>
 #include <string>
 #include <chrono>
+#include "car_config.hpp"
 
 /********************************************************************************
  * @file    24_lq_line_patrol_debug_demo.cpp
@@ -21,6 +22,9 @@ static const uint8_t     JPEG_QUALITY = 50;               // 压缩质量(1~100)
 extern int img1[60][80];
 extern ImageDealDatatypedef ImageDeal[60];
 extern ImageStatustypedef ImageStatus;
+extern ImageFlagtypedef ImageFlag;
+extern ElementScene_e g_element_scene;
+extern uint8 g_element_cooldown_frames;
 
 // 格式化输出路况类型 (注: OpenCV原生putText不支持直接渲染中文，故图传画面补充拼音，中文写在代码注释中)
 static std::string get_road_type_string(int road_type) {
@@ -52,6 +56,17 @@ static std::string get_ring_state_string(int flag) {
         case 8: return "8: Force Exit (XianChu)";
         case 9: return "9: Exit Wait (QueRen)";
         default: return "State_" + std::to_string(flag);
+    }
+}
+
+static std::string get_element_scene_string(ElementScene_e scene) {
+    switch(scene) {
+        case ElementScene_Normal: return "Normal";
+        case ElementScene_LeftRing: return "LeftRing";
+        case ElementScene_RightRing: return "RightRing";
+        case ElementScene_Zebra: return "Zebra";
+        case ElementScene_Garage: return "Garage";
+        default: return "Scene_" + std::to_string(static_cast<int>(scene));
     }
 }
 
@@ -147,7 +162,7 @@ void lq_line_patrol_debug_demo(void)
         cv::resize(debug_frame, display_frame, cv::Size(320, 240), 0, 0, cv::INTER_NEAREST);
 
         // 7. 在图像上写入调试字符串信息
-        char text_buf[64];
+        char text_buf[96];
         std::string road_str = get_road_type_string(ImageStatus.Road_type);
         
         sprintf(text_buf, "Road: %s", road_str.c_str());
@@ -162,6 +177,19 @@ void lq_line_patrol_debug_demo(void)
         sprintf(text_buf, "RingState: %s", get_ring_state_string(ImageFlag.image_element_rings_flag).c_str());
         cv::putText(display_frame, text_buf, cv::Point(10, 95), cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 2);
 
+        sprintf(text_buf, "Scene:%s Ring:%d/%d Cool:%u",
+                get_element_scene_string(g_element_scene).c_str(),
+                ImageFlag.image_element_rings,
+                ImageFlag.image_element_rings_flag,
+                g_element_cooldown_frames);
+        cv::putText(display_frame, text_buf, cv::Point(10, 120), cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0, 255, 255), 1);
+
+        sprintf(text_buf, "Cfg In:%d Out:%d CD:%d",
+                car_config::kElementRingConfirmFrames,
+                car_config::kElementRingExitConfirmFrames,
+                car_config::kElementCooldownFrames);
+        cv::putText(display_frame, text_buf, cv::Point(10, 140), cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(255, 255, 0), 1);
+
         // 8. 通过 UDP 发送最终图像
         ssize_t sent = udp_client.udp_send_image(display_frame, JPEG_QUALITY);
         if (sent < 0) {
@@ -169,4 +197,3 @@ void lq_line_patrol_debug_demo(void)
         }
     }
 }
-

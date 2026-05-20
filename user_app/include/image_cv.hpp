@@ -10,5 +10,6 @@ extern char img5[120][160];
 
 bool image_cv_Init(void);
 bool image_cv_zip(void);
+void image_cv_Deinit(void);
 
 #endif // !__

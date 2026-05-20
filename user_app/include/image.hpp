@@ -45,6 +45,17 @@ typedef enum
   Barn_in,      //入库
 } RoadType_e;
 
+typedef enum
+{
+  ElementScene_Normal = 0,
+  ElementScene_LeftRing,
+  ElementScene_RightRing,
+  ElementScene_Zebra,
+  ElementScene_Garage,
+} ElementScene_e;
+
+extern ElementScene_e g_element_scene;       // 当前元素场景锁，避免多个元素同时抢状态
+extern uint8 g_element_cooldown_frames;      // 元素退出后的识别冷却帧数
 extern uint8 TP, TP_O1,TP_O2;
 extern uint8 Circle[5];
 
