@@ -44,11 +44,43 @@ extern float dbg_speed_err_r;
 extern int dbg_diff_limited;
 extern int dbg_imu_ok;
 extern int dbg_deadband_active;
+extern int dbg_el_detect_open;
+extern int dbg_el_l_block, dbg_el_l_geom, dbg_el_l_loss, dbg_el_l_susp;
+extern int dbg_el_l_confirm, dbg_el_l_p1, dbg_el_l_p2, dbg_el_l_help;
+extern int dbg_el_r_block, dbg_el_r_geom, dbg_el_r_loss, dbg_el_r_susp;
+extern int dbg_el_r_confirm, dbg_el_r_p1, dbg_el_r_p2, dbg_el_r_help;
 
 extern void timer_thread_1();
 extern void emergency_stop();
+extern bool image_cv_Init(void);
+extern bool image_cv_IsReady(void);
+extern void motor_Init(void);
+extern void Speed_decision(void);
 
 static constexpr bool kEnableElementProcessForTuning = true;
+static bool g_demo31_camera_ready = false;
+
+static bool ensure_demo31_camera_ready()
+{
+    if (!g_demo31_camera_ready) {
+        g_demo31_camera_ready = image_cv_IsReady() || image_cv_Init();
+        if (!g_demo31_camera_ready) {
+            printf("[DEMO31_FAIL] camera init failed.\n");
+            return false;
+        }
+    }
+    return true;
+}
+
+static void init_demo31_control()
+{
+    static bool inited = false;
+    if (!inited) {
+        motor_Init();
+        Speed_decision();
+        inited = true;
+    }
+}
 
 static const char *road_type_name(int road_type)
 {
@@ -95,6 +127,19 @@ void lq_pos_pid_tuning_demo(void)
            car_config::kElementRingConfirmFrames,
            car_config::kElementRingExitConfirmFrames,
            car_config::kElementCooldownFrames);
+    printf(">> 环岛识别参数: L(Lmin=%d Rmax=%d OFFmax=%d P2<%d) R(Rmin=%d Lmax=%d OFFmax=%d P2>%d) LossOnly>=%d RingCap=%.0f 未分类急弯限幅=%.0f@%.0f。\r\n",
+           car_config::kLeftRingMinLeftLost,
+           car_config::kLeftRingRightLineBlockMax,
+           car_config::kLeftRingOfflineBlockMax,
+           car_config::kLeftRingMaxPoint2Y,
+           car_config::kRightRingMinRightLost,
+           car_config::kRightRingLeftLineBlockMax,
+           car_config::kRightRingOfflineBlockMax,
+           car_config::kRightRingMinPoint2Y,
+           car_config::kRingLossOnlyMinLost,
+           car_config::kRingSceneGyroLimitDps,
+           car_config::kUnclassifiedTurnGyroLimitDps,
+           car_config::kUnclassifiedTurnTriggerError);
     printf(">> 看法: 普通弯误入圆环先增大入口确认；出环过早先增大出口确认；刚出环又误判先增大冷却。\r\n");
     printf(">> 你可以将小车架空或者以极低的速度在赛道上运行来观察以下终端数据。\r\n");
     printf(">> 看法: PD/Tgt 经常打满=视觉外环过猛或前瞻偏小；dT 经常顶住=目标角速度变化率正在限制。\r\n");
@@ -105,6 +150,8 @@ void lq_pos_pid_tuning_demo(void)
 
     const bool old_element_process = g_enable_element_process;
     g_enable_element_process = kEnableElementProcessForTuning;
+    if (!ensure_demo31_camera_ready()) return;
+    init_demo31_control();
 
     // 默认小车主线程
     std::thread threadA(timer_thread_1);
@@ -146,12 +193,34 @@ void lq_pos_pid_tuning_demo(void)
             unsigned char tail[4] = {0x00, 0x00, 0x80, 0x7f}; 
             
             // 以十进制直接打印方便在终端看，如果要上 VOFA+ 需打印成字节流，这里先用终端友好格式：
-            printf("Road:%-9s Scene:%-9s Ring:%d/%d Cool:%2u | Raw:%5.1f Filt:%5.1f dE:%5.1f | PD:%6.1f Tgt:%6.1f Cmd:%6.1f Real:%6.1f GF:%6.1f GErr:%6.1f dT:%5.1f | D0:%6.1f D:%6.1f Cap:%d Max:%4.1f | L:%5.1f R:%5.1f Enc:%4.0f/%4.0f SE:%5.1f/%5.1f | dt:%5.3f IMU:%d DB:%d\n",
+            printf("Road:%-9s Scene:%-9s Ring:%d/%d Cool:%2u Img L/R/OFF:%2d/%2d/%2d Det:%2d Mid:%2d EL:%d L[b/g/l/s/c p1/p2/h]=%d/%d/%d/%d/%d %d/%d/%d R[b/g/l/s/c p1/p2/h]=%d/%d/%d/%d/%d %d/%d/%d | Raw:%5.1f Filt:%5.1f dE:%5.1f | PD:%6.1f Tgt:%6.1f Cmd:%6.1f Real:%6.1f GF:%6.1f GErr:%6.1f dT:%5.1f | D0:%6.1f D:%6.1f Cap:%d Max:%4.1f | L:%5.1f R:%5.1f Enc:%4.0f/%4.0f SE:%5.1f/%5.1f | dt:%5.3f IMU:%d DB:%d\n",
                    road_type_name(ImageStatus.Road_type),
                    element_scene_name(g_element_scene),
                    ImageFlag.image_element_rings,
                    ImageFlag.image_element_rings_flag,
                    g_element_cooldown_frames,
+                   ImageStatus.Left_Line,
+                   ImageStatus.Right_Line,
+                   ImageStatus.OFFLine,
+                   ImageStatus.Det_True,
+                   ImageStatus.MiddleLine,
+                   dbg_el_detect_open,
+                   dbg_el_l_block,
+                   dbg_el_l_geom,
+                   dbg_el_l_loss,
+                   dbg_el_l_susp,
+                   dbg_el_l_confirm,
+                   dbg_el_l_p1,
+                   dbg_el_l_p2,
+                   dbg_el_l_help,
+                   dbg_el_r_block,
+                   dbg_el_r_geom,
+                   dbg_el_r_loss,
+                   dbg_el_r_susp,
+                   dbg_el_r_confirm,
+                   dbg_el_r_p1,
+                   dbg_el_r_p2,
+                   dbg_el_r_help,
                    dbg_raw_steer_error,
                    dbg_steer_error,
                    dbg_diff_steer,

@@ -184,10 +184,11 @@ void lq_line_patrol_debug_demo(void)
                 g_element_cooldown_frames);
         cv::putText(display_frame, text_buf, cv::Point(10, 120), cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0, 255, 255), 1);
 
-        sprintf(text_buf, "Cfg In:%d Out:%d CD:%d",
+        sprintf(text_buf, "Cfg In:%d Out:%d CD:%d H:%d",
                 car_config::kElementRingConfirmFrames,
                 car_config::kElementRingExitConfirmFrames,
-                car_config::kElementCooldownFrames);
+                car_config::kElementCooldownFrames,
+                car_config::kElementRingExitStraightHoldFrames);
         cv::putText(display_frame, text_buf, cv::Point(10, 140), cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(255, 255, 0), 1);
 
         // 8. 通过 UDP 发送最终图像

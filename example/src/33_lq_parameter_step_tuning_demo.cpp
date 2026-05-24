@@ -68,6 +68,11 @@ extern float dbg_speed_err_r;
 extern int dbg_diff_limited;
 extern int dbg_imu_ok;
 extern int dbg_deadband_active;
+extern int dbg_el_detect_open;
+extern int dbg_el_l_block, dbg_el_l_geom, dbg_el_l_loss, dbg_el_l_susp;
+extern int dbg_el_l_confirm, dbg_el_l_p1, dbg_el_l_p2, dbg_el_l_help;
+extern int dbg_el_r_block, dbg_el_r_geom, dbg_el_r_loss, dbg_el_r_susp;
+extern int dbg_el_r_confirm, dbg_el_r_p1, dbg_el_r_p2, dbg_el_r_help;
 int dbg_frame_count = 0;
 int dbg_spike_count = 0;
 float dbg_dt_max = 0.0f;
@@ -78,6 +83,7 @@ float dbg_raw_gyro_z = 0.0f;
 extern void timer_thread_1();
 extern void emergency_stop();
 extern bool image_cv_Init(void);
+extern bool image_cv_IsReady(void);
 extern bool image_cv_zip(void);
 extern void image_cv_Deinit(void);
 extern void imageprocess(void);
@@ -222,10 +228,21 @@ static void print_config_snapshot() {
            car_config::kImageThresholdStatic,
            car_config::kStraightVarianceAccThreshold, car_config::kStraightOfflineMax,
            car_config::kStraightLeftLineMax, car_config::kStraightRightLineMax);
-    printf("[CFG] element: ring_confirm=%d exit_confirm=%d cooldown=%d enable_runtime=%d scene=%s cooldown_now=%u\n",
+    printf("[CFG] element: ring_confirm=%d exit_confirm=%d cooldown=%d exit_hold=%d left(Lmin=%d Rmax=%d OFFmax=%d P2<%d) right(Rmin=%d Lmax=%d OFFmax=%d P2>%d) loss_only>=%d ring_cap=%.0f enable_runtime=%d scene=%s cooldown_now=%u\n",
            car_config::kElementRingConfirmFrames,
            car_config::kElementRingExitConfirmFrames,
            car_config::kElementCooldownFrames,
+           car_config::kElementRingExitStraightHoldFrames,
+           car_config::kLeftRingMinLeftLost,
+           car_config::kLeftRingRightLineBlockMax,
+           car_config::kLeftRingOfflineBlockMax,
+           car_config::kLeftRingMaxPoint2Y,
+           car_config::kRightRingMinRightLost,
+           car_config::kRightRingLeftLineBlockMax,
+           car_config::kRightRingOfflineBlockMax,
+           car_config::kRightRingMinPoint2Y,
+           car_config::kRingLossOnlyMinLost,
+           car_config::kRingSceneGyroLimitDps,
            g_enable_element_process,
            element_scene_name(g_element_scene),
            g_element_cooldown_frames);
@@ -242,7 +259,7 @@ static bool g_camera_ready = false;
 
 static bool ensure_camera_ready() {
     if (!g_camera_ready) {
-        g_camera_ready = image_cv_Init();
+        g_camera_ready = image_cv_IsReady() || image_cv_Init();
         if (!g_camera_ready) {
             printf("[FAIL] camera init failed. 检查摄像头设备/占用/供电。\n");
             return false;
@@ -797,10 +814,23 @@ int test_07_speed_up_regression(int seconds = 12) {
 int test_08_element_debug(int seconds = 25) {
     printf("\n========== TEST 08 element_debug 元素判断/处理 ==========" "\n");
     printf("[运行] 只在普通循迹稳定后调用。开启元素判断，低速经过十字/圆环区域，输出Road_type、Scene、ring/cooldown状态。seconds=%d\n", seconds);
-    printf("[CFG_T08] ring_confirm=%d exit_confirm=%d cooldown=%d。入口误判多就增大confirm；出环卡住就减小exit_confirm；刚出环复触发就增大cooldown。\n",
+    printf("[CFG_T08] ring_confirm=%d exit_confirm=%d cooldown=%d exit_hold=%d left(Lmin=%d Rmax=%d OFFmax=%d P2<%d) right(Rmin=%d Lmax=%d OFFmax=%d P2>%d) loss_only>=%d ring_cap=%.0f unclassified_limit=%.0f@%.0f。误判多增大confirm/loss_only；漏检先降低对应min或放宽对侧max/OFFmax。\n",
            car_config::kElementRingConfirmFrames,
            car_config::kElementRingExitConfirmFrames,
-           car_config::kElementCooldownFrames);
+           car_config::kElementCooldownFrames,
+           car_config::kElementRingExitStraightHoldFrames,
+           car_config::kLeftRingMinLeftLost,
+           car_config::kLeftRingRightLineBlockMax,
+           car_config::kLeftRingOfflineBlockMax,
+           car_config::kLeftRingMaxPoint2Y,
+           car_config::kRightRingMinRightLost,
+           car_config::kRightRingLeftLineBlockMax,
+           car_config::kRightRingOfflineBlockMax,
+           car_config::kRightRingMinPoint2Y,
+           car_config::kRingLossOnlyMinLost,
+           car_config::kRingSceneGyroLimitDps,
+           car_config::kUnclassifiedTurnGyroLimitDps,
+           car_config::kUnclassifiedTurnTriggerError);
     if (!ensure_camera_ready()) return -1;
     init_control_for_motor_tests();
     g_enable_element_process = true;
@@ -863,13 +893,30 @@ int test_08_element_debug(int seconds = 25) {
                                    std::abs(ImageStatus.MiddleLine - ImageStatus.Det_True) > 26);
             if (edge_warn) img_warn_cnt++;
             if (severe_img_bad) img_bad_cnt++;
-            printf("[T08] Road=%s Scene=%s Cool=%u Det=%d Err=%d OFF=%d L/R=%d/%d ring=%d/%d lp=%d/%d rp=%d/%d straight=%d/%d D=%.1f Tgt=%.1f GErr=%.1f Enc=%.0f/%.0f\n",
+            printf("[T08] Road=%s Scene=%s Cool=%u Det=%d Err=%d OFF=%d L/R=%d/%d ring=%d/%d EL=%d L[b/g/l/s/c p1/p2/h]=%d/%d/%d/%d/%d %d/%d/%d R[b/g/l/s/c p1/p2/h]=%d/%d/%d/%d/%d %d/%d/%d lp=%d/%d rp=%d/%d straight=%d/%d D=%.1f Tgt=%.1f GErr=%.1f Enc=%.0f/%.0f\n",
                    road_type_name(ImageStatus.Road_type),
                    element_scene_name(g_element_scene), g_element_cooldown_frames,
                    ImageStatus.Det_True,
                    ImageStatus.MiddleLine - ImageStatus.Det_True, ImageStatus.OFFLine,
                    ImageStatus.Left_Line, ImageStatus.Right_Line,
                    ImageFlag.image_element_rings, ImageFlag.image_element_rings_flag,
+                   dbg_el_detect_open,
+                   dbg_el_l_block,
+                   dbg_el_l_geom,
+                   dbg_el_l_loss,
+                   dbg_el_l_susp,
+                   dbg_el_l_confirm,
+                   dbg_el_l_p1,
+                   dbg_el_l_p2,
+                   dbg_el_l_help,
+                   dbg_el_r_block,
+                   dbg_el_r_geom,
+                   dbg_el_r_loss,
+                   dbg_el_r_susp,
+                   dbg_el_r_confirm,
+                   dbg_el_r_p1,
+                   dbg_el_r_p2,
+                   dbg_el_r_help,
                    Left_RingsFlag_Point1_Ysite, Left_RingsFlag_Point2_Ysite,
                    Right_RingsFlag_Point1_Ysite, Right_RingsFlag_Point2_Ysite,
                    ImageStatus.straight_acc, ImageStatus.straight_acc_flag,
@@ -1138,14 +1185,8 @@ int run_low_speed_pipeline(void) {
 
 int run_element_pipeline(void) {
     printf("\n========== FLOW E element_pipeline 元素/特殊赛道调试流程 ==========" "\n");
-    printf("[安全] 会让小车低速循迹并开启元素处理。先短距离经过普通直道确认图像，再依次低速通过十字/圆环/车库等元素。\n");
+    printf("[安全] 会让小车低速循迹并开启元素处理。当前版本跳过T02/T03/T04，只跑元素识别/处理T08。\n");
     int ret = 0;
-    ret = run_flow_step("T02 camera_center_angle_static", [](){ return test_02_camera_center_angle_static(); });
-    if (ret != 0) return 20 + ret;
-    ret = run_flow_step("T03 exposure_otsu_quality", [](){ return test_03_exposure_otsu_quality(); });
-    if (ret != 0) return 30 + ret;
-    ret = run_flow_step("T04 roi_scan_straight", [](){ return test_04_roi_scan_straight(); });
-    if (ret != 0) return 40 + ret;
     ret = run_flow_step("T08 element_debug", [](){ return test_08_element_debug(); });
     if (ret != 0) return 80 + ret;
     printf("[FLOW_SUMMARY] element_pipeline PASS。元素状态稳定，可以按具体元素继续细调或再做速度回归。\n");

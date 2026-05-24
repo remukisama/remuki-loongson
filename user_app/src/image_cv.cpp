@@ -20,6 +20,8 @@ char img5[120][160];
 //摄像头初始化，成功返回true，失败返回false；
 bool image_cv_Init(void)
 {
+    if (cam_ex) return true;
+
     // 摄像头格式、分辨率、帧率和设备路径统一在 car_config.hpp 中配置
     cam_ex = std::make_unique<lq_camera_ex>(
         car_config::kCameraWidth,
@@ -53,6 +55,11 @@ bool image_cv_Init(void)
     printf("frame:%d*%d, fps:%3f, format=0CPU_MJPG\n", frame_width, frame_height, frame_fps);
     sleep(1);
     return true;
+}
+
+bool image_cv_IsReady(void)
+{
+    return cam_ex != nullptr;
 }
 
 
