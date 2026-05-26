@@ -69,6 +69,11 @@ int main()
     signal(SIGSEGV, signal_handler);  // 捕获段错误(访问了空指针等崩溃)
     signal(SIGPIPE, SIG_IGN);         // 忽略破损管道信号(当图传UDP发送失败时忽略之，不退出程序)
 
+    // demo33 T07：低速基线已通过后，进入无元素速度提升回归。
+    int demo33_ret = lq_param_test_07_speed_up_regression();
+    printf("[MAIN] demo33 speed_up_regression ret=%d\n", demo33_ret);
+    return demo33_ret;
+
     // return 0;
 
     // InitMH();       //  模糊pid初始化
@@ -101,8 +106,10 @@ int main()
     // lq_car_steer_debug_demo();
     // 29: 角速度环(中环) 输出差速验证演示程序
     // lq_gyro_loop_verify_demo();
-    // 31: 联合位置环与角速度环调参，重点观测数据输出
-    lq_pos_pid_tuning_demo();
+    // 校赛无元素竞速模式：关闭元素识别/处理，只跑基础循迹闭环。
+    // 若要重新调元素，再改回 lq_camera_tft18_demo() 或 34 号元素专项 Demo。
+    g_enable_element_process = false;
+    printf("[RACE_MODE] no-element race mode: element process disabled, main loop enabled.\n");
     
     // 调用摄像头拍照测试Demo并阻断后面的逻辑
     // lq_camera_capture_demo();
@@ -110,14 +117,8 @@ int main()
     // 调用巡线算法图传调试 Demo 并阻断后面的逻辑
     // lq_line_patrol_debug_demo();
     // lq_udp_img_trans_ex_demo();
-    return 0;
-
-    // 以下代码因为上面的 return 0 已经不会被执行到了。
-    // 如果您需要更彻底，可以把这里到文件末尾的线程(timer_thread_1)等都注释起来。
-    
     // 分离线程，允许后台运行高速闭环控制代码
     std::thread threadA(timer_thread_1);
-    threadA.detach();
 
     while (1)
     {

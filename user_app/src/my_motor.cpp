@@ -160,7 +160,11 @@ void Speed_decision(void)
     WD_Speed_Goal = car_config::kCurveSpeedGoal;      // 弯道基础速度
     ZD_Speed_Goal = car_config::kStraightSpeedGoal;   // 直道基础速度
     cascade_ctrl.init(); // 初始化姿态三串级控制器参数
-    imu.init();          // 初始化IMU
+    static bool imu_inited = false;
+    if (!imu_inited) {
+        imu.init();          // 初始化IMU
+        imu_inited = true;
+    }
 }
 
 void Speed_PID_L(void)
@@ -360,6 +364,26 @@ void speed_dif_cascade()
     if (steer_step < -max_steer_step) steer_step = -max_steer_step;
     steer_error += steer_step;
 
+    // 环岛入口(flag 5/6)需要保持最小转向，防止刚识别后走直；
+    // 但到环内/出环阶段(flag>=7)若还一直强制同向转，会在环岛里兜圈，所以释放并给轻微反向出环量。
+    if (ImageFlag.image_element_rings == 1 && ImageFlag.image_element_rings_flag >= 5) {
+        if (ImageFlag.image_element_rings_flag < car_config::kRingForcedSteerReleaseFlag) {
+            if (steer_error < car_config::kRingForcedSteerError) {
+                steer_error = car_config::kRingForcedSteerError;
+            }
+        } else if (steer_error > car_config::kRingExitSteerError) {
+            steer_error = car_config::kRingExitSteerError;
+        }
+    } else if (ImageFlag.image_element_rings == 2 && ImageFlag.image_element_rings_flag >= 5) {
+        if (ImageFlag.image_element_rings_flag < car_config::kRingForcedSteerReleaseFlag) {
+            if (steer_error > -car_config::kRingForcedSteerError) {
+                steer_error = -car_config::kRingForcedSteerError;
+            }
+        } else if (steer_error < -car_config::kRingExitSteerError) {
+            steer_error = -car_config::kRingExitSteerError;
+        }
+    }
+
     // 【开机防暴走保护】
     static bool camera_is_ready = false;
     if (!camera_is_ready) {
@@ -483,7 +507,7 @@ void speed_dif_cascade()
                 visual_pd_out = std::copysign(car_config::kUnclassifiedTurnGyroLimitDps,
                                               visual_pd_out);
             }
-            if (bad_vision &&
+            if (bad_vision && !ring_now &&
                 std::fabs(visual_pd_out) > car_config::kBadVisionGyroLimitDps) {
                 visual_pd_out = std::copysign(car_config::kBadVisionGyroLimitDps,
                                               visual_pd_out);
@@ -750,7 +774,7 @@ void Car_Speed_Contrl(void)
 
 
     
-    if(SystemData.Stop==1 ||  ImageStatus.Road_type == Barn_in)  //停车
+    if(SystemData.Stop==1)  //停车（不再因为车库/斑马线识别停车）
     {
         Speed_Goal=0;
         Speed_Goal_l=0;

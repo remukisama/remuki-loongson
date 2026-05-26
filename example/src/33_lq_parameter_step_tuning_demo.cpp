@@ -1,5 +1,6 @@
 #include "main.hpp"
 #include "car_config.hpp"
+#include "lq_display_tft18.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -86,6 +87,7 @@ extern bool image_cv_Init(void);
 extern bool image_cv_IsReady(void);
 extern bool image_cv_zip(void);
 extern void image_cv_Deinit(void);
+extern void Data_Settings(void);
 extern void imageprocess(void);
 extern void motor_Init(void);
 extern void Speed_decision(void);
@@ -99,18 +101,29 @@ extern void motor_Duty_R(int duty);
 
 namespace param_step_demo {
 
+static const std::string kElementDebugTargetIp = "192.168.5.22";
+static const uint16_t kElementDebugTargetPort = 8080;
+static const uint8_t kElementDebugJpegQuality = 55;
+static constexpr bool kElementDebugUdpEnable = false;
+static constexpr bool kElementDebugTftEnable = true;
+static constexpr int kElementDebugTftX = 1;
+static constexpr int kElementDebugTftY = 6;
 static FILE *g_log_file = nullptr;
 
-static std::string make_log_path(const char *test_name) {
+static std::string make_artifact_path(const char *test_name, const char *ext) {
     mkdir("logs", 0755);
     time_t now = time(nullptr);
     struct tm tm_now;
     localtime_r(&now, &tm_now);
     char buf[256];
-    snprintf(buf, sizeof(buf), "logs/%04d%02d%02d_%02d%02d%02d_%s.log",
+    snprintf(buf, sizeof(buf), "logs/%04d%02d%02d_%02d%02d%02d_%s.%s",
              tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday,
-             tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec, test_name);
+             tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec, test_name, ext);
     return std::string(buf);
+}
+
+static std::string make_log_path(const char *test_name) {
+    return make_artifact_path(test_name, "log");
 }
 
 static void log_printf(const char *fmt, ...) {
@@ -180,6 +193,218 @@ struct RunningStat {
     }
 };
 
+static const char *road_type_name(int t);
+static const char *element_scene_name(ElementScene_e scene);
+
+struct ElementCsvLogger {
+    FILE *file = nullptr;
+    std::string path;
+
+    bool open(const char *test_name) {
+        path = make_artifact_path(test_name, "csv");
+        file = fopen(path.c_str(), "w");
+        if (!file) {
+            printf("[CSV_ERROR] cannot open %s\n", path.c_str());
+            return false;
+        }
+        fprintf(file,
+                "t_sec,sample,motor_on,road,scene,ring_side,ring_flag,cool,"
+                "det,mid,err,tow,off,left_line,right_line,straight,straight_flag,"
+                "el_open,"
+                "l_block,l_geom,l_loss,l_susp,l_confirm,l_p1,l_p2,l_help,"
+                "r_block,r_geom,r_loss,r_susp,r_confirm,r_p1,r_p2,r_help,"
+                "lp1,lp2,rp1,rp2,img_bad,img_warn\n");
+        fflush(file);
+        printf("[CSV] 元素特征样本保存到: %s\n", path.c_str());
+        return true;
+    }
+
+    void write(double t_sec, int sample, bool motor_on, int img_bad, int img_warn) {
+        if (!file) return;
+        fprintf(file,
+                "%.3f,%d,%d,%s,%s,%d,%d,%u,"
+                "%d,%d,%d,%d,%d,%d,%d,%d,%d,"
+                "%d,"
+                "%d,%d,%d,%d,%d,%d,%d,%d,"
+                "%d,%d,%d,%d,%d,%d,%d,%d,"
+                "%d,%d,%d,%d,%d,%d\n",
+                t_sec, sample, motor_on ? 1 : 0,
+                road_type_name(ImageStatus.Road_type),
+                element_scene_name(g_element_scene),
+                ImageFlag.image_element_rings,
+                ImageFlag.image_element_rings_flag,
+                g_element_cooldown_frames,
+                ImageStatus.Det_True,
+                ImageStatus.MiddleLine,
+                ImageStatus.MiddleLine - ImageStatus.Det_True,
+                ImageStatus.TowPoint,
+                ImageStatus.OFFLine,
+                ImageStatus.Left_Line,
+                ImageStatus.Right_Line,
+                ImageStatus.straight_acc,
+                ImageStatus.straight_acc_flag,
+                dbg_el_detect_open,
+                dbg_el_l_block,
+                dbg_el_l_geom,
+                dbg_el_l_loss,
+                dbg_el_l_susp,
+                dbg_el_l_confirm,
+                dbg_el_l_p1,
+                dbg_el_l_p2,
+                dbg_el_l_help,
+                dbg_el_r_block,
+                dbg_el_r_geom,
+                dbg_el_r_loss,
+                dbg_el_r_susp,
+                dbg_el_r_confirm,
+                dbg_el_r_p1,
+                dbg_el_r_p2,
+                dbg_el_r_help,
+                Left_RingsFlag_Point1_Ysite,
+                Left_RingsFlag_Point2_Ysite,
+                Right_RingsFlag_Point1_Ysite,
+                Right_RingsFlag_Point2_Ysite,
+                img_bad,
+                img_warn);
+    }
+
+    void close() {
+        if (!file) return;
+        fflush(file);
+        fclose(file);
+        file = nullptr;
+    }
+};
+
+struct ElementFeatureStats {
+    int samples = 0;
+    int left_scene = 0;
+    int right_scene = 0;
+    int left_ring_active = 0;
+    int right_ring_active = 0;
+    int left_candidate = 0;
+    int right_candidate = 0;
+    int both_candidate = 0;
+    int left_block = 0;
+    int left_susp = 0;
+    int left_confirm_seen = 0;
+    int right_block = 0;
+    int right_susp = 0;
+    int right_confirm_seen = 0;
+    RunningStat off;
+    RunningStat err;
+    RunningStat left_line;
+    RunningStat right_line;
+    RunningStat left_p1;
+    RunningStat left_p2;
+    RunningStat right_p1;
+    RunningStat right_p2;
+    RunningStat left_cand_left_line;
+    RunningStat left_cand_right_line;
+    RunningStat left_cand_off;
+    RunningStat left_cand_p2;
+    RunningStat right_cand_left_line;
+    RunningStat right_cand_right_line;
+    RunningStat right_cand_off;
+    RunningStat right_cand_p2;
+
+    void add() {
+        samples++;
+        if (g_element_scene == ElementScene_LeftRing) left_scene++;
+        if (g_element_scene == ElementScene_RightRing) right_scene++;
+        if (ImageFlag.image_element_rings == 1) left_ring_active++;
+        if (ImageFlag.image_element_rings == 2) right_ring_active++;
+        if (dbg_el_l_block) left_block++;
+        if (dbg_el_l_susp) left_susp++;
+        if (dbg_el_l_confirm > 0) left_confirm_seen++;
+        if (dbg_el_r_block) right_block++;
+        if (dbg_el_r_susp) right_susp++;
+        if (dbg_el_r_confirm > 0) right_confirm_seen++;
+
+        off.add(ImageStatus.OFFLine);
+        err.add(ImageStatus.MiddleLine - ImageStatus.Det_True);
+        left_line.add(ImageStatus.Left_Line);
+        right_line.add(ImageStatus.Right_Line);
+        if (Left_RingsFlag_Point1_Ysite > 0) left_p1.add(Left_RingsFlag_Point1_Ysite);
+        if (Left_RingsFlag_Point2_Ysite > 0) left_p2.add(Left_RingsFlag_Point2_Ysite);
+        if (Right_RingsFlag_Point1_Ysite > 0) right_p1.add(Right_RingsFlag_Point1_Ysite);
+        if (Right_RingsFlag_Point2_Ysite > 0) right_p2.add(Right_RingsFlag_Point2_Ysite);
+
+        bool l_cand = (dbg_el_l_geom || dbg_el_l_loss);
+        bool r_cand = (dbg_el_r_geom || dbg_el_r_loss);
+        if (l_cand) {
+            left_candidate++;
+            left_cand_left_line.add(ImageStatus.Left_Line);
+            left_cand_right_line.add(ImageStatus.Right_Line);
+            left_cand_off.add(ImageStatus.OFFLine);
+            if (Left_RingsFlag_Point2_Ysite > 0) left_cand_p2.add(Left_RingsFlag_Point2_Ysite);
+        }
+        if (r_cand) {
+            right_candidate++;
+            right_cand_left_line.add(ImageStatus.Left_Line);
+            right_cand_right_line.add(ImageStatus.Right_Line);
+            right_cand_off.add(ImageStatus.OFFLine);
+            if (Right_RingsFlag_Point2_Ysite > 0) right_cand_p2.add(Right_RingsFlag_Point2_Ysite);
+        }
+        if (l_cand && r_cand) both_candidate++;
+    }
+
+    void print_recommendation(const char *tag,
+                              const std::string &csv_path,
+                              double special_rate,
+                              double img_bad_rate,
+                              double img_warn_rate) const {
+        printf("[%s_AUTO_ANALYZE] csv=%s samples=%d special_rate=%.2f img_bad_rate=%.2f img_warn_rate=%.2f leftCand=%d rightCand=%d leftScene=%d rightScene=%d bothCand=%d\n",
+               tag, csv_path.c_str(), samples, special_rate, img_bad_rate, img_warn_rate,
+               left_candidate, right_candidate, left_scene, right_scene, both_candidate);
+        printf("[%s_FEATURE_RANGE] all OFF mean/max=%.1f/%.1f Err mean/span=%.1f/%.1f LLine mean/max=%.1f/%.1f RLine mean/max=%.1f/%.1f\n",
+               tag,
+               off.mean(), off.n ? off.max_v : 0,
+               err.mean(), err.span(),
+               left_line.mean(), left_line.n ? left_line.max_v : 0,
+               right_line.mean(), right_line.n ? right_line.max_v : 0);
+        if (left_candidate > 0) {
+            printf("[%s_LEFT_CAND] count=%d LLine mean/min/max=%.1f/%.1f/%.1f RLine mean/max=%.1f/%.1f OFF mean/max=%.1f/%.1f P2 mean/min/max=%.1f/%.1f/%.1f\n",
+                   tag, left_candidate,
+                   left_cand_left_line.mean(), left_cand_left_line.n ? left_cand_left_line.min_v : 0, left_cand_left_line.n ? left_cand_left_line.max_v : 0,
+                   left_cand_right_line.mean(), left_cand_right_line.n ? left_cand_right_line.max_v : 0,
+                   left_cand_off.mean(), left_cand_off.n ? left_cand_off.max_v : 0,
+                   left_cand_p2.mean(), left_cand_p2.n ? left_cand_p2.min_v : 0, left_cand_p2.n ? left_cand_p2.max_v : 0);
+        }
+        if (right_candidate > 0) {
+            printf("[%s_RIGHT_CAND] count=%d RLine mean/min/max=%.1f/%.1f/%.1f LLine mean/max=%.1f/%.1f OFF mean/max=%.1f/%.1f P2 mean/min/max=%.1f/%.1f/%.1f\n",
+                   tag, right_candidate,
+                   right_cand_right_line.mean(), right_cand_right_line.n ? right_cand_right_line.min_v : 0, right_cand_right_line.n ? right_cand_right_line.max_v : 0,
+                   right_cand_left_line.mean(), right_cand_left_line.n ? right_cand_left_line.max_v : 0,
+                   right_cand_off.mean(), right_cand_off.n ? right_cand_off.max_v : 0,
+                   right_cand_p2.mean(), right_cand_p2.n ? right_cand_p2.min_v : 0, right_cand_p2.n ? right_cand_p2.max_v : 0);
+        }
+
+        printf("[%s_RECOMMEND] ", tag);
+        if (samples < 20) {
+            printf("样本太少：每个元素至少手推5-10次，或把seconds调到60以上。\n");
+        } else if (img_bad_rate > 0.25) {
+            printf("先回到T03/T04修图像质量/ROI/前瞻：当前img_bad过高，直接调元素阈值会误导。\n");
+        } else if (special_rate < 0.05 && left_candidate == 0 && right_candidate == 0) {
+            printf("本轮几乎没采到元素候选：确认手推确实经过元素；若TFT补线已明显进入环岛但候选仍为0，再放宽对应minLost/P2/OFF条件。\n");
+        } else if (both_candidate > samples / 8) {
+            printf("左右候选同时出现偏多：优先提高kRingLossOnlyMinLost或增加kElementRingConfirmFrames，减少左右误抢。\n");
+        } else if (left_candidate > 0 && left_scene == 0 && left_ring_active == 0) {
+            printf("左环候选出现但未锁定LeftRing：若left_block高，放宽kLeftRingRightLineBlockMax/kLeftRingOfflineBlockMax；若left_susp高，检查普通弯误判并提高confirm。\n");
+        } else if (right_candidate > 0 && right_scene == 0 && right_ring_active == 0) {
+            printf("右环候选出现但未锁定RightRing：若right_block高，放宽kRightRingLeftLineBlockMax/kRightRingOfflineBlockMax；若right_susp高，提高confirm或收紧loss-only。\n");
+        } else if ((left_scene + right_scene) > 0 && img_warn_rate < 0.30) {
+            printf("元素识别链路已能进入场景锁：下一步用TFT看ring=5/6/7/8中心线方向，再进入低速自动T08。\n");
+        } else {
+            printf("当前样本可用但结论不强：保留CSV，按TFT画面把失败窗口前后1-2秒日志发回来继续细分。\n");
+        }
+    }
+};
+
+static int round_to_int(double v) {
+    return (int)(v >= 0.0 ? v + 0.5 : v - 0.5);
+}
+
 static const char *road_type_name(int t) {
     switch (t) {
         case zero: return "zero";
@@ -196,7 +421,12 @@ static const char *road_type_name(int t) {
 }
 
 static const char *vision_algorithm_name() {
-    return "HSV_BLUE_INVERT";
+    switch (car_config::kImageAlgorithm) {
+        case 0: return "HSV_BLUE_INVERT";
+        case 1: return "GRAY_STATIC";
+        case 2: return "GRAY_OTSU";
+        default: return "UNKNOWN";
+    }
 }
 
 static const char *element_scene_name(ElementScene_e scene) {
@@ -208,6 +438,40 @@ static const char *element_scene_name(ElementScene_e scene) {
         case ElementScene_Garage: return "Garage";
         default: return "Unknown";
     }
+}
+
+static const char *ring_state_name(int flag) {
+    switch (flag) {
+        case 0: return "Idle";
+        case 1: return "Suspect";
+        case 2: return "Entry";
+        case 3: return "Check";
+        case 4: return "Wait";
+        case 5: return "TurnIn";
+        case 6: return "Inside";
+        case 7: return "SearchExit";
+        case 8: return "ForceExit";
+        case 9: return "ExitWait";
+        case 10: return "Finish";
+        default: return "Unknown";
+    }
+}
+
+static std::string element_debug_state_name() {
+    if (g_element_cooldown_frames > 0) return "Cooldown";
+    if (g_element_scene == ElementScene_LeftRing) {
+        return std::string("LeftRing.") + ring_state_name(ImageFlag.image_element_rings_flag);
+    }
+    if (g_element_scene == ElementScene_RightRing) {
+        return std::string("RightRing.") + ring_state_name(ImageFlag.image_element_rings_flag);
+    }
+    if (ImageFlag.image_element_rings == 1) {
+        return std::string("LFlag.") + ring_state_name(ImageFlag.image_element_rings_flag);
+    }
+    if (ImageFlag.image_element_rings == 2) {
+        return std::string("RFlag.") + ring_state_name(ImageFlag.image_element_rings_flag);
+    }
+    return element_scene_name(g_element_scene);
 }
 
 static void print_config_snapshot() {
@@ -255,9 +519,37 @@ static void print_config_snapshot() {
            car_config::kGyroFeedforwardGain);
 }
 
+static void print_stage_task_map() {
+    printf("[TASK_MAP] 本Demo按阶段锁参数：先图像质量，再硬件方向，再速度环，再IMU，再低速闭环，最后元素/提速。\n");
+    printf("[TASK_MAP] T02只判断摄像头/图像重复性，不要求手动把车摆到像素级中线；单次摆放的err_mean只能作为参考。\n");
+    printf("[TASK_MAP] 中线参数只在同一段直道重复摆放3次后再改：若3次det_mean同向偏离且差异小，再考虑kImageMiddleLine每次改1。\n");
+    printf("[TASK_MAP] T03只改曝光/二值化/ROI质量；T04只改前瞻/扫线/直道判断；T05只改速度环；T10只改IMU死区/滤波；T06以后才碰转向/角速度环。\n");
+}
+
+static void print_stage_card(const char *stage,
+                             const char *task,
+                             const char *tune_only,
+                             const char *do_not_tune,
+                             const char *pass_to_next) {
+    printf("[STAGE_CARD] %s\n", stage);
+    printf("[STAGE_TASK] %s\n", task);
+    printf("[STAGE_TUNE_ONLY] %s\n", tune_only);
+    printf("[STAGE_DO_NOT_TUNE] %s\n", do_not_tune);
+    printf("[STAGE_PASS_TO_NEXT] %s\n", pass_to_next);
+}
+
 static bool g_camera_ready = false;
+static bool g_image_params_ready = false;
+
+static void ensure_image_params_ready() {
+    if (!g_image_params_ready) {
+        Data_Settings();
+        g_image_params_ready = true;
+    }
+}
 
 static bool ensure_camera_ready() {
+    ensure_image_params_ready();
     if (!g_camera_ready) {
         g_camera_ready = image_cv_IsReady() || image_cv_Init();
         if (!g_camera_ready) {
@@ -372,13 +664,215 @@ static void print_image_line_once(const char *prefix) {
            calc_center_variance(), DEAD_BAND);
 }
 
+static void draw_scaled_point(cv::Mat &img, int x80, int y60, const cv::Scalar &color, int radius = 3) {
+    if (x80 < 0 || x80 >= 80 || y60 < 0 || y60 >= 60) return;
+    cv::circle(img, cv::Point(x80 * 4 + 2, y60 * 4 + 2), radius, color, -1);
+}
+
+static void draw_scaled_hline(cv::Mat &img, int y60, const cv::Scalar &color, int thickness = 1) {
+    if (y60 < 0 || y60 >= 60) return;
+    int y = y60 * 4 + 2;
+    cv::line(img, cv::Point(0, y), cv::Point(img.cols - 1, y), color, thickness);
+}
+
+static cv::Mat make_element_debug_frame(int samples,
+                                        int road_changes,
+                                        int scene_changes,
+                                        int img_bad_cnt,
+                                        int img_warn_cnt) {
+    cv::Mat debug_frame(60, 80, CV_8UC3);
+    for (int y = 0; y < 60; ++y) {
+        for (int x = 0; x < 80; ++x) {
+            debug_frame.at<cv::Vec3b>(y, x) = img1[y][x] ? cv::Vec3b(245, 245, 245)
+                                                         : cv::Vec3b(0, 0, 0);
+        }
+
+        int raw_l = ImageDeal[y].LeftBoundary_First;
+        int raw_r = ImageDeal[y].RightBoundary_First;
+        if (raw_l >= 0 && raw_l < 80) debug_frame.at<cv::Vec3b>(y, raw_l) = cv::Vec3b(0, 210, 210);
+        if (raw_r >= 0 && raw_r < 80) debug_frame.at<cv::Vec3b>(y, raw_r) = cv::Vec3b(210, 210, 0);
+
+        int left = ImageDeal[y].LeftBorder;
+        int right = ImageDeal[y].RightBorder;
+        int center = ImageDeal[y].Center;
+        if (left >= 0 && left < 80) {
+            debug_frame.at<cv::Vec3b>(y, left) =
+                (ImageDeal[y].IsLeftFind == 'W') ? cv::Vec3b(255, 0, 255) : cv::Vec3b(0, 0, 255);
+        }
+        if (right >= 0 && right < 80) {
+            debug_frame.at<cv::Vec3b>(y, right) =
+                (ImageDeal[y].IsRightFind == 'W') ? cv::Vec3b(255, 0, 255) : cv::Vec3b(0, 255, 0);
+        }
+        if (center >= 0 && center < 80) debug_frame.at<cv::Vec3b>(y, center) = cv::Vec3b(255, 0, 0);
+    }
+
+    cv::Mat display;
+    cv::resize(debug_frame, display, cv::Size(320, 240), 0, 0, cv::INTER_NEAREST);
+
+    draw_scaled_hline(display, ImageStatus.TowPoint, cv::Scalar(255, 255, 0), 1);
+    draw_scaled_hline(display, ImageStatus.OFFLine, cv::Scalar(0, 165, 255), 1);
+    draw_scaled_point(display, ImageStatus.Det_True, ImageStatus.TowPoint, cv::Scalar(0, 255, 255), 5);
+    draw_scaled_point(display, ImageStatus.MiddleLine, 55, cv::Scalar(255, 255, 255), 4);
+    draw_scaled_hline(display, Left_RingsFlag_Point1_Ysite, cv::Scalar(0, 0, 255), 1);
+    draw_scaled_hline(display, Left_RingsFlag_Point2_Ysite, cv::Scalar(0, 80, 255), 1);
+    draw_scaled_hline(display, Right_RingsFlag_Point1_Ysite, cv::Scalar(0, 255, 0), 1);
+    draw_scaled_hline(display, Right_RingsFlag_Point2_Ysite, cv::Scalar(80, 255, 0), 1);
+
+    char text[160];
+    int line_y = 18;
+    auto put_line = [&](const cv::Scalar &color, double scale = 0.42, int thick = 1) {
+        cv::putText(display, text, cv::Point(6, line_y), cv::FONT_HERSHEY_SIMPLEX, scale, color, thick);
+        line_y += 17;
+    };
+
+    snprintf(text, sizeof(text), "T08 Element UDP %s:%u s=%d", kElementDebugTargetIp.c_str(), kElementDebugTargetPort, samples);
+    put_line(cv::Scalar(0, 255, 255), 0.45, 1);
+    snprintf(text, sizeof(text), "Road:%s Scene:%s State:%s", road_type_name(ImageStatus.Road_type), element_scene_name(g_element_scene), element_debug_state_name().c_str());
+    put_line(cv::Scalar(0, 200, 255), 0.43, 1);
+    snprintf(text, sizeof(text), "Ring:%d/%d Cool:%u EL:%d Lc:%d Rc:%d",
+             ImageFlag.image_element_rings, ImageFlag.image_element_rings_flag, g_element_cooldown_frames,
+             dbg_el_detect_open, dbg_el_l_confirm, dbg_el_r_confirm);
+    put_line(cv::Scalar(0, 255, 0), 0.42, 1);
+    snprintf(text, sizeof(text), "L b/g/l/s/c p1/p2/h:%d/%d/%d/%d/%d %d/%d/%d",
+             dbg_el_l_block, dbg_el_l_geom, dbg_el_l_loss, dbg_el_l_susp, dbg_el_l_confirm,
+             dbg_el_l_p1, dbg_el_l_p2, dbg_el_l_help);
+    put_line(cv::Scalar(0, 128, 255), 0.38, 1);
+    snprintf(text, sizeof(text), "R b/g/l/s/c p1/p2/h:%d/%d/%d/%d/%d %d/%d/%d",
+             dbg_el_r_block, dbg_el_r_geom, dbg_el_r_loss, dbg_el_r_susp, dbg_el_r_confirm,
+             dbg_el_r_p1, dbg_el_r_p2, dbg_el_r_help);
+    put_line(cv::Scalar(80, 255, 80), 0.38, 1);
+    snprintf(text, sizeof(text), "Det:%d Err:%d Tow:%d OFF:%d L/R:%d/%d raw/final lines shown",
+             ImageStatus.Det_True, ImageStatus.MiddleLine - ImageStatus.Det_True,
+             ImageStatus.TowPoint, ImageStatus.OFFLine, ImageStatus.Left_Line, ImageStatus.Right_Line);
+    put_line(cv::Scalar(255, 255, 255), 0.39, 1);
+    snprintf(text, sizeof(text), "D:%.1f Tgt:%.1f GErr:%.1f Enc:%.0f/%.0f chg:%d/%d bad:%d warn:%d",
+             dbg_diff_speed, dbg_target_gyro_z, dbg_gyro_error,
+             speed_encoder_L, speed_encoder_R, road_changes, scene_changes, img_bad_cnt, img_warn_cnt);
+    put_line(cv::Scalar(255, 255, 0), 0.38, 1);
+    snprintf(text, sizeof(text), "Color rawL=cyan rawR=yellow L=red R=green C=blue W=magenta P1/P2=hline");
+    put_line(cv::Scalar(180, 180, 180), 0.34, 1);
+
+    return display;
+}
+
+static cv::Mat make_element_tft_frame(int samples,
+                                      int road_changes,
+                                      int scene_changes,
+                                      int img_bad_cnt,
+                                      int img_warn_cnt,
+                                      bool motor_on) {
+    cv::Mat base(60, 80, CV_8UC3);
+    for (int y = 0; y < 60; ++y) {
+        for (int x = 0; x < 80; ++x) {
+            base.at<cv::Vec3b>(y, x) = img1[y][x] ? cv::Vec3b(235, 235, 235)
+                                                  : cv::Vec3b(0, 0, 0);
+        }
+
+        int raw_l = ImageDeal[y].LeftBoundary_First;
+        int raw_r = ImageDeal[y].RightBoundary_First;
+        if (raw_l >= 0 && raw_l < 80) base.at<cv::Vec3b>(y, raw_l) = cv::Vec3b(0, 210, 210);
+        if (raw_r >= 0 && raw_r < 80) base.at<cv::Vec3b>(y, raw_r) = cv::Vec3b(210, 210, 0);
+
+        int left = ImageDeal[y].LeftBorder;
+        int right = ImageDeal[y].RightBorder;
+        int center = ImageDeal[y].Center;
+        if (left >= 0 && left < 80) {
+            base.at<cv::Vec3b>(y, left) =
+                (ImageDeal[y].IsLeftFind == 'W') ? cv::Vec3b(255, 0, 255) : cv::Vec3b(0, 0, 255);
+        }
+        if (right >= 0 && right < 80) {
+            base.at<cv::Vec3b>(y, right) =
+                (ImageDeal[y].IsRightFind == 'W') ? cv::Vec3b(255, 0, 255) : cv::Vec3b(0, 255, 0);
+        }
+        if (center >= 0 && center < 80) base.at<cv::Vec3b>(y, center) = cv::Vec3b(255, 0, 0);
+    }
+
+    cv::Mat display;
+    cv::resize(base, display, cv::Size(160, 120), 0, 0, cv::INTER_NEAREST);
+
+    auto draw_hline2 = [&](int y60, const cv::Scalar &color) {
+        if (y60 < 0 || y60 >= 60) return;
+        int y = y60 * 2 + 1;
+        cv::line(display, cv::Point(0, y), cv::Point(display.cols - 1, y), color, 1);
+    };
+    auto draw_point2 = [&](int x80, int y60, const cv::Scalar &color) {
+        if (x80 < 0 || x80 >= 80 || y60 < 0 || y60 >= 60) return;
+        cv::circle(display, cv::Point(x80 * 2 + 1, y60 * 2 + 1), 2, color, -1);
+    };
+
+    draw_hline2(ImageStatus.TowPoint, cv::Scalar(255, 255, 0));
+    draw_hline2(ImageStatus.OFFLine, cv::Scalar(0, 165, 255));
+    draw_hline2(Left_RingsFlag_Point1_Ysite, cv::Scalar(0, 0, 255));
+    draw_hline2(Left_RingsFlag_Point2_Ysite, cv::Scalar(0, 80, 255));
+    draw_hline2(Right_RingsFlag_Point1_Ysite, cv::Scalar(0, 255, 0));
+    draw_hline2(Right_RingsFlag_Point2_Ysite, cv::Scalar(80, 255, 0));
+    draw_point2(ImageStatus.Det_True, ImageStatus.TowPoint, cv::Scalar(0, 255, 255));
+    draw_point2(ImageStatus.MiddleLine, 55, cv::Scalar(255, 255, 255));
+
+    cv::rectangle(display, cv::Point(0, 0), cv::Point(159, 35), cv::Scalar(0, 0, 0), -1);
+    char text[96];
+    snprintf(text, sizeof(text), "R:%s S:%s %s",
+             road_type_name(ImageStatus.Road_type),
+             element_scene_name(g_element_scene),
+             motor_on ? "AUTO" : "PUSH");
+    cv::putText(display, text, cv::Point(2, 9), cv::FONT_HERSHEY_SIMPLEX, 0.28, cv::Scalar(0, 255, 255), 1);
+    snprintf(text, sizeof(text), "ring:%d/%d cool:%u err:%d off:%d",
+             ImageFlag.image_element_rings,
+             ImageFlag.image_element_rings_flag,
+             g_element_cooldown_frames,
+             ImageStatus.MiddleLine - ImageStatus.Det_True,
+             ImageStatus.OFFLine);
+    cv::putText(display, text, cv::Point(2, 20), cv::FONT_HERSHEY_SIMPLEX, 0.28, cv::Scalar(0, 255, 0), 1);
+    snprintf(text, sizeof(text), "L:%d/%d/%d/%d R:%d/%d/%d/%d b:%d w:%d s:%d",
+             dbg_el_l_block, dbg_el_l_geom, dbg_el_l_loss, dbg_el_l_confirm,
+             dbg_el_r_block, dbg_el_r_geom, dbg_el_r_loss, dbg_el_r_confirm,
+             img_bad_cnt, img_warn_cnt, samples);
+    cv::putText(display, text, cv::Point(2, 31), cv::FONT_HERSHEY_SIMPLEX, 0.25, cv::Scalar(255, 255, 255), 1);
+
+    (void)road_changes;
+    (void)scene_changes;
+    return display;
+}
+
+static bool init_element_tft_once(const char *tag) {
+    if (!kElementDebugTftEnable) return false;
+    static bool inited = false;
+    if (!inited) {
+        lq_tft18_drv_init(1);
+        lq_tft18_drv_cls(U16BLACK);
+        inited = true;
+        printf("[%s_TFT] enabled: TFT18 shows realtime binary image + raw/final borders + center + ring state.\n", tag);
+        printf("[%s_TFT] color: rawL=cyan rawR=yellow L=red R=green C=blue W=magenta P1/P2=horizontal lines.\n", tag);
+    }
+    return true;
+}
+
+static void show_element_tft_frame(const char *tag,
+                                   int samples,
+                                   int road_changes,
+                                   int scene_changes,
+                                   int img_bad_cnt,
+                                   int img_warn_cnt,
+                                   bool motor_on) {
+    if (!init_element_tft_once(tag)) return;
+    cv::Mat tft_frame = make_element_tft_frame(samples, road_changes, scene_changes,
+                                               img_bad_cnt, img_warn_cnt, motor_on);
+    lq_tft18_drv_road_color(kElementDebugTftX, kElementDebugTftY, tft_frame);
+}
+
 // -----------------------------------------------------------------------------
 // Step 0: 调参前准备，打印配置快照，不动电机。
 // -----------------------------------------------------------------------------
 int test_00_precheck_config(int seconds = 3) {
     printf("\n========== TEST 00 precheck_config 调参前准备 ==========" "\n");
+    print_stage_card("T00 precheck_config",
+                     "确认本次二进制实际编译进来的关键参数，避免把不同提交/不同阶段的数值混在一起。",
+                     "不调参数；只记录日志、提交号、赛道环境、电池状态。",
+                     "不要在没跑后续测试前凭感觉同时改速度、PID、图像和元素参数。",
+                     "确认配置快照无误后，图像走T02/T03/T04，硬件走T01/T05。");
     printf("[目的] 确认当前编译进程序的关键参数；后续每次发日志先带这一段。\n");
     print_config_snapshot();
+    print_stage_task_map();
     printf("[要求] 电池电压保持同一区间；摄像头高度约30cm；蓝底白色PVC赛道光照稳定；每轮只改一个参数。\n");
     printf("[RETURN] 0=配置打印完成。\n");
     (void)seconds;
@@ -391,6 +885,11 @@ int test_00_precheck_config(int seconds = 3) {
 // -----------------------------------------------------------------------------
 int test_01_motor_encoder_direction(int pwm = 1200, int hold_ms = 700) {
     printf("\n========== TEST 01 motor_encoder_direction 电机/编码器方向 ==========" "\n");
+    print_stage_card("T01 motor_encoder_direction",
+                     "架空确认左右电机方向、编码器正负号、启动死区和左右机械一致性。",
+                     "电机接线/方向GPIO、编码器A/B相或编码器取反、明显机械卡滞。",
+                     "不要用速度PID、转向PID或差速限幅去掩盖方向错误和编码器反号。",
+                     "方向和左右反馈都通过后再跑T05速度环阶跃。");
     printf("[安全] 必须架空小车！自动输出多档PWM，测试左右轮启动死区、方向和编码器反馈。base_pwm=%d hold_ms=%d\n", pwm, hold_ms);
     init_control_for_motor_tests();
     safe_stop_and_print("T01");
@@ -487,42 +986,137 @@ int test_01_motor_encoder_direction(int pwm = 1200, int hold_ms = 700) {
 }
 
 // -----------------------------------------------------------------------------
-// Step 1.3 + 摄像头角度核心测试：静止放直道中心，自动统计视觉偏差、可视距离、宽度梯度。
-// 返回值：0=中心和角度基本可用；1=偏左/右需调中心或机械；2=看得太近/角度太低；3=看得太远/噪声大。
+// Step 1.3 + 摄像头角度核心测试：三轮重复摆放采样，统计图像重复性、可视距离、宽度梯度。
+// 注意：人工摆车无法做到像素级居中，本测试不再用单次err_mean阻断流程。
+// 返回值：0=图像重复性和角度基本可用；1=中心/Det抖动大；2=看得太近/角度太低；3=直道判断不稳或远端噪声大。
 // -----------------------------------------------------------------------------
 int test_02_camera_center_angle_static(int frames = 120) {
-    printf("\n========== TEST 02 camera_center_angle_static 摄像头中心/角度静态 ==========" "\n");
-    printf("[摆放] 小车放在直道正中，车头正对赛道。无需推车。摄像头高度约30cm，本测试重点判断摄像头俯仰角。\n");
+    printf("\n========== TEST 02 camera_alignment_repeatability 摄像头对线重复性/角度 ==========" "\n");
+    print_stage_card("T02 camera_alignment_repeatability",
+                     "用三轮重复采样判断摄像头画面是否稳定、边界是否连续、俯仰是否合适；不要求手摆像素级居中。",
+                     "摄像头机械位置/俯仰、ROI粗位置、图像稳定性问题；kImageMiddleLine只在三轮趋势一致时每次微调1。",
+                     "不要用单轮err_mean改中线；不要在图像还跳动时调PID、速度、元素或环岛参数。",
+                     "Det稳定、丢线少、直道判断不过度抖动后进入T03二值质量测试。");
+    printf("[摆放] 第1轮尽量放直道中间；第2/3轮可把车重新拿起再放回同一段直道，尽量正对即可，不需要像素级微调。\n");
+    printf("[任务] 本环节判断重复性和角度；中线偏置只输出候选，不作为单次失败条件。\n");
     g_enable_element_process = false;
 
-    RunningStat err, det, off, width, white, variance;
-    int straight_cnt = 0, bad_center_cnt = 0, lost_cnt = 0;
-    for (int i = 0; i < frames && !exit_flag; ++i) {
-        if (!grab_and_process()) return -1;
-        int e = ImageStatus.MiddleLine - ImageStatus.Det_True;
-        int w = estimate_near_line_width();
-        err.add(e);
-        det.add(ImageStatus.Det_True);
-        off.add(ImageStatus.OFFLine);
-        width.add(w);
-        white.add(white_ratio_all());
-        variance.add(calc_center_variance());
-        if (ImageStatus.straight_acc_flag) straight_cnt++;
-        if (std::fabs(e) > 2) bad_center_cnt++;
-        if (ImageStatus.OFFLine > 15 || w <= 3) lost_cnt++;
-        if (i % 20 == 0) print_image_line_once("[T02_FRAME]");
-        usleep(20 * 1000);
+    struct AlignRound {
+        RunningStat err, det, off, width, white, variance, near_center, mid_center, far_center, near_far_delta;
+        int frames = 0;
+        int straight_cnt = 0;
+        int lost_cnt = 0;
+        int det_jump_cnt = 0;
+        int center_row_bad_cnt = 0;
+    };
+
+    const int rounds = 3;
+    int frames_per_round = std::max(20, frames / rounds);
+    int total_frames = 0;
+    std::vector<AlignRound> round_stats(rounds);
+
+    for (int r = 0; r < rounds && !exit_flag; ++r) {
+        printf("[T02_ROUND_BEGIN] round=%d/%d frames=%d。若刚跑完上一轮，可在3秒内重新摆放小车；不用追求像素级居中。\n",
+               r + 1, rounds, frames_per_round);
+        if (r > 0) usleep(3000 * 1000);
+
+        AlignRound &st = round_stats[r];
+        int last_det = 0;
+        for (int i = 0; i < frames_per_round && !exit_flag; ++i) {
+            if (!grab_and_process()) return -1;
+            int e = ImageStatus.MiddleLine - ImageStatus.Det_True;
+            int w = estimate_near_line_width();
+            int c_near = ImageDeal[55].Center;
+            int c_mid = ImageDeal[45].Center;
+            int c_far = ImageDeal[35].Center;
+            st.err.add(e);
+            st.det.add(ImageStatus.Det_True);
+            st.off.add(ImageStatus.OFFLine);
+            st.width.add(w);
+            st.white.add(white_ratio_all());
+            st.variance.add(calc_center_variance());
+            st.near_center.add(c_near);
+            st.mid_center.add(c_mid);
+            st.far_center.add(c_far);
+            st.near_far_delta.add(c_near - c_far);
+            st.frames++;
+            total_frames++;
+            if (ImageStatus.straight_acc_flag) st.straight_cnt++;
+            if (i > 0 && std::abs(ImageStatus.Det_True - last_det) > 5) st.det_jump_cnt++;
+            if (std::abs(c_near - c_mid) > 8 || std::abs(c_mid - c_far) > 8) st.center_row_bad_cnt++;
+            if (ImageStatus.OFFLine > 15 || w <= 3) st.lost_cnt++;
+            last_det = ImageStatus.Det_True;
+            if (i % 20 == 0) print_image_line_once("[T02_FRAME]");
+            usleep(20 * 1000);
+        }
+
+        double straight_rate_r = st.frames ? (double)st.straight_cnt / st.frames : 0.0;
+        double lost_rate_r = st.frames ? (double)st.lost_cnt / st.frames : 0.0;
+        double det_jump_rate_r = st.frames ? (double)st.det_jump_cnt / st.frames : 0.0;
+        double row_bad_rate_r = st.frames ? (double)st.center_row_bad_cnt / st.frames : 0.0;
+        printf("[T02_ROUND_SUMMARY] round=%d frames=%d det_mean=%.2f det_std=%.2f det_span=%.2f err_mean=%.2f OFF=%.2f width=%.2f white=%.3f var=%.2f straight=%.2f lost=%.2f det_jump=%.2f row_bad=%.2f near/mid/far=%.1f/%.1f/%.1f\n",
+               r + 1, st.frames, st.det.mean(), st.det.stddev(), st.det.span(), st.err.mean(),
+               st.off.mean(), st.width.mean(), st.white.mean(), st.variance.mean(),
+               straight_rate_r, lost_rate_r, det_jump_rate_r, row_bad_rate_r,
+               st.near_center.mean(), st.mid_center.mean(), st.far_center.mean());
     }
-    double straight_rate = frames ? (double)straight_cnt / frames : 0;
-    double bad_center_rate = frames ? (double)bad_center_cnt / frames : 0;
-    double lost_rate = frames ? (double)lost_cnt / frames : 0;
-    printf("[T02_SUMMARY] frames=%d err_mean=%.2f err_abs=%.2f err_rms=%.2f det_mean=%.2f OFF_mean=%.2f width_mean=%.2f white_mean=%.3f var_mean=%.2f straight_rate=%.2f bad_center_rate=%.2f lost_rate=%.2f\n",
-           frames, err.mean(), err.mean_abs(), err.rms(), det.mean(), off.mean(), width.mean(), white.mean(), variance.mean(), straight_rate, bad_center_rate, lost_rate);
-    printf("[角度判断] OFF_mean大/width小/丢线高 => 摄像头角度太低看太近或ROI太靠下；err_abs大但稳定 => 先机械居中或微调kImageMiddleLine；white异常先看曝光/ROI/OTSU二值图。\n");
-    printf("[RETURN] 0=可进入OTSU质量测试；1=中心偏差>2；2=疑似角度太低/看太近/丢线；3=直道判断不稳或远端噪声大。\n");
-    if (lost_rate > 0.20 || off.mean() > 15 || width.mean() < 5) return 2;
-    if (err.mean_abs() > 2.0 || bad_center_rate > 0.35) return 1;
-    if (straight_rate < 0.70 || variance.mean() > car_config::kStraightVarianceAccThreshold * 2.0) return 3;
+
+    RunningStat all_err, all_det, all_off, all_width, all_white, all_variance;
+    RunningStat all_near, all_mid, all_far, all_near_far;
+    RunningStat round_det_means, round_delta_means;
+    int straight_cnt = 0, lost_cnt = 0, det_jump_cnt = 0, center_row_bad_cnt = 0;
+    int same_positive = 0, same_negative = 0, stable_rounds = 0;
+    for (int r = 0; r < rounds; ++r) {
+        AlignRound &st = round_stats[r];
+        straight_cnt += st.straight_cnt;
+        lost_cnt += st.lost_cnt;
+        det_jump_cnt += st.det_jump_cnt;
+        center_row_bad_cnt += st.center_row_bad_cnt;
+        all_err.sum += st.err.sum; all_err.sum_abs += st.err.sum_abs; all_err.sum_sq += st.err.sum_sq; all_err.n += st.err.n; all_err.min_v = std::min(all_err.min_v, st.err.min_v); all_err.max_v = std::max(all_err.max_v, st.err.max_v);
+        all_det.sum += st.det.sum; all_det.sum_abs += st.det.sum_abs; all_det.sum_sq += st.det.sum_sq; all_det.n += st.det.n; all_det.min_v = std::min(all_det.min_v, st.det.min_v); all_det.max_v = std::max(all_det.max_v, st.det.max_v);
+        all_off.sum += st.off.sum; all_off.sum_abs += st.off.sum_abs; all_off.sum_sq += st.off.sum_sq; all_off.n += st.off.n; all_off.min_v = std::min(all_off.min_v, st.off.min_v); all_off.max_v = std::max(all_off.max_v, st.off.max_v);
+        all_width.sum += st.width.sum; all_width.sum_abs += st.width.sum_abs; all_width.sum_sq += st.width.sum_sq; all_width.n += st.width.n; all_width.min_v = std::min(all_width.min_v, st.width.min_v); all_width.max_v = std::max(all_width.max_v, st.width.max_v);
+        all_white.sum += st.white.sum; all_white.sum_abs += st.white.sum_abs; all_white.sum_sq += st.white.sum_sq; all_white.n += st.white.n; all_white.min_v = std::min(all_white.min_v, st.white.min_v); all_white.max_v = std::max(all_white.max_v, st.white.max_v);
+        all_variance.sum += st.variance.sum; all_variance.sum_abs += st.variance.sum_abs; all_variance.sum_sq += st.variance.sum_sq; all_variance.n += st.variance.n; all_variance.min_v = std::min(all_variance.min_v, st.variance.min_v); all_variance.max_v = std::max(all_variance.max_v, st.variance.max_v);
+        all_near.sum += st.near_center.sum; all_near.sum_abs += st.near_center.sum_abs; all_near.sum_sq += st.near_center.sum_sq; all_near.n += st.near_center.n; all_near.min_v = std::min(all_near.min_v, st.near_center.min_v); all_near.max_v = std::max(all_near.max_v, st.near_center.max_v);
+        all_mid.sum += st.mid_center.sum; all_mid.sum_abs += st.mid_center.sum_abs; all_mid.sum_sq += st.mid_center.sum_sq; all_mid.n += st.mid_center.n; all_mid.min_v = std::min(all_mid.min_v, st.mid_center.min_v); all_mid.max_v = std::max(all_mid.max_v, st.mid_center.max_v);
+        all_far.sum += st.far_center.sum; all_far.sum_abs += st.far_center.sum_abs; all_far.sum_sq += st.far_center.sum_sq; all_far.n += st.far_center.n; all_far.min_v = std::min(all_far.min_v, st.far_center.min_v); all_far.max_v = std::max(all_far.max_v, st.far_center.max_v);
+        all_near_far.sum += st.near_far_delta.sum; all_near_far.sum_abs += st.near_far_delta.sum_abs; all_near_far.sum_sq += st.near_far_delta.sum_sq; all_near_far.n += st.near_far_delta.n; all_near_far.min_v = std::min(all_near_far.min_v, st.near_far_delta.min_v); all_near_far.max_v = std::max(all_near_far.max_v, st.near_far_delta.max_v);
+
+        double delta = st.det.mean() - car_config::kImageMiddleLine;
+        round_det_means.add(st.det.mean());
+        round_delta_means.add(delta);
+        if (delta > 2.0) same_positive++;
+        if (delta < -2.0) same_negative++;
+        if (st.det.stddev() <= 1.8 && st.det.span() <= 7.0) stable_rounds++;
+    }
+
+    double straight_rate = total_frames ? (double)straight_cnt / total_frames : 0.0;
+    double lost_rate = total_frames ? (double)lost_cnt / total_frames : 0.0;
+    double det_jump_rate = total_frames ? (double)det_jump_cnt / total_frames : 0.0;
+    double center_row_bad_rate = total_frames ? (double)center_row_bad_cnt / total_frames : 0.0;
+    bool middle_candidate_ok = (stable_rounds == rounds &&
+                                round_det_means.stddev() <= 1.5 &&
+                                (same_positive == rounds || same_negative == rounds) &&
+                                std::fabs(round_delta_means.mean()) >= 2.5);
+    int candidate_middle = round_to_int(car_config::kImageMiddleLine + (round_delta_means.mean() > 0.0 ? 1.0 : -1.0));
+    printf("[T02_SUMMARY] frames=%d rounds=%d err_mean=%.2f err_abs=%.2f err_rms=%.2f det_mean=%.2f det_std=%.2f det_span=%.2f round_det_std=%.2f round_delta_mean=%.2f current_middle=%d middle_candidate_ok=%d candidate_next=%d OFF_mean=%.2f width_mean=%.2f white_mean=%.3f var_mean=%.2f straight_rate=%.2f lost_rate=%.2f det_jump_rate=%.2f row_bad_rate=%.2f\n",
+           total_frames, rounds, all_err.mean(), all_err.mean_abs(), all_err.rms(),
+           all_det.mean(), all_det.stddev(), all_det.span(), round_det_means.stddev(),
+           round_delta_means.mean(), car_config::kImageMiddleLine,
+           middle_candidate_ok ? 1 : 0, middle_candidate_ok ? candidate_middle : car_config::kImageMiddleLine,
+           all_off.mean(), all_width.mean(), all_white.mean(), all_variance.mean(),
+           straight_rate, lost_rate, det_jump_rate, center_row_bad_rate);
+    printf("[T02_ROWS] center_near55=%.2f mid45=%.2f far35=%.2f near_minus_far=%.2f near_std=%.2f mid_std=%.2f far_std=%.2f\n",
+           all_near.mean(), all_mid.mean(), all_far.mean(), all_near_far.mean(),
+           all_near.stddev(), all_mid.stddev(), all_far.stddev());
+    printf("[中线判断] middle_candidate_ok=1时也只建议kImageMiddleLine朝candidate_next改1；若为0，说明人工摆放/图像抖动/轮次差异仍占主导，先不要改中线。\n");
+    printf("[角度判断] OFF_mean大/width小/丢线高 => 摄像头角度太低看太近或ROI太靠下；near_minus_far长期很大 => 车头/摄像头姿态或透视角需要先机械调整。\n");
+    printf("[T02_HINT] straight_rate只作为T04直道判断参考，不再阻断T02；T02只硬判图像稳定性、丢线和角度/可视距离。\n");
+    printf("[RETURN] 0=可进入二值质量测试；1=Det/中心线跳动大；2=疑似角度太低/看太近/丢线；3=远端中心线形态异常。\n");
+    if (lost_rate > 0.20 || all_off.mean() > 15 || all_width.mean() < 5) return 2;
+    if (all_det.stddev() > 3.0 || all_det.span() > 12.0 || det_jump_rate > 0.08 || center_row_bad_rate > 0.25) return 1;
+    if (all_variance.mean() > car_config::kStraightVarianceAccThreshold * 2.5) return 3;
     return 0;
 }
 
@@ -531,9 +1125,15 @@ int test_02_camera_center_angle_static(int frames = 120) {
 // 返回值：0=mask稳定；1=白点比例异常；2=闪烁大；3=边界/丢线异常。
 // -----------------------------------------------------------------------------
 int test_03_exposure_otsu_quality(int frames = 160) {
-    printf("\n========== TEST 03 exposure_otsu_quality 曝光/OTSU二值质量 ==========" "\n");
+    printf("\n========== TEST 03 binary_quality 曝光/二值质量 ==========" "\n");
+    print_stage_card("T03 binary_quality",
+                     "固定或慢推经过直道/弯道/阴影/反光区域，确认二值mask比例、边界和Det不闪。",
+                     "kCameraManualExposure、kImageAlgorithm、二值阈值/OTSU滤波/形态学、ROI基础区域。",
+                     "不要改kImageTowPoint、速度、PID、差速、环岛和元素参数；图像质量不过时控制参数没有意义。",
+                     "white比例、Det跳变和丢边都稳定后进入T04前瞻/扫线/直道判断。");
     printf("[摆放] 依次对准直道/弯道/阴影/反光区域均可。先固定车不动跑一段，再可轻推很慢经过问题区域。\n");
-    printf("[当前] algorithm=%s。OTSU会自动选阈值，本测试重点看white比例稳定性、Det抖动和边界丢失。\n",
+    printf("[任务] 只调摄像头曝光、二值化算法/阈值、ROI基础质量；不要在本环节改PID、速度、前瞻或元素参数。\n");
+    printf("[当前] algorithm=%s。本测试重点看white比例稳定性、Det抖动和边界丢失。\n",
            vision_algorithm_name());
     g_enable_element_process = false;
 
@@ -574,8 +1174,8 @@ int test_03_exposure_otsu_quality(int frames = 160) {
            row55.mean(), row40.mean(), row25.mean(), off.mean(), width.mean(),
            left_miss.mean(), right_miss.mean(), det_err.mean_abs(), det_delta.stddev(),
            det_jump_rate, flicker_rate, lost_rate);
-    printf("[调参意义] OTSU不靠固定阈值压white；white异常多看曝光/ROI/反光，dDet大看二值毛刺和前瞻行，lost高先调摄像头角度/ROI。\n");
-    printf("[RETURN] 0=曝光OTSU基本稳定；1=white比例异常；2=mask/Det闪烁；3=边界丢失。\n");
+    printf("[调参意义] white异常先看曝光/ROI/反光/二值算法；dDet大看二值毛刺和前瞻行；lost高先调摄像头角度/ROI，不要急着改控制参数。\n");
+    printf("[RETURN] 0=曝光/二值基本稳定；1=white比例异常；2=mask/Det闪烁；3=边界丢失。\n");
     if (white_abnormal) return 1;
     if (flicker_rate > 0.15 || wr.span() > 0.30 || det_jump_rate > 0.15 || det_delta.stddev() > 5.0) return 2;
     if (lost_rate > 0.20) return 3;
@@ -592,7 +1192,13 @@ int test_03_exposure_hsv_quality(int frames = 160) {
 // -----------------------------------------------------------------------------
 int test_04_roi_scan_straight(int frames = 180) {
     printf("\n========== TEST 04 roi_scan_straight ROI/前瞻/扫线/直道判断 ==========" "\n");
+    print_stage_card("T04 roi_scan_straight",
+                     "低速手推或静态覆盖普通直道/普通弯，检查入弯提前量、边界连续性和Straight/Normol稳定性。",
+                     "kImageTowPoint、ROI位置、扫线范围、直道判断阈值。",
+                     "不要用err_abs校准kImageMiddleLine；不要改速度环、转向环、陀螺仪环或元素参数。",
+                     "jump/edge_bad/straight_rate稳定后进入T05或T10/T06。");
     printf("[运行] 可放在直道中心静止，也可低速手推过普通弯。输出会显示入弯是否提前、边界是否连续、直道判断是否稳定。\n");
+    printf("[任务] 只调kImageTowPoint、ROI、扫线范围、直道判断阈值；不要用本环节的err_abs去校准kImageMiddleLine。\n");
     g_enable_element_process = false;
 
     RunningStat err, derr, off, width, var, left_miss, right_miss;
@@ -624,6 +1230,7 @@ int test_04_roi_scan_straight(int frames = 180) {
     printf("[T04_SUMMARY] frames=%d err_abs=%.2f dErr_abs=%.2f dErr_span=%.2f OFF=%.2f width=%.2f var=%.2f LMiss=%.2f RMiss=%.2f straight_rate=%.2f cross_rate=%.2f jump_rate=%.2f edge_bad_rate=%.2f\n",
            frames, err.mean_abs(), derr.mean_abs(), derr.span(), off.mean(), width.mean(), var.mean(), left_miss.mean(), right_miss.mean(), straight_rate, cross_rate, jump_rate, edge_bad_rate);
     printf("[调参意义] 入弯晚通常减小kImageTowPoint/kCameraRoiY；直道蛇形且jump高通常增大TowPoint/RoiY或减小扫线范围；edge_bad高先调扫线/ROI/二值形态学。\n");
+    printf("[阶段边界] 若T02/T03没过，不要用T04结论调控制；若只有err_abs大但dErr/edge稳定，优先怀疑摆车偏差而不是中线参数。\n");
     printf("[RETURN] 0=稳定；1=疑似看太近/入弯晚；2=扫线边界不连续；3=直道判断不稳。\n");
     if (off.mean() > 18 || width.mean() < 5) return 1;
     if (edge_bad_rate > 0.20 || jump_rate > 0.20) return 2;
@@ -637,6 +1244,11 @@ int test_04_roi_scan_straight(int frames = 180) {
 // -----------------------------------------------------------------------------
 int test_05_speed_loop_airborne(int target = 50, int seconds = 6) {
     printf("\n========== TEST 05 speed_loop_airborne 速度环架空阶跃 ==========" "\n");
+    print_stage_card("T05 speed_loop_airborne",
+                     "架空给左右轮同目标阶跃，确认速度环响应、振荡、饱和和左右一致性。",
+                     "kSpeedPidP/I/D、kMotorMaxPwm、机械阻力、左右轮差异。",
+                     "不要改视觉Kp/Kd、前瞻、角速度环、环岛限幅；架空速度环不评价循迹好坏。",
+                     "速度环误差和振荡可接受后再把车放回赛道跑T06。");
     printf("[安全] 必须架空！自动闭环给左右同目标速度 target=%d seconds=%d。\n", target, seconds);
     init_control_for_motor_tests();
     Speed_Goal = 0;
@@ -714,6 +1326,11 @@ int test_05_speed_loop_airborne(int target = 50, int seconds = 6) {
 // -----------------------------------------------------------------------------
 int test_06_low_speed_visual_gyro_closed_loop(int seconds = 10) {
     printf("\n========== TEST 06 low_speed_visual_gyro_closed_loop 低速视觉+角速度闭环 ==========" "\n");
+    print_stage_card("T06 low_speed_visual_gyro_closed_loop",
+                     "在普通赛道低速闭环，联合观察视觉外环、目标角速度、实际角速度、差速限幅和轮速误差。",
+                     "kSteerKp/Kd、视觉滤波、目标角速度限幅/变化率、kGyroPidP/D、差速限幅。",
+                     "不要回头大改曝光/二值/扫线；若img_bad高，先退回T03/T04，而不是继续加PID。",
+                     "低速能稳定跑普通赛道后再做T07提速或T08元素。");
     printf("[运行] 小车放在普通赛道起点，程序会自动低速循迹。建议先留出安全空间，必要时Ctrl+C。seconds=%d\n", seconds);
     if (!ensure_camera_ready()) return -1;
     init_control_for_motor_tests();
@@ -747,10 +1364,12 @@ int test_06_low_speed_visual_gyro_closed_loop(int seconds = 10) {
             if (dbg_diff_limited) cap_cnt++;
             if (!dbg_imu_ok) imu_bad_cnt++;
             if (dbg_deadband_active) db_cnt++;
-            bool edge_warn = (ImageStatus.Left_Line > 15 || ImageStatus.Right_Line > 15);
-            bool severe_img_bad = (ImageStatus.OFFLine > 18 ||
-                                   (ImageStatus.Left_Line > 25 && ImageStatus.Right_Line > 25) ||
-                                   std::abs(ImageStatus.MiddleLine - ImageStatus.Det_True) > 26);
+            bool edge_warn = (ImageStatus.Left_Line > 15 ||
+                              ImageStatus.Right_Line > 15 ||
+                              ImageStatus.OFFLine > 18 ||
+                              std::abs(ImageStatus.MiddleLine - ImageStatus.Det_True) > 26);
+            bool severe_img_bad = (ImageStatus.OFFLine > 35 ||
+                                   (ImageStatus.Left_Line > 25 && ImageStatus.Right_Line > 25));
             if (edge_warn) img_warn_cnt++;
             if (severe_img_bad) img_bad_cnt++;
             if (std::fabs(dbg_visual_pd_out) > car_config::kVisualGyroLimitDps * 0.90f) pd_sat_cnt++;
@@ -782,9 +1401,9 @@ int test_06_low_speed_visual_gyro_closed_loop(int seconds = 10) {
     double pd_sat_rate = total_prints ? (double)pd_sat_cnt / total_prints : 0;
     printf("[T06_SUMMARY] samples=%d raw_abs=%.2f filt_abs=%.2f PD_abs=%.2f Tgt_abs=%.2f Real_abs=%.2f GF_abs=%.2f GErr_abs=%.2f Diff_abs=%.2f SE_abs=%.2f/%.2f cap_rate=%.2f pd_sat_rate=%.2f imu_bad=%.2f img_bad=%.2f img_warn=%.2f dtmax_mean=%.3f DB_cnt=%d\n",
            total_prints, raw.mean_abs(), filt.mean_abs(), pd.mean_abs(), tgt.mean_abs(), real.mean_abs(), gf.mean_abs(), gerr.mean_abs(), diff.mean_abs(), se_l.mean_abs(), se_r.mean_abs(), cap_rate, pd_sat_rate, imu_bad_rate, img_bad_rate, img_warn_rate, dtmax.mean(), db_cnt);
-    printf("[调参意义] pd_sat高=外环/前瞻过猛；GErr_abs>20且持续=角速度环/GF跟不上；cap高=差速受限；img_bad=严重丢线/检测贴边；img_warn=弯道单侧边界警告，需结合是否能稳定回中。\n");
+    printf("[调参意义] pd_sat高=外环/前瞻过猛；GErr_abs>20且持续=角速度环/GF跟不上；cap高=差速受限；img_bad=OFF>35或双边严重丢失；img_warn=急弯大偏差/单侧贴边/短暂OFF，需结合是否能稳定回中。\n");
     printf("[RETURN] 0=低速闭环可继续；1=PD饱和；2=陀螺仪跟踪差；3=差速/速度受限；4=图像不稳。\n");
-    if (img_bad_rate > 0.15) return 4;
+    if (img_bad_rate > 0.20 || img_warn_rate > 0.70) return 4;
     if (pd_sat_rate > 0.25) return 1;
     if (gerr.mean_abs() > 20.0 || imu_bad_rate > 0.05) return 2;
     if (cap_rate > 0.25 || se_l.mean_abs() > 6.0 || se_r.mean_abs() > 6.0) return 3;
@@ -797,6 +1416,11 @@ int test_06_low_speed_visual_gyro_closed_loop(int seconds = 10) {
 // -----------------------------------------------------------------------------
 int test_07_speed_up_regression(int seconds = 12) {
     printf("\n========== TEST 07 speed_up_regression 速度提升回归 ==========" "\n");
+    print_stage_card("T07 speed_up_regression",
+                     "在T06低速稳定基础上验证当前直道/弯道速度是否可保留。",
+                     "kStraightSpeedGoal、kCurveSpeedGoal、急弯/S弯保护速度和目标角速度变化率的小幅调整。",
+                     "不要在一次提速失败后同时重调图像、速度环、IMU和元素；先按T06指标定位瓶颈。",
+                     "普通赛道提速稳定后再进入元素或更高速度回归。");
     printf("[运行] 用当前car_config里的速度跑完整普通赛道片段，元素关闭。把SUMMARY和固定失误位置告诉我。\n");
     int ret = test_06_low_speed_visual_gyro_closed_loop(seconds);
     if (ret == 4) return 4;
@@ -813,6 +1437,11 @@ int test_07_speed_up_regression(int seconds = 12) {
 // -----------------------------------------------------------------------------
 int test_08_element_debug(int seconds = 25) {
     printf("\n========== TEST 08 element_debug 元素判断/处理 ==========" "\n");
+    print_stage_card("T08 element_debug",
+                     "只在普通循迹稳定后开启元素，观察Road/Scene/cooldown/圆环确认条件是否抖动或漏检。",
+                     "元素确认帧数、丢线门槛、P1/P2几何限制、元素内速度/角速度/差速限幅。",
+                     "不要用元素问题反推基础二值、速度环和普通弯PID一起改；若img_bad高先退回T03/T04。",
+                     "单个元素稳定后再逐个增加速度或串联多个元素。");
     printf("[运行] 只在普通循迹稳定后调用。开启元素判断，低速经过十字/圆环区域，输出Road_type、Scene、ring/cooldown状态。seconds=%d\n", seconds);
     printf("[CFG_T08] ring_confirm=%d exit_confirm=%d cooldown=%d exit_hold=%d left(Lmin=%d Rmax=%d OFFmax=%d P2<%d) right(Rmin=%d Lmax=%d OFFmax=%d P2>%d) loss_only>=%d ring_cap=%.0f unclassified_limit=%.0f@%.0f。误判多增大confirm/loss_only；漏检先降低对应min或放宽对侧max/OFFmax。\n",
            car_config::kElementRingConfirmFrames,
@@ -831,9 +1460,19 @@ int test_08_element_debug(int seconds = 25) {
            car_config::kRingSceneGyroLimitDps,
            car_config::kUnclassifiedTurnGyroLimitDps,
            car_config::kUnclassifiedTurnTriggerError);
+    init_element_tft_once("T08");
     if (!ensure_camera_ready()) return -1;
     init_control_for_motor_tests();
     g_enable_element_process = true;
+
+    lq_udp_client udp_client;
+    if (kElementDebugUdpEnable) {
+        udp_client.udp_client_init(kElementDebugTargetIp, kElementDebugTargetPort);
+        printf("[T08_UDP] target=%s:%u quality=%u overlay=raw/final_boundary+center+P1/P2+state\n",
+               kElementDebugTargetIp.c_str(), kElementDebugTargetPort, kElementDebugJpegQuality);
+    } else {
+        printf("[T08_UDP] disabled. 使用 TFT18 + 终端日志观察元素补线。\n");
+    }
 
     std::thread ctrl_thread(timer_thread_1);
     int last_road = -999;
@@ -883,12 +1522,12 @@ int test_08_element_debug(int seconds = 25) {
                                  ImageStatus.Road_type == Ramp ||
                                  ImageStatus.Road_type == LeftCirque ||
                                  ImageStatus.Road_type == RightCirque ||
-                                 ImageStatus.Road_type == Barn_in ||
                                  ImageFlag.image_element_rings != 0 ||
                                  ImageFlag.image_element_rings_flag != 0);
             if (special_seen) special_cnt++;
             bool edge_warn = (ImageStatus.Left_Line > 15 || ImageStatus.Right_Line > 15);
-            bool severe_img_bad = (ImageStatus.OFFLine > 18 ||
+            bool severe_img_bad = (g_element_scene == ElementScene_Normal) &&
+                                  (ImageStatus.OFFLine > 18 ||
                                    (ImageStatus.Left_Line > 25 && ImageStatus.Right_Line > 25) ||
                                    std::abs(ImageStatus.MiddleLine - ImageStatus.Det_True) > 26);
             if (edge_warn) img_warn_cnt++;
@@ -922,6 +1561,14 @@ int test_08_element_debug(int seconds = 25) {
                    ImageStatus.straight_acc, ImageStatus.straight_acc_flag,
                    dbg_diff_speed, dbg_target_gyro_z, dbg_gyro_error,
                    speed_encoder_L, speed_encoder_R);
+            if (kElementDebugUdpEnable) {
+                cv::Mat display_frame = make_element_debug_frame(samples, changes, scene_changes, img_bad_cnt, img_warn_cnt);
+                ssize_t sent = udp_client.udp_send_image(display_frame, kElementDebugJpegQuality);
+                if (sent < 0) {
+                    printf("[T08_UDP_WARN] send failed\n");
+                }
+            }
+            show_element_tft_frame("T08", samples, changes, scene_changes, img_bad_cnt, img_warn_cnt, true);
         }
         usleep(5 * 1000);
     }
@@ -950,10 +1597,190 @@ int test_08_element_debug(int seconds = 25) {
 }
 
 // -----------------------------------------------------------------------------
+// Step 08H: 元素手推图传调试。不开闭环、不驱动电机，只进行图像处理/元素判断/补线叠加。
+// 用途：手推小车经过左/右环岛，观察 ring=1/5/6/7/8 时补线和中心线是否指向正确。
+// 返回值：0=采集完成；2=未看到元素；3=图像不稳/采集失败。
+// -----------------------------------------------------------------------------
+int test_08_element_push_image_debug(int seconds = 40) {
+    printf("\n========== TEST 08H element_push_image_debug 手推元素图传/补线观察 ==========" "\n");
+    print_stage_card("T08H element_push_image_debug",
+                     "不开电机闭环，只开摄像头、元素判断、TFT18显示和CSV采样；手推小车观察补线/中心线。",
+                     "左/右环岛识别阈值、ring状态推进条件、P1/P2特征点、补线中心偏置。",
+                     "不要在本测试中调速度环/普通弯PID；本测试目标是先确认图像补线方向是否正确。",
+                     "确认 ring=1/5/6/7/8 的补线都正确后，再回到T08自动低速通过。");
+    printf("[运行] 手推模式：电机目标和PWM会被强制清零。请看TFT18画面，手扶小车慢慢推过左/右环岛。seconds=%d\n", seconds);
+    printf("[观察] 重点截图 ring=1/5 刚入环、ring=1/6 环内、ring=1/7/8 出环阶段；看中心线是否指向环心/出口。\n");
+    printf("[采样] 本测试会把每帧元素特征保存成CSV，并在结束时打印自动调参建议。\n");
+    printf("[CFG_T08H] left(Lmin=%d Rmax=%d OFFmax=%d P2<%d) right(Rmin=%d Lmax=%d OFFmax=%d P2>%d) entry_bias=%d inner_bias=%d forced=%.1f exit=%.1f\n",
+           car_config::kLeftRingMinLeftLost,
+           car_config::kLeftRingRightLineBlockMax,
+           car_config::kLeftRingOfflineBlockMax,
+           car_config::kLeftRingMaxPoint2Y,
+           car_config::kRightRingMinRightLost,
+           car_config::kRightRingLeftLineBlockMax,
+           car_config::kRightRingOfflineBlockMax,
+           car_config::kRightRingMinPoint2Y,
+           car_config::kRingEntryCenterBias,
+           car_config::kRingInnerCenterBias,
+           car_config::kRingForcedSteerError,
+           car_config::kRingExitSteerError);
+    init_element_tft_once("T08H");
+
+    if (!ensure_camera_ready()) return -1;
+    init_control_for_motor_tests();
+    g_enable_element_process = true;
+    Speed_Goal = 0;
+    Speed_Goal_l = 0;
+    Speed_Goal_r = 0;
+    speed_out_l = 0;
+    speed_out_r = 0;
+    motor_Duty_L(0);
+    motor_Duty_R(0);
+
+    lq_udp_client udp_client;
+    if (kElementDebugUdpEnable) {
+        udp_client.udp_client_init(kElementDebugTargetIp, kElementDebugTargetPort);
+        printf("[T08H_UDP] target=%s:%u quality=%u overlay=raw/final_boundary+center+P1/P2+state\n",
+               kElementDebugTargetIp.c_str(), kElementDebugTargetPort, kElementDebugJpegQuality);
+    } else {
+        printf("[T08H_UDP] disabled. 使用 TFT18 + 终端日志观察元素补线。\n");
+    }
+    ElementCsvLogger csv_logger;
+    csv_logger.open("T08H_element_features");
+    ElementFeatureStats feature_stats;
+
+    int last_road = -999;
+    ElementScene_e last_scene = ElementScene_Normal;
+    bool has_last_scene = false;
+    int changes = 0, scene_changes = 0, special_cnt = 0, img_bad_cnt = 0, img_warn_cnt = 0, samples = 0;
+    auto start = std::chrono::steady_clock::now();
+    auto last_print = start;
+    while (!exit_flag) {
+        Speed_Goal = 0;
+        Speed_Goal_l = 0;
+        Speed_Goal_r = 0;
+        speed_out_l = 0;
+        speed_out_r = 0;
+        motor_Duty_L(0);
+        motor_Duty_R(0);
+
+        if (!grab_and_process()) { img_bad_cnt++; break; }
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - start).count() >= seconds) break;
+
+        if (ImageStatus.Road_type != last_road) {
+            printf("[T08H_EVENT] t=%.2f RoadChange %s -> %s Det=%d Err=%d OFF=%d L/R=%d/%d straight=%d/%d\n",
+                   std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() / 1000.0,
+                   road_type_name(last_road), road_type_name(ImageStatus.Road_type),
+                   ImageStatus.Det_True, ImageStatus.MiddleLine - ImageStatus.Det_True,
+                   ImageStatus.OFFLine, ImageStatus.Left_Line, ImageStatus.Right_Line,
+                   ImageStatus.straight_acc, ImageStatus.straight_acc_flag);
+            last_road = ImageStatus.Road_type;
+            changes++;
+        }
+        if (!has_last_scene) {
+            last_scene = g_element_scene;
+            has_last_scene = true;
+        } else if (g_element_scene != last_scene) {
+            printf("[T08H_EVENT] t=%.2f SceneChange %s -> %s Road=%s ring=%d/%d Cool=%u Err=%d OFF=%d L/R=%d/%d\n",
+                   std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() / 1000.0,
+                   element_scene_name(last_scene), element_scene_name(g_element_scene),
+                   road_type_name(ImageStatus.Road_type),
+                   ImageFlag.image_element_rings, ImageFlag.image_element_rings_flag,
+                   g_element_cooldown_frames,
+                   ImageStatus.MiddleLine - ImageStatus.Det_True,
+                   ImageStatus.OFFLine, ImageStatus.Left_Line, ImageStatus.Right_Line);
+            last_scene = g_element_scene;
+            scene_changes++;
+        }
+
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_print).count() >= 120) {
+            last_print = now;
+            samples++;
+            bool special_seen = (ImageStatus.Road_type == Cross ||
+                                 ImageStatus.Road_type == Cross_ture ||
+                                 ImageStatus.Road_type == Ramp ||
+                                 ImageStatus.Road_type == LeftCirque ||
+                                 ImageStatus.Road_type == RightCirque ||
+                                 ImageFlag.image_element_rings != 0 ||
+                                 ImageFlag.image_element_rings_flag != 0);
+            if (special_seen) special_cnt++;
+            bool edge_warn = (ImageStatus.Left_Line > 15 || ImageStatus.Right_Line > 15);
+            bool severe_img_bad = (g_element_scene == ElementScene_Normal) &&
+                                  (ImageStatus.OFFLine > 18 ||
+                                   (ImageStatus.Left_Line > 25 && ImageStatus.Right_Line > 25) ||
+                                   std::abs(ImageStatus.MiddleLine - ImageStatus.Det_True) > 26);
+            if (edge_warn) img_warn_cnt++;
+            if (severe_img_bad) img_bad_cnt++;
+            feature_stats.add();
+            double t_sec = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() / 1000.0;
+            csv_logger.write(t_sec, samples, false, severe_img_bad ? 1 : 0, edge_warn ? 1 : 0);
+            printf("[T08H] Road=%s Scene=%s Cool=%u Det=%d Err=%d OFF=%d L/R=%d/%d ring=%d/%d EL=%d L[b/g/l/s/c p1/p2/h]=%d/%d/%d/%d/%d %d/%d/%d R[b/g/l/s/c p1/p2/h]=%d/%d/%d/%d/%d %d/%d/%d lp=%d/%d rp=%d/%d straight=%d/%d MOTOR=OFF\n",
+                   road_type_name(ImageStatus.Road_type),
+                   element_scene_name(g_element_scene), g_element_cooldown_frames,
+                   ImageStatus.Det_True,
+                   ImageStatus.MiddleLine - ImageStatus.Det_True, ImageStatus.OFFLine,
+                   ImageStatus.Left_Line, ImageStatus.Right_Line,
+                   ImageFlag.image_element_rings, ImageFlag.image_element_rings_flag,
+                   dbg_el_detect_open,
+                   dbg_el_l_block,
+                   dbg_el_l_geom,
+                   dbg_el_l_loss,
+                   dbg_el_l_susp,
+                   dbg_el_l_confirm,
+                   dbg_el_l_p1,
+                   dbg_el_l_p2,
+                   dbg_el_l_help,
+                   dbg_el_r_block,
+                   dbg_el_r_geom,
+                   dbg_el_r_loss,
+                   dbg_el_r_susp,
+                   dbg_el_r_confirm,
+                   dbg_el_r_p1,
+                   dbg_el_r_p2,
+                   dbg_el_r_help,
+                   Left_RingsFlag_Point1_Ysite, Left_RingsFlag_Point2_Ysite,
+                   Right_RingsFlag_Point1_Ysite, Right_RingsFlag_Point2_Ysite,
+                   ImageStatus.straight_acc, ImageStatus.straight_acc_flag);
+            if (kElementDebugUdpEnable) {
+                cv::Mat display_frame = make_element_debug_frame(samples, changes, scene_changes, img_bad_cnt, img_warn_cnt);
+                ssize_t sent = udp_client.udp_send_image(display_frame, kElementDebugJpegQuality);
+                if (sent < 0) {
+                    printf("[T08H_UDP_WARN] send failed\n");
+                }
+            }
+            show_element_tft_frame("T08H", samples, changes, scene_changes, img_bad_cnt, img_warn_cnt, false);
+        }
+        usleep(5 * 1000);
+    }
+    safe_stop_and_print("T08H");
+    exit_flag = false;
+    csv_logger.close();
+    double img_bad_rate = samples ? (double)img_bad_cnt / samples : 0.0;
+    double img_warn_rate = samples ? (double)img_warn_cnt / samples : 0.0;
+    double special_rate = samples ? (double)special_cnt / samples : 0.0;
+    printf("[T08H_SUMMARY] samples=%d road_changes=%d scene_changes=%d special_rate=%.2f img_bad_rate=%.2f img_warn_rate=%.2f final_scene=%s final_ring=%d/%d cool=%u\n",
+           samples, changes, scene_changes, special_rate, img_bad_rate, img_warn_rate,
+           element_scene_name(g_element_scene), ImageFlag.image_element_rings,
+           ImageFlag.image_element_rings_flag, g_element_cooldown_frames);
+    feature_stats.print_recommendation("T08H", csv_logger.path, special_rate, img_bad_rate, img_warn_rate);
+    printf("[T08H调参意义] 只看图像补线：ring=1/5中心线不进环=>调入口补线/偏置；ring=1/7/8仍指环内=>调出环补线；图像正确但自动跑不进=>再调控制差速。\n");
+    printf("[RETURN] 0=采集完成；2=未看到元素；3=图像不稳。\n");
+    if (img_bad_rate > 0.25) return 3;
+    if (special_cnt == 0) return 2;
+    return 0;
+}
+
+// -----------------------------------------------------------------------------
 // Step 20: 不同电压/光照回归。只采集图像和关键控制，不强制解释。
 // -----------------------------------------------------------------------------
 int test_09_voltage_light_regression(int frames = 200) {
     printf("\n========== TEST 09 voltage_light_regression 电压/光照回归 ==========" "\n");
+    print_stage_card("T09 voltage_light_regression",
+                     "换电池电压或光照后，只回归图像稳定性和摄像头角度，不直接重调控制环。",
+                     "曝光、二值化、ROI基础质量；必要时只做最小幅度补偿。",
+                     "不要因为一次光照变化把PID、速度、元素参数全部推倒重来。",
+                     "回归通过后沿用原控制参数；不通过时按T02/T03返回码处理。");
     printf("[运行] 换电池电压或光照后调用。建议先静止，再低速手推问题区域。\n");
     int r2 = test_02_camera_center_angle_static(frames / 2);
     int r3 = test_03_exposure_otsu_quality(frames / 2);
@@ -968,6 +1795,11 @@ int test_09_voltage_light_regression(int frames = 200) {
 // -----------------------------------------------------------------------------
 int test_10_gyro_static_noise(int seconds = 10) {
     printf("\n========== TEST 10 gyro_static_noise IMU静止噪声 ==========" "\n");
+    print_stage_card("T10 gyro_static_noise",
+                     "静止采样MPU6050，确认零漂、噪声、尖峰、采样dt是否健康。",
+                     "kGyroDeadBandDps、kGyroLpfAlpha、I2C/供电/接地/线材问题。",
+                     "不要靠增大角速度PID去掩盖静止尖峰；IMU不过不要跑T06角速度闭环。",
+                     "IMU静态健康后再进入T06低速视觉+角速度闭环。");
     printf("[摆放] 小车静止放在桌面/地面，不要碰车，不需要赛道。本测试不会输出电机PWM。seconds=%d\n", seconds);
     printf("[目的] 统计 gyro_z 静止零漂、噪声、尖峰，用于判断 kGyroDeadBandDps / kGyroLpfAlpha / I2C稳定性。\n");
 
@@ -1123,13 +1955,13 @@ static int run_flow_step(const char *label,
 
 int run_visual_pipeline(void) {
     printf("\n========== FLOW A visual_pipeline 纯图像调参流程 ==========" "\n");
-    printf("[安全] 不输出电机。按顺序检查配置、摄像头居中/俯仰、OTSU二值质量、ROI/扫线/直道判断。\n");
+    printf("[安全] 不输出电机。按顺序检查配置、摄像头对线重复性/俯仰、二值质量、ROI/扫线/直道判断。\n");
     int ret = 0;
     ret = run_flow_step("T00 precheck_config", [](){ return test_00_precheck_config(); });
     if (ret != 0) return ret;
-    ret = run_flow_step("T02 camera_center_angle_static", [](){ return test_02_camera_center_angle_static(); });
+    ret = run_flow_step("T02 camera_alignment_repeatability", [](){ return test_02_camera_center_angle_static(); });
     if (ret != 0) return 20 + ret;
-    ret = run_flow_step("T03 exposure_otsu_quality", [](){ return test_03_exposure_otsu_quality(); });
+    ret = run_flow_step("T03 binary_quality", [](){ return test_03_exposure_otsu_quality(); });
     if (ret != 0) return 30 + ret;
     ret = run_flow_step("T04 roi_scan_straight", [](){ return test_04_roi_scan_straight(); });
     if (ret != 0) return 40 + ret;
@@ -1155,7 +1987,7 @@ int run_sensor_pipeline(void) {
     printf("\n========== FLOW C sensor_pipeline 传感器静态检查 ==========" "\n");
     printf("[安全] 不跑车。用于检查摄像头图像和MPU6050静止噪声。\n");
     int ret = 0;
-    ret = run_flow_step("T03 exposure_otsu_quality", [](){ return test_03_exposure_otsu_quality(); });
+    ret = run_flow_step("T03 binary_quality", [](){ return test_03_exposure_otsu_quality(); });
     if (ret != 0) return 30 + ret;
     release_camera_for_imu_test();
     ret = run_flow_step("T10 gyro_static_noise", [](){ return test_10_gyro_static_noise(); });
@@ -1168,9 +2000,9 @@ int run_low_speed_pipeline(void) {
     printf("\n========== FLOW D low_speed_pipeline 低速上赛道流程 ==========" "\n");
     printf("[安全] 会让小车低速循迹。建议先跑 visual_pipeline 和 airborne_pipeline，通过后再执行。\n");
     int ret = 0;
-    ret = run_flow_step("T02 camera_center_angle_static", [](){ return test_02_camera_center_angle_static(); });
+    ret = run_flow_step("T02 camera_alignment_repeatability", [](){ return test_02_camera_center_angle_static(); });
     if (ret != 0) return 20 + ret;
-    ret = run_flow_step("T03 exposure_otsu_quality", [](){ return test_03_exposure_otsu_quality(); });
+    ret = run_flow_step("T03 binary_quality", [](){ return test_03_exposure_otsu_quality(); });
     if (ret != 0) return 30 + ret;
     ret = run_flow_step("T04 roi_scan_straight", [](){ return test_04_roi_scan_straight(); });
     if (ret != 0) return 40 + ret;
@@ -1210,6 +2042,7 @@ int lq_param_test_05_speed_loop_airborne(void) { return param_step_demo::run_wit
 int lq_param_test_06_low_speed_visual_gyro_closed_loop(void) { return param_step_demo::run_with_log("T06_low_speed_visual_gyro", [](){ return param_step_demo::test_06_low_speed_visual_gyro_closed_loop(); }); }
 int lq_param_test_07_speed_up_regression(void) { return param_step_demo::run_with_log("T07_speed_up_regression", [](){ return param_step_demo::test_07_speed_up_regression(); }); }
 int lq_param_test_08_element_debug(void) { return param_step_demo::run_with_log("T08_element_debug", [](){ return param_step_demo::test_08_element_debug(); }); }
+int lq_param_test_08h_element_push_image_debug(void) { return param_step_demo::run_with_log("T08H_element_push_image_debug", [](){ return param_step_demo::test_08_element_push_image_debug(); }); }
 int lq_param_test_09_voltage_light_regression(void) { return param_step_demo::run_with_log("T09_voltage_light_regression", [](){ return param_step_demo::test_09_voltage_light_regression(); }); }
 int lq_param_test_10_gyro_static_noise(void) { return param_step_demo::run_with_log("T10_gyro_static_noise", [](){ return param_step_demo::test_10_gyro_static_noise(); }); }
 int lq_param_flow_visual(void) { return param_step_demo::run_with_log("FLOW_A_visual_pipeline", [](){ return param_step_demo::run_visual_pipeline(); }); }
@@ -1218,25 +2051,49 @@ int lq_param_flow_sensor(void) { return param_step_demo::run_with_log("FLOW_C_se
 int lq_param_flow_low_speed(void) { return param_step_demo::run_with_log("FLOW_D_low_speed_pipeline", [](){ return param_step_demo::run_low_speed_pipeline(); }); }
 int lq_param_flow_element(void) { return param_step_demo::run_with_log("FLOW_E_element_pipeline", [](){ return param_step_demo::run_element_pipeline(); }); }
 
+void lq_camera_tft18_demo(void) {
+    printf("\n========== DEMO TFT18 element image debug ==========" "\n");
+    printf("该入口用于单独测试 TFT18 + 摄像头 + 当前元素补线显示。\n");
+    printf("它复用 T08H 手推元素调试：电机强制关闭，TFT18 实时显示二值图、边线、中心线、P1/P2 和 ring 状态。\n");
+    printf("若要自动低速通过元素，请运行 lq_param_test_08_element_debug() 或当前 main.cpp 的 34 号 Demo。\n");
+    int ret = param_step_demo::run_with_log("TFT18_element_push_debug",
+                                            [](){ return param_step_demo::test_08_element_push_image_debug(60); });
+    printf("[TFT18_DEMO] ret=%d\n", ret);
+}
+
 void lq_parameter_step_tuning_demo(void) {
     printf("\n========== DEMO 33 parameter_step_tuning_demo ==========" "\n");
-    printf("这是一个分阶段调参向导。建议先跑流程函数，再按失败步骤单独复测。\n\n");
+    printf("这是一个分阶段调参向导。建议先跑流程函数，再按失败步骤单独复测；不要跨阶段混改参数。\n\n");
     printf("[推荐流程]\n");
-    printf("  lq_param_flow_visual();        // 不跑电机：配置、摄像头、OTSU、ROI/扫线\n");
+    printf("  lq_param_flow_visual();        // 不跑电机：配置、摄像头重复性、二值、ROI/扫线\n");
     printf("  lq_param_flow_airborne();      // 必须架空：电机/编码器方向、速度环基础\n");
-    printf("  lq_param_flow_sensor();        // 不跑车：OTSU质量 + MPU6050静止噪声\n");
+    printf("  lq_param_flow_sensor();        // 不跑车：二值质量 + MPU6050静止噪声\n");
     printf("  lq_param_flow_low_speed();     // 上赛道低速：视觉 + 陀螺仪 + 轮速闭环\n\n");
-    printf("  lq_param_flow_element();       // 上赛道低速：开启元素/特殊赛道判断与处理\n\n");
+    printf("  lq_param_flow_element();       // 上赛道低速：开启元素/特殊赛道判断与处理，T08/T08H会同步刷新TFT18补线画面\n\n");
+    printf("[每阶段只做一件事]\n");
+    printf("  T00: 打印配置快照，确认当前编译进去的数值，防止把旧版本参数当成新参数。\n");
+    printf("  T01: 架空测电机/编码器方向和左右机械差异，只处理硬件方向、接线、死区。\n");
+    printf("  T02: 静态看摄像头对线重复性和俯仰角，不要求手摆像素级居中；中线只看3次重复日志后的趋势。\n");
+    printf("  T03: 只看曝光/二值化/ROI基础质量，white、dDet、lost不过时不要调PID。\n");
+    printf("  T04: 只看前瞻、扫线和直道判断，手推普通弯观察jump/edge_bad/straight_rate。\n");
+    printf("  T05: 架空测速度环阶跃，只调速度环P/I/D、PWM限幅、左右机械一致性。\n");
+    printf("  T10: 静止测IMU噪声，只调gyro死区/滤波/排查I2C供电，不用PID掩盖尖峰。\n");
+    printf("  T06: 低速闭环后才调视觉Kp/Kd、目标角速度限幅、角速度环和差速限幅。\n");
+    printf("  T07/T08/T09: 分别用于提速回归、元素调试、电压/光照回归，不能拿回归问题反推前面所有参数一起改。\n\n");
+    printf("[中线校准规则]\n");
+    printf("  单次T02的err_mean包含人工摆车误差，只能参考；先看det_std/det_span/det_jump是否稳定。\n");
+    printf("  若要改kImageMiddleLine：同一段直道重复摆放3轮，只有middle_candidate_ok=1时，才按candidate_next每次改1。\n\n");
     printf("[单项测试]\n");
     printf("  lq_param_test_00_precheck_config();\n");
     printf("  lq_param_test_01_motor_encoder_direction();      // 架空\n");
-    printf("  lq_param_test_02_camera_center_angle_static();\n");
-    printf("  lq_param_test_03_exposure_otsu_quality();\n");
+    printf("  lq_param_test_02_camera_center_angle_static();   // 实际为对线重复性/角度，不做像素级摆正判罚\n");
+    printf("  lq_param_test_03_exposure_otsu_quality();        // 当前按kImageAlgorithm输出二值质量\n");
     printf("  lq_param_test_04_roi_scan_straight();\n");
     printf("  lq_param_test_05_speed_loop_airborne();          // 架空\n");
     printf("  lq_param_test_06_low_speed_visual_gyro_closed_loop();\n");
     printf("  lq_param_test_07_speed_up_regression();\n");
-    printf("  lq_param_test_08_element_debug();\n");
+    printf("  lq_param_test_08_element_debug();              // 自动低速元素调试 + TFT18实时补线\n");
+    printf("  lq_camera_tft18_demo();                        // 单独手推测试TFT18补线/元素状态，电机关闭\n");
     printf("  lq_param_test_09_voltage_light_regression();\n");
     printf("  lq_param_test_10_gyro_static_noise();             // 无需赛道，静止IMU噪声\n");
     printf("\n[返回码]\n");

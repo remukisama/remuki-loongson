@@ -2,6 +2,7 @@
 #include "user_app.hpp"
 #include "car_config.hpp"
 #include <atomic>
+#include <chrono>
 #include <iostream>
 
 
@@ -16,7 +17,7 @@ int imgdisplay[60][80];//打印到中端图像数组
 #define PIXEL_CENTER    4   // 中线
 
 uint8 Garage_Location_Flag=0;//斑马线累积初始次数
-bool g_enable_element_process = true; // 默认启用元素判断与元素处理
+bool g_enable_element_process = false; // 校赛无元素竞速默认关闭元素判断与处理
 ElementScene_e g_element_scene = ElementScene_Normal; // 当前元素场景锁
 uint8 g_element_cooldown_frames = 0;                  // 元素退出后的识别冷却
 uint8 Garage_num=2;//斑马线设定次数
@@ -123,7 +124,9 @@ static void Element_ResetRingEntryCounters(void)
 static void Element_BeginRing(uint8 ring_side)
 {
   ImageFlag.image_element_rings = ring_side;
-  ImageFlag.image_element_rings_flag = 1;
+  // 原状态机从 flag=1 开始，但实车左环入口长期停在 1/1，等不到 num>10 -> 2 -> 5 -> 6。
+  // 对当前测试先直接进入进环补线阶段(flag=5)，让车辆真正切入环岛，再根据 Right_Line 推进到 6/7。
+  ImageFlag.image_element_rings_flag = 5;
   ImageFlag.ring_big_small = 1;
   ring_active_frames = 0;
   g_element_scene = (ring_side == 1) ? ElementScene_LeftRing : ElementScene_RightRing;
@@ -170,6 +173,13 @@ static void Element_FinishRing(uint8 ring_side)
 
 static bool Element_CanDetectNewScene(void)
 {
+  static auto s_program_start = std::chrono::steady_clock::now();
+  auto now = std::chrono::steady_clock::now();
+  if (std::chrono::duration_cast<std::chrono::milliseconds>(now - s_program_start).count() < 2000)
+  {
+    return false;
+  }
+
   return g_enable_element_process
       && g_element_scene == ElementScene_Normal
       && g_element_cooldown_frames == 0
@@ -1075,8 +1085,14 @@ static void DrawExtensionLine(void)        //绘制延长线并重新确定中�
       }
   }
   for (Ysite = 59; Ysite >= ImageStatus.OFFLine; Ysite--) {
-    ImageDeal[Ysite].Center =(ImageDeal[Ysite].LeftBorder + ImageDeal[Ysite].RightBorder) /2;                                //扫描结束，把这一块经优化之后的中间值存入
-    ImageDeal[Ysite].Wide =-ImageDeal[Ysite].LeftBorder +ImageDeal[Ysite].RightBorder;                                       //把优化之后的宽度存入
+    if (ImageStatus.Left_Line > car_config::kSingleSideLossThreshold && ImageStatus.Right_Line <= car_config::kSingleSideLossThreshold) {
+      ImageDeal[Ysite].Center = ImageDeal[Ysite].RightBorder - Half_Road_Wide[Ysite];
+    } else if (ImageStatus.Right_Line > car_config::kSingleSideLossThreshold && ImageStatus.Left_Line <= car_config::kSingleSideLossThreshold) {
+      ImageDeal[Ysite].Center = ImageDeal[Ysite].LeftBorder + Half_Road_Wide[Ysite];
+    } else {
+      ImageDeal[Ysite].Center = (ImageDeal[Ysite].LeftBorder + ImageDeal[Ysite].RightBorder) / 2;
+    }
+    ImageDeal[Ysite].Wide = -ImageDeal[Ysite].LeftBorder + ImageDeal[Ysite].RightBorder;
   }
 }
 
@@ -1387,10 +1403,7 @@ void Element_Judgment_Left_Rings()
     const bool base_blocked = (
                ImageStatus.Right_Line > car_config::kLeftRingRightLineBlockMax
             || ImageStatus.Left_Line < car_config::kLeftRingMinLeftLost
-            || ImageStatus.OFFLine > car_config::kLeftRingOfflineBlockMax
-            || ImageDeal[58].RightBorder > 77
-            || ImageDeal[57].RightBorder > 77
-            || ImageDeal[56].RightBorder > 77);
+            || ImageStatus.OFFLine > car_config::kLeftRingOfflineBlockMax);
 
     if (base_blocked)
     {
@@ -1446,8 +1459,7 @@ void Element_Judgment_Left_Rings()
            ImageStatus.Left_Line >= car_config::kRingLossOnlyMinLost
         && ImageStatus.Right_Line <= car_config::kLeftRingRightLineBlockMax
         && ImageStatus.OFFLine <= car_config::kLeftRingOfflineBlockMax
-        && abs(ImageStatus.MiddleLine - ImageStatus.Det_True) <= car_config::kRingLossOnlyMaxEntryError
-        && ImageDeal[56].RightBorder < 77);
+        && abs(ImageStatus.MiddleLine - ImageStatus.Det_True) <= car_config::kRingLossOnlyMaxEntryError);
     const bool left_candidate = left_geometry_candidate || left_loss_candidate;
     dbg_el_l_p1 = Left_RingsFlag_Point1_Ysite;
     dbg_el_l_p2 = Left_RingsFlag_Point2_Ysite;
@@ -1835,10 +1847,7 @@ void Element_Handle_Left_Rings()
         || ImageFlag.image_element_rings_flag == 3
         || ImageFlag.image_element_rings_flag == 4)
     {
-        for (int Ysite = 57; Ysite > ImageStatus.OFFLine; Ysite--)
-        {
-            ImageDeal[Ysite].Center = ImageDeal[Ysite].RightBorder - Half_Road_Wide[Ysite];
-        }
+        Element_ForceLeftRingCenter(car_config::kRingEntryCenterBias);
     }
         //进环  补线
     if  ( ImageFlag.image_element_rings_flag == 5
@@ -2140,10 +2149,7 @@ void Element_Handle_Right_Rings()
         || ImageFlag.image_element_rings_flag == 3
         || ImageFlag.image_element_rings_flag == 4)
     {
-        for (int Ysite = 59; Ysite > ImageStatus.OFFLine; Ysite--)
-        {
-            ImageDeal[Ysite].Center = ImageDeal[Ysite].LeftBorder + Half_Road_Wide[Ysite];
-        }
+        Element_ForceRightRingCenter(car_config::kRingEntryCenterBias);
     }
 
         //进环  补线
