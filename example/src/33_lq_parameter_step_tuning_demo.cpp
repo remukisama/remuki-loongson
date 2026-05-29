@@ -1,5 +1,6 @@
 #include "main.hpp"
 #include "car_config.hpp"
+#include "my_cascade_pid.hpp"
 #include "lq_display_tft18.hpp"
 #include <algorithm>
 #include <atomic>
@@ -48,6 +49,8 @@ extern float speed_encoder_L;
 extern float speed_encoder_R;
 extern float speed_out_l;
 extern float speed_out_r;
+extern float speed_last_erro_L;
+extern float speed_last_erro_R;
 extern int DEAD_BAND;
 
 extern float dbg_steer_error;
@@ -523,7 +526,7 @@ static void print_stage_task_map() {
     printf("[TASK_MAP] 本Demo按阶段锁参数：先图像质量，再硬件方向，再速度环，再IMU，再低速闭环，最后元素/提速。\n");
     printf("[TASK_MAP] T02只判断摄像头/图像重复性，不要求手动把车摆到像素级中线；单次摆放的err_mean只能作为参考。\n");
     printf("[TASK_MAP] 中线参数只在同一段直道重复摆放3次后再改：若3次det_mean同向偏离且差异小，再考虑kImageMiddleLine每次改1。\n");
-    printf("[TASK_MAP] T03只改曝光/二值化/ROI质量；T04只改前瞻/扫线/直道判断；T05只改速度环；T10只改IMU死区/滤波；T06以后才碰转向/角速度环。\n");
+    printf("[TASK_MAP] T03只改曝光/二值化/ROI质量；T04只改前瞻/扫线/直道判断；T05只改速度环；T10只改IMU死区/滤波；T11只隔离角速度环；T06以后才联调视觉外环。\n");
 }
 
 static void print_stage_card(const char *stage,
@@ -536,6 +539,176 @@ static void print_stage_card(const char *stage,
     printf("[STAGE_TUNE_ONLY] %s\n", tune_only);
     printf("[STAGE_DO_NOT_TUNE] %s\n", do_not_tune);
     printf("[STAGE_PASS_TO_NEXT] %s\n", pass_to_next);
+}
+
+static void print_param_plan_line(const char *stage,
+                                  const char *params,
+                                  const char *watch,
+                                  const char *adjust,
+                                  const char *guard) {
+    printf("[PARAM_PLAN] stage=%s params=%s\n", stage, params);
+    printf("[PARAM_WATCH] %s\n", watch);
+    printf("[PARAM_ADJUST] %s\n", adjust);
+    printf("[PARAM_GUARD] %s\n", guard);
+}
+
+static void print_parameter_debug_plan() {
+    printf("\n========== PARAMETER DEBUG PLAN 参数级调试地图 ==========" "\n");
+    printf("[PLAN_RULE] 每次只改同一阶段的一小组参数；改完必须回到对应测试复测，不要用T07/T08失败反推所有参数一起改。\n");
+    printf("[PLAN_RULE] 先判断瓶颈层级：图像(T02/T03/T04) -> 硬件/速度(T01/T05) -> IMU(T10) -> 角速度内环(T11) -> 视觉外环(T06) -> 提速/元素(T07/T08)。\n");
+
+    print_param_plan_line(
+        "T01/T05 motor_speed",
+        "kMotorPwmFrequencyHz, kMotorInitialDuty, kMotorMaxPwm",
+        "T01 firstF/firstB、左右启动死区；T05 out是否长期贴近MAX_PWM、enc是否仍上不去、电机/驱动是否发热。",
+        "频率通常保持20k-25kHz；初始占空比保持0；只有T05确认PWM打满且电机不热时才小幅增大kMotorMaxPwm。",
+        "不要用更大PID或更高速度目标掩盖电机接线、编码器反号、机械卡滞。");
+    print_param_plan_line(
+        "T05 speed_loop",
+        "kSpeedPidP, kSpeedPidI, kSpeedPidD",
+        "T05阶跃的rise/settle/overshoot、encL/encR、speed_err、左右响应比例。",
+        "起步慢且不过冲先小幅加P；稳态长期差一点再小幅加I；振荡/抖动先降P或I，D默认保持0，只有明显快速振荡才极小幅尝试。",
+        "速度环不过不要跑T11/T06；不要用视觉Kp或角速度P补偿轮速跟不上。");
+    print_param_plan_line(
+        "T05/T07 speed_goal",
+        "kCurveSpeedGoal, kStraightSpeedGoal, kMaxWheelSpeedGoal, kMinWheelSpeedGoal",
+        "T06/T07 Speed_Goal、goalL/R、encL/R、SE、直道蛇形、入弯出界、内轮是否停住。",
+        "直道稳定后每次只加kStraightSpeedGoal 1-2；入弯推头/出界先降kCurveSpeedGoal或加入口保护；内轮停住再看kMinWheelSpeedGoal；单轮目标被截断才看kMaxWheelSpeedGoal。",
+        "普通赛道低速不稳时不要提直道速度；轮速误差大时先回T05。");
+
+    print_param_plan_line(
+        "T02/T03 camera_binary",
+        "kCameraWidth, kCameraHeight, kCameraFps, kCameraFormat, kCameraDevicePath",
+        "摄像头打开失败、FPS adjusted、CPU负载、画面尺寸/压缩后数组是否正常。",
+        "通常保持160x120和当前格式；设备号变化只改kCameraDevicePath；帧率按实际摄像头能力配置。",
+        "画面质量问题不要先改PID；尺寸/采样步长改动会牵涉80x60处理链路。");
+    print_param_plan_line(
+        "T02/T03 camera_roi_exposure",
+        "kCameraManualExposure, kCameraRoiX/Y/Width/Height, kCameraColumnSampleStep",
+        "T02 det_std/det_span/lost_rate/row_bad_rate；T03 white_avg、white_min/max、dDet、lost、rowW。",
+        "拖影/过曝先降曝光，暗场漏线先升曝光；远端不够看再减小RoiY或增大RoiHeight；横向偏移优先机械校正，最后才微调ROI。",
+        "ROI和曝光没稳前不要碰kImageMiddleLine、速度、PID、元素阈值。");
+    print_param_plan_line(
+        "T03 binary_threshold",
+        "kImageAlgorithm, kImageThresholdStatic, kImageThresholdDetach, kImageOtsuBlurKernel, kImageMorphKernel, kBlueHue/Saturation/Value Lower/Upper",
+        "T03 white比例、边界连续性、亮斑误检、阴影漏检；HSV模式看蓝底是否被稳定提取。",
+        "OTSU优先保持；静态阈值只在固定光照验证；孤点多可加blur/morph，细线被吞就减；HSV只按背景漏检/误检方向收放H/S/V。",
+        "二值不稳时T04/T06/T08的所有控制结论都可能是假信号。");
+
+    print_param_plan_line(
+        "T02 center_line",
+        "kImageMiddleLine",
+        "T02三轮det_mean/err_mean、middle_candidate_ok、candidate_next、round_delta_mean。",
+        "只有三轮趋势同向且稳定时才按candidate_next每次改1；单次err偏一边先认为是摆车误差。",
+        "不要在手摆无法像素级居中的情况下按单轮err_mean大改中线。");
+    print_param_plan_line(
+        "T04 scan_foresight",
+        "kImageTowPoint, kImageScanInterval, kImageScanIntervalCross, kSingleSideLossThreshold",
+        "T04 jump/edge_bad/straight_rate、普通弯是否提前看到、十字/复杂区域是否跳错边。",
+        "转弯来不及可前移TowPoint；边界找不回可小幅增scan；十字误连/跳边则收紧cross_scan或提高单侧丢线阈值。",
+        "扫线还会跳时不要靠更猛转向解决，先让Det和边界稳定。");
+    print_param_plan_line(
+        "T04 straight_detect",
+        "kImageVariance, kImageVarianceAcc, kStraightVarianceAccThreshold, kStraightOfflineMax, kStraightLeftLineMax, kStraightRightLineMax",
+        "T04/T06 Road=Straight/Normol切换、straight_acc、直道加速是否乱跳、弯道是否误判直道。",
+        "直道不加速可放宽variance/off/left/right；弯道误判直道导致冲弯就收紧；先用T04手推确认再让T07提速。",
+        "直道判定不稳时不要直接提高kStraightSpeedGoal。");
+
+    print_param_plan_line(
+        "T10 imu_static",
+        "kMpu6050AccelScale, kMpu6050GyroScale, kMpu6050GyroBiasSamples, kMpu6050BiasSampleDelayUs",
+        "T10 gyro_z mean/std/span、spike、dt_us、accel均值是否接近物理预期。",
+        "量程只在驱动量程变更时同步；零偏波动大可增加BiasSamples；采样间隔保持5-10ms避免相关噪声。",
+        "量程/零偏错时T11/T06所有角速度结论都不可信。");
+    print_param_plan_line(
+        "T10/T11 gyro_filter",
+        "kGyroDeadBandDps, kGyroMeasurementLimitDps, kGyroLpfAlpha, kGyroRawSpikeRejectDps",
+        "T10静止噪声；T11 real/gf/err；T06 gf是否明显滞后、尖峰是否触发。",
+        "静止漂移大先加deadband；GF跟随慢可加LpfAlpha；GF噪声/抖动大则降LpfAlpha；MeasurementLimit必须高于目标角速度上限；尖峰阈值只为拒绝异常值。",
+        "不要用更大kGyroPidP掩盖IMU尖峰或滤波过慢。");
+    print_param_plan_line(
+        "T11 gyro_inner_loop",
+        "kGyroPidP, kGyroPidI, kGyroPidD, kGyroFeedforwardGain, kGyroPidIntegralLimit, kGyroPidOutputLimit",
+        "T11 late_err_abs、gf_abs、diff0/diff、cap_rate、左右阶跃是否对称；T06 GErr_abs和diff_limited。",
+        "无明显限幅但GF追不上：先小幅加feedforward或P；过冲/振荡：加D或降P/ff；长期固定误差才极小I并降低积分限幅；diff0常被自身out限制才加OutputLimit。",
+        "T11正常时不要再动角速度P/D，T06问题多半在视觉目标或速度保护。");
+    print_param_plan_line(
+        "T11 gyro_direction_rate_limit",
+        "kDiffOutputMaxDelta, kDiffOutputReverseMaxDelta, kReverseGyroTargetThresholdDps, kReverseGyroRealThresholdDps, kGyroTargetPositiveGain, kGyroTargetNegativeGain",
+        "T11正/负阶跃gf_mean、reverse_rate、diff变化速度；T06 S弯反打是否慢半拍。",
+        "差速输出爬升慢可小幅加DiffOutputMaxDelta；反向救车慢加ReverseMaxDelta；正负方向一边欠转就微调对应TargetGain。",
+        "目标和实际长期反向先查符号/接线；不要靠增益硬怼。");
+    print_param_plan_line(
+        "angle_yaw_optional",
+        "kAnglePidP/I/D, kAnglePidIntegralLimit, kAnglePidOutputLimit, kYawTrackKp, kYawTrackToleranceDeg, kYawTrackSettleGyroDps, kYawIntegralDeadBandDps, kYawTrackMin/FineRate*, kYawTrackDefaultMaxRateDps",
+        "主要用于角度目标/定角验证，不是当前视觉循迹主路径；看yaw到位误差、末端抖动、是否差一点不动。",
+        "回正慢加YawTrackKp或最低角速度；末端抖动放大容差/settle或降Kp；通常不启用I。",
+        "无元素提速转不过时优先看T11/T06，不要先改角度环。");
+
+    print_param_plan_line(
+        "T06 visual_outer_loop",
+        "kSteerKp, kSteerKd, kSteerDeadBandDefault/Straight/Curve, kSteerFilterAlpha",
+        "T06 raw/filt/dE/PD/Tgt、pd_sat_rate、直道蛇形、入弯迟钝、出弯回正。",
+        "转向目标偏小且T11健康可加Kp；误差快速变化反应慢可加Kd；直道蛇形先降Kp/Kd或加死区；小偏差不修正则减死区；Filt滞后加Alpha，噪声放大降Alpha。",
+        "T11未通过不要用视觉外环补内环；图像不稳不要调Kp/Kd。");
+    print_param_plan_line(
+        "T06 visual_jump_filter",
+        "kSteerRawJumpThreshold, kSteerRawMaxStepPerFrame, kSteerFilterMaxStepPerFrame, kSteerFilterSignFlipMaxStepPerFrame, kSteerFastFlipAlpha, kSteerFastFlipRawThreshold, kSteerFastFlipGap",
+        "T06 Raw/Filt分离、S弯换向、跳边后是否一帧反打、出弯是否拖旧方向。",
+        "跳边猛打就降低max step或降低jump接纳；S弯换向迟钝就提高FastFlipAlpha或降低触发阈值；跨符号过猛则降低SignFlipMaxStep。",
+        "这些是滤波/保护参数，先确认Raw本身是真的赛道趋势。");
+    print_param_plan_line(
+        "T06/T07 turn_protection",
+        "kCurveEntryBrakeSpeedGoal/HoldFrames/RawThreshold/FiltThreshold/DerivativeThreshold, kSharpTurnSteerError, kExtremeTurnSpeedGoal, kExtremeTurnMinDiff, kExtremeTurnRaw/FiltThreshold, kExtremeTurnExitRaw/FiltThreshold, kExtremeTurnExitFilterAlpha",
+        "T07入弯前是否提前降速、直角弯是否转不过、出弯是否继续旧方向、goal是否被压低。",
+        "入弯晚就降低触发阈值或增加保持帧；转不过但T11健康可提高ExtremeTurnMinDiff或降低ExtremeTurnSpeedGoal；出弯拖尾就放宽Exit快收条件/提高ExitFilterAlpha。",
+        "保护过强会让车一直慢；保护过弱会高速推头，必须结合T06逐项看。");
+    print_param_plan_line(
+        "T06 s_curve_target",
+        "kSCurveSpeedGoal, kSCurveMinDiff, kSCurveHoldFrames, kSCurveRawMinError, kSCurveEarlyRawMinError, kSCurveEarlyFiltMinError, kSCurveEarlyDerivativeThreshold, kSCurveRawFiltGap, kSCurveDerivativeThreshold, kSCurveSharpRawThreshold",
+        "T06/T07 S弯换向是否慢、是否二次反冲、是否保护误触发导致过慢。",
+        "换向慢：提高SCurve目标变化率相关参数前，先确认Raw-Filt触发；二次反冲：降低MinDiff或延长Hold；误触发多：提高Raw/Filt/Derivative阈值。",
+        "S弯参数只在普通弯和直道已稳定后调。");
+    print_param_plan_line(
+        "T06 target_gyro_limit",
+        "kVisualGyroLimitDps, kTargetGyroMaxDeltaDps, kTargetGyroSCurveMaxDeltaDps, kTargetGyroSignFlipMaxDeltaDps, kTargetGyroDeadbandReturnDeltaDps, kExtremeTurnExitTargetDeltaDps, kOpposingGyroHoldDps, kOpposingGyroTargetLimitDps, kOpposingGyroRecoveryFrames, kOpposingGyroRecoveryLimitDps",
+        "T06 PD/Tgt/Cmd/GF/GErr/dT、S弯反打、出弯目标是否长时间贴顶或回零太慢。",
+        "PD够大但Tgt小：放宽VisualGyroLimit或目标变化率；出弯回正慢：加DeadbandReturn/ExitTargetDelta；车身还旧方向转时反打过猛：收紧Opposing目标限制或延长Recovery。",
+        "T11弱时先修内环；T11健康但Tgt没给够，才动这些目标生成参数。");
+    print_param_plan_line(
+        "T06 fallback_debug",
+        "kOuterLoopMinPeriodSec, kOuterLoopFallbackPeriodSec, kSteerDebugPrintEnable, kSteerDebugPrintDivider, kFallbackDiffLimit",
+        "T06 dt、打印频率、IMU断联后的fallback表现。",
+        "CPU/I2C卡顿可增大外环周期；日志太密可增divider；IMU偶断导致纯视觉猛打时降低fallback diff。",
+        "外环周期改动会影响D项和目标变化率体感，改后必须回T06。");
+
+    print_param_plan_line(
+        "T08 ring_detect_common",
+        "kElementRingConfirmFrames, kElementRingExitConfirmFrames, kElementCooldownFrames, kElementRingExitStraightHoldFrames, kElementRingMinActiveFrames",
+        "T08/T08H Scene/Ring/Cool、left/right candidate、false entry、出环后反复触发。",
+        "误入环加Confirm或Cooldown；漏入环降Confirm；出环抖动加ExitConfirm/ExitStraightHold；刚进环就退出则加MinActiveFrames。",
+        "T08H图像补线不正确时先别调自动控制差速。");
+    print_param_plan_line(
+        "T08 ring_detect_left_right",
+        "kLeftRingMinLeftLost, kLeftRingRightLineBlockMax, kLeftRingOfflineBlockMax, kLeftRingMaxPoint2Y, kRightRingMinRightLost, kRightRingLeftLineBlockMax, kRightRingOfflineBlockMax, kRightRingMinPoint2Y, kRingLossOnlyMinLost, kRingLossOnlyMaxEntryError",
+        "T08H CSV里left/right candidate、block/geom/loss/susp、P1/P2、OFF、LLine/RLine。",
+        "候选有但被block挡住就放宽对应BlockMax；完全没候选才降低lost/P2门槛；十字/U弯误入则提高loss_only或收紧entry_error。",
+        "左右参数分开调；不要用左环失败去改右环阈值。");
+    print_param_plan_line(
+        "T08 ring_control",
+        "kRingSpeedGoal, kRingEntryCenterBias, kRingInnerCenterBias, kRingForcedSteerError, kRingForcedSteerReleaseFlag, kRingExitSteerError, kRingEntryGyroLimitDps, kRingSceneGyroLimitDps, kRingEntryMaxDiff, kRingMaxDiff",
+        "T08/TFT ring flag 5/6/7/8中心线方向、是否真正切入环、是否内切/绕圈/出环回不来。",
+        "不进环先加EntryCenterBias或ForcedSteer；环内贴外侧加InnerBias，内切则降；绕圈/出不来降低环内gyro/maxdiff或调整ExitSteer；入口甩出则降低EntryGyro/EntryMaxDiff。",
+        "必须先确认识别flag正确，再调控制参数。");
+    print_param_plan_line(
+        "T08 bad_vision_unclassified",
+        "kUnclassifiedTurnTriggerError, kUnclassifiedTurnGyroLimitDps, kBadVisionOfflineThreshold, kBadVisionCenterHoldOfflineThreshold, kBadVisionSpeedGoal, kBadVisionGyroLimitDps",
+        "T06/T08 OFFLine、bad vision、未识别急弯/十字/漏检环岛处Tgt是否被保护。",
+        "漏检急弯转不过可降低Trigger或提高GyroLimit；丢线时猛打出界就降低BadVisionGyroLimit/SpeedGoal或提高CenterHold门槛。",
+        "这是兜底保护，不应代替修图像和元素识别。");
+
+    printf("[PLAN_NEXT] 若现在目标是无元素提速：T05通过 -> T10通过 -> T11通过 -> T06低速闭环 -> T07提速；T07失败时按T06/T11摘要定位，不直接盲调角速度环。\n");
+    printf("[PLAN_NEXT] 若目标是元素：T08H先手推确认补线/识别，再T08自动低速，最后才回T07速度回归。\n");
 }
 
 static bool g_camera_ready = false;
@@ -873,9 +1046,27 @@ int test_00_precheck_config(int seconds = 3) {
     printf("[目的] 确认当前编译进程序的关键参数；后续每次发日志先带这一段。\n");
     print_config_snapshot();
     print_stage_task_map();
+    printf("[参数地图] 若要看每个参数的细化调试方案，单独运行 lq_param_test_12_parameter_debug_plan()。\n");
     printf("[要求] 电池电压保持同一区间；摄像头高度约30cm；蓝底白色PVC赛道光照稳定；每轮只改一个参数。\n");
     printf("[RETURN] 0=配置打印完成。\n");
     (void)seconds;
+    return 0;
+}
+
+// -----------------------------------------------------------------------------
+// Step 12: 参数级调试方案。只打印完整调参地图，不读传感器、不跑电机。
+// -----------------------------------------------------------------------------
+int test_12_parameter_debug_plan(void) {
+    printf("\n========== TEST 12 parameter_debug_plan 参数级调试方案 ==========" "\n");
+    print_stage_card("T12 parameter_debug_plan",
+                     "把car_config里的关键参数映射到对应测试阶段、观察指标、调整方向和禁忌项。",
+                     "不调参数；用于决定下一轮该跑哪个测试、只改哪一组参数。",
+                     "不要把T12当成实测结论；它是路线图，真正结论必须来自T02/T03/T04/T05/T10/T11/T06/T07/T08日志。",
+                     "按T12定位参数后，回到对应测试阶段复测。");
+    print_config_snapshot();
+    print_stage_task_map();
+    print_parameter_debug_plan();
+    printf("[RETURN] 0=参数调试方案打印完成。\n");
     return 0;
 }
 
@@ -1771,6 +1962,300 @@ int test_08_element_push_image_debug(int seconds = 40) {
     return 0;
 }
 
+struct PoseWindowSnapshot {
+    int valid_rows = 0;
+    int total_rows = 0;
+    double width_mean = 0.0;
+    double width_min = 0.0;
+    double left_margin_min = 0.0;
+    double right_margin_min = 0.0;
+    double balance_mean = 0.0;
+};
+
+static bool valid_pose_row(int y) {
+    if (y < 0 || y >= 60) return false;
+    int left = ImageDeal[y].LeftBorder;
+    int right = ImageDeal[y].RightBorder;
+    int center = ImageDeal[y].Center;
+    return left >= 0 && left < 80 &&
+           right >= 0 && right < 80 &&
+           center >= 0 && center < 80 &&
+           right > left &&
+           center > left &&
+           center < right;
+}
+
+static PoseWindowSnapshot calc_pose_window(int y0, int y1) {
+    PoseWindowSnapshot s;
+    RunningStat width;
+    RunningStat left_margin;
+    RunningStat right_margin;
+    RunningStat balance;
+    if (y0 > y1) std::swap(y0, y1);
+    y0 = std::max(0, y0);
+    y1 = std::min(59, y1);
+    s.total_rows = y1 - y0 + 1;
+    for (int y = y0; y <= y1; ++y) {
+        if (!valid_pose_row(y)) continue;
+        int left = ImageDeal[y].LeftBorder;
+        int right = ImageDeal[y].RightBorder;
+        int center = ImageDeal[y].Center;
+        int lm = center - left;
+        int rm = right - center;
+        width.add(right - left);
+        left_margin.add(lm);
+        right_margin.add(rm);
+        balance.add(rm - lm);
+        s.valid_rows++;
+    }
+    s.width_mean = width.mean();
+    s.width_min = width.n ? width.min_v : 0.0;
+    s.left_margin_min = left_margin.n ? left_margin.min_v : 0.0;
+    s.right_margin_min = right_margin.n ? right_margin.min_v : 0.0;
+    s.balance_mean = balance.mean();
+    return s;
+}
+
+static double pose_valid_rate(const PoseWindowSnapshot &s) {
+    return s.total_rows ? (double)s.valid_rows / s.total_rows : 0.0;
+}
+
+struct PoseReferenceCsvLogger {
+    FILE *file = nullptr;
+    std::string path;
+
+    bool open() {
+        path = make_artifact_path("T13_pose_reference_push", "csv");
+        file = fopen(path.c_str(), "w");
+        if (!file) {
+            printf("[CSV_ERROR] cannot open %s\n", path.c_str());
+            return false;
+        }
+        fprintf(file,
+                "t_sec,sample,road,det,mid,err,tow,off,left_miss,right_miss,"
+                "straight,straight_flag,white,width_near,"
+                "near_valid,near_width_mean,near_width_min,near_left_margin_min,near_right_margin_min,near_balance,"
+                "mid_valid,mid_width_mean,mid_width_min,mid_left_margin_min,mid_right_margin_min,mid_balance,"
+                "far_valid,far_width_mean,far_width_min,far_left_margin_min,far_right_margin_min,far_balance,"
+                "det_delta,err_delta,tow_delta,img_bad,img_warn\n");
+        fflush(file);
+        printf("[CSV] 手推视觉基准样本保存到: %s\n", path.c_str());
+        return true;
+    }
+
+    void write(double t_sec,
+               int sample,
+               const PoseWindowSnapshot &near_w,
+               const PoseWindowSnapshot &mid_w,
+               const PoseWindowSnapshot &far_w,
+               int det_delta,
+               int err_delta,
+               int tow_delta,
+               int img_bad,
+               int img_warn) {
+        if (!file) return;
+        fprintf(file,
+                "%.3f,%d,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.4f,%d,"
+                "%.3f,%.2f,%.2f,%.2f,%.2f,%.2f,"
+                "%.3f,%.2f,%.2f,%.2f,%.2f,%.2f,"
+                "%.3f,%.2f,%.2f,%.2f,%.2f,%.2f,"
+                "%d,%d,%d,%d,%d\n",
+                t_sec, sample, road_type_name(ImageStatus.Road_type),
+                ImageStatus.Det_True, ImageStatus.MiddleLine,
+                ImageStatus.MiddleLine - ImageStatus.Det_True,
+                ImageStatus.TowPoint, ImageStatus.OFFLine,
+                ImageStatus.Left_Line, ImageStatus.Right_Line,
+                ImageStatus.straight_acc, ImageStatus.straight_acc_flag,
+                white_ratio_all(), estimate_near_line_width(),
+                pose_valid_rate(near_w), near_w.width_mean, near_w.width_min,
+                near_w.left_margin_min, near_w.right_margin_min, near_w.balance_mean,
+                pose_valid_rate(mid_w), mid_w.width_mean, mid_w.width_min,
+                mid_w.left_margin_min, mid_w.right_margin_min, mid_w.balance_mean,
+                pose_valid_rate(far_w), far_w.width_mean, far_w.width_min,
+                far_w.left_margin_min, far_w.right_margin_min, far_w.balance_mean,
+                det_delta, err_delta, tow_delta, img_bad, img_warn);
+    }
+
+    void close() {
+        if (!file) return;
+        fflush(file);
+        fclose(file);
+        file = nullptr;
+    }
+};
+
+// -----------------------------------------------------------------------------
+// Step 13: 正常路径手推视觉基准。不开电机，只建立正常车位下的边界/余量参考。
+// 返回值：0=采样可用；1=样本太少；2=边界覆盖不足；3=安全余量偏低；4=图像质量不稳。
+// -----------------------------------------------------------------------------
+int test_13_pose_reference_push(int seconds = 45) {
+    printf("\n========== TEST 13 pose_reference_push 手推正常路径视觉基准 ==========" "\n");
+    print_stage_card("T13 pose_reference_push",
+                     "不开电机闭环，只手推小车沿正常路径采集边界覆盖、道路宽度、左右安全余量和长期偏侧。",
+                     "摄像头安装、中线、ROI/扫线、基础姿态安全余量；为后续T06/T07/T08判定压线风险提供基准。",
+                     "不要用本测试直接调速度环/PID；det_delta、err_delta、tow_delta受手推速度影响，只作为REF_ONLY参考。",
+                     "采样可用后，用CSV里的margin/coverage基准去约束实跑日志：安全余量不足时不能判为正常。");
+    printf("[运行] MOTOR=OFF。请把车放在你认为正常的车身位置，沿普通赛道路段慢慢手推；尽量覆盖直道、普通弯、容易压线的位置。seconds=%d\n", seconds);
+    printf("[判定] 重点看 near/mid/far 三段 valid_rate、width_min、left/right_margin_min、balance；跳变类仅标记REF_ONLY。\n");
+    printf("[硬门槛] 如果 near/mid 边界覆盖不足或任一侧安全余量长期偏低，后续AI不能再把该状态判为正常可接受。\n");
+
+    if (!ensure_camera_ready()) return -1;
+    init_control_for_motor_tests();
+    g_enable_element_process = false;
+    safe_stop_and_print("T13");
+
+    PoseReferenceCsvLogger csv;
+    csv.open();
+
+    RunningStat err_stat, near_valid, mid_valid, far_valid;
+    RunningStat near_width, mid_width, far_width;
+    RunningStat near_l_margin, near_r_margin, mid_l_margin, mid_r_margin;
+    RunningStat near_balance, mid_balance, far_balance;
+    RunningStat det_delta_ref, err_delta_ref, tow_delta_ref;
+    int samples = 0, img_bad_cnt = 0, img_warn_cnt = 0;
+    int low_margin_cnt = 0, low_valid_cnt = 0;
+    int last_det = 0, last_err = 0, last_tow = 0;
+    bool has_last = false;
+
+    auto start = std::chrono::steady_clock::now();
+    auto last_print = start;
+    while (!exit_flag) {
+        Speed_Goal = 0;
+        Speed_Goal_l = 0;
+        Speed_Goal_r = 0;
+        speed_out_l = 0;
+        speed_out_r = 0;
+        motor_Duty_L(0);
+        motor_Duty_R(0);
+        if (!grab_and_process()) {
+            img_bad_cnt++;
+            break;
+        }
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - start).count() >= seconds) break;
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_print).count() < 150) {
+            usleep(5 * 1000);
+            continue;
+        }
+        last_print = now;
+        samples++;
+
+        PoseWindowSnapshot near_w = calc_pose_window(42, 58);
+        PoseWindowSnapshot mid_w = calc_pose_window(25, 41);
+        PoseWindowSnapshot far_w = calc_pose_window(12, 24);
+        int err = ImageStatus.MiddleLine - ImageStatus.Det_True;
+        int det_delta = has_last ? ImageStatus.Det_True - last_det : 0;
+        int err_delta = has_last ? err - last_err : 0;
+        int tow_delta = has_last ? ImageStatus.TowPoint - last_tow : 0;
+        has_last = true;
+        last_det = ImageStatus.Det_True;
+        last_err = err;
+        last_tow = ImageStatus.TowPoint;
+
+        double nv = pose_valid_rate(near_w);
+        double mv = pose_valid_rate(mid_w);
+        double fv = pose_valid_rate(far_w);
+        bool edge_warn = (ImageStatus.Left_Line > 15 || ImageStatus.Right_Line > 15 || nv < 0.55 || mv < 0.45);
+        bool severe_img_bad = (ImageStatus.OFFLine > 18 ||
+                               (ImageStatus.Left_Line > 25 && ImageStatus.Right_Line > 25) ||
+                               nv < 0.35 ||
+                               mv < 0.25);
+        bool low_margin = (near_w.valid_rows > 0 &&
+                           (near_w.left_margin_min < 7.0 || near_w.right_margin_min < 7.0));
+        bool low_valid = (nv < 0.55 || mv < 0.45);
+        if (edge_warn) img_warn_cnt++;
+        if (severe_img_bad) img_bad_cnt++;
+        if (low_margin) low_margin_cnt++;
+        if (low_valid) low_valid_cnt++;
+
+        err_stat.add(err);
+        near_valid.add(nv);
+        mid_valid.add(mv);
+        far_valid.add(fv);
+        if (near_w.valid_rows > 0) {
+            near_width.add(near_w.width_mean);
+            near_l_margin.add(near_w.left_margin_min);
+            near_r_margin.add(near_w.right_margin_min);
+            near_balance.add(near_w.balance_mean);
+        }
+        if (mid_w.valid_rows > 0) {
+            mid_width.add(mid_w.width_mean);
+            mid_l_margin.add(mid_w.left_margin_min);
+            mid_r_margin.add(mid_w.right_margin_min);
+            mid_balance.add(mid_w.balance_mean);
+        }
+        if (far_w.valid_rows > 0) {
+            far_width.add(far_w.width_mean);
+            far_balance.add(far_w.balance_mean);
+        }
+        det_delta_ref.add(std::abs(det_delta));
+        err_delta_ref.add(std::abs(err_delta));
+        tow_delta_ref.add(std::abs(tow_delta));
+
+        double t_sec = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count() / 1000.0;
+        csv.write(t_sec, samples, near_w, mid_w, far_w,
+                  det_delta, err_delta, tow_delta,
+                  severe_img_bad ? 1 : 0, edge_warn ? 1 : 0);
+        printf("[T13] s=%d Road=%s Det=%d Err=%d OFF=%d L/R=%d/%d near(v=%.2f w=%.1f minL/R=%.1f/%.1f bal=%.1f) mid(v=%.2f w=%.1f minL/R=%.1f/%.1f bal=%.1f) far(v=%.2f w=%.1f bal=%.1f) REF_ONLY dDet/dErr/dTow=%d/%d/%d MOTOR=OFF\n",
+               samples, road_type_name(ImageStatus.Road_type),
+               ImageStatus.Det_True, err, ImageStatus.OFFLine,
+               ImageStatus.Left_Line, ImageStatus.Right_Line,
+               nv, near_w.width_mean, near_w.left_margin_min, near_w.right_margin_min, near_w.balance_mean,
+               mv, mid_w.width_mean, mid_w.left_margin_min, mid_w.right_margin_min, mid_w.balance_mean,
+               fv, far_w.width_mean, far_w.balance_mean,
+               det_delta, err_delta, tow_delta);
+        usleep(5 * 1000);
+    }
+
+    safe_stop_and_print("T13");
+    exit_flag = false;
+    csv.close();
+
+    double img_bad_rate = samples ? (double)img_bad_cnt / samples : 0.0;
+    double img_warn_rate = samples ? (double)img_warn_cnt / samples : 0.0;
+    double low_margin_rate = samples ? (double)low_margin_cnt / samples : 0.0;
+    double low_valid_rate = samples ? (double)low_valid_cnt / samples : 0.0;
+    printf("[T13_SUMMARY] csv=%s samples=%d img_bad_rate=%.2f img_warn_rate=%.2f low_valid_rate=%.2f low_margin_rate=%.2f err_mean=%.1f err_abs=%.1f err_std=%.1f\n",
+           csv.path.c_str(), samples, img_bad_rate, img_warn_rate,
+           low_valid_rate, low_margin_rate,
+           err_stat.mean(), err_stat.mean_abs(), err_stat.stddev());
+    printf("[T13_BASELINE] valid_mean near/mid/far=%.2f/%.2f/%.2f width_mean near/mid/far=%.1f/%.1f/%.1f\n",
+           near_valid.mean(), mid_valid.mean(), far_valid.mean(),
+           near_width.mean(), mid_width.mean(), far_width.mean());
+    printf("[T13_MARGIN] near minL/minR mean=%.1f/%.1f min=%.1f/%.1f balance mean/std=%.1f/%.1f | mid minL/minR mean=%.1f/%.1f min=%.1f/%.1f balance mean/std=%.1f/%.1f\n",
+           near_l_margin.mean(), near_r_margin.mean(),
+           near_l_margin.n ? near_l_margin.min_v : 0.0,
+           near_r_margin.n ? near_r_margin.min_v : 0.0,
+           near_balance.mean(), near_balance.stddev(),
+           mid_l_margin.mean(), mid_r_margin.mean(),
+           mid_l_margin.n ? mid_l_margin.min_v : 0.0,
+           mid_r_margin.n ? mid_r_margin.min_v : 0.0,
+           mid_balance.mean(), mid_balance.stddev());
+    printf("[T13_REF_ONLY] 手推不匀速，以下跳变只看异常尖峰，不作为动态调参判据：abs(dDet/dErr/dTow) mean=%.1f/%.1f/%.1f max=%.1f/%.1f/%.1f\n",
+           det_delta_ref.mean(), err_delta_ref.mean(), tow_delta_ref.mean(),
+           det_delta_ref.n ? det_delta_ref.max_v : 0.0,
+           err_delta_ref.n ? err_delta_ref.max_v : 0.0,
+           tow_delta_ref.n ? tow_delta_ref.max_v : 0.0);
+    printf("[T13_RECOMMEND] ");
+    if (samples < 30) {
+        printf("样本太少：建议手推45-60秒，覆盖直道、普通弯和容易压线的位置。\n");
+    } else if (img_bad_rate > 0.25) {
+        printf("图像质量不稳：先回T03/T04修曝光/ROI/扫线，再用本测试建基准。\n");
+    } else if (low_valid_rate > 0.30) {
+        printf("边界覆盖不足：不要进入PID/提速判断，先查摄像头角度、ROI、扫线和二值质量。\n");
+    } else if (low_margin_rate > 0.20) {
+        printf("正常手推都出现低安全余量：优先检查摄像头中线/安装角度/车身摆位；后续实跑遇到该余量必须判不可接受。\n");
+    } else {
+        printf("手推视觉基准可用：后续T06/T07/T08若margin低于本轮near/mid低位范围，即使Err/Det正常也判为压线风险。\n");
+    }
+    printf("[RETURN] 0=采样可用；1=样本太少；2=边界覆盖不足；3=安全余量偏低；4=图像质量不稳。\n");
+    if (samples < 30) return 1;
+    if (img_bad_rate > 0.25) return 4;
+    if (low_valid_rate > 0.30) return 2;
+    if (low_margin_rate > 0.20) return 3;
+    return 0;
+}
+
 // -----------------------------------------------------------------------------
 // Step 20: 不同电压/光照回归。只采集图像和关键控制，不强制解释。
 // -----------------------------------------------------------------------------
@@ -1941,6 +2426,236 @@ int test_10_gyro_static_noise(int seconds = 10) {
     return 0;
 }
 
+// -----------------------------------------------------------------------------
+// Step 11: 角速度环阶跃响应测试。绕开视觉外环，直接给角速度环目标。
+// 小车需要放在普通地面/赛道空旷处低速运行，用于区分“外环没给够目标”
+// 和“角速度内环/差速/轮速跟不上”。
+// 返回值：0=角速度环可用；1=差速限幅瓶颈；2=角速度跟踪弱；3=轮速跟不上；4=IMU读取失败；5=方向响应异常。
+// -----------------------------------------------------------------------------
+int test_11_gyro_loop_step_response(int base_speed = 8, int hold_ms = 900) {
+    printf("\n========== TEST 11 gyro_loop_step_response 角速度环阶跃响应 ==========" "\n");
+    print_stage_card("T11 gyro_loop_step_response",
+                     "绕开图像外环，直接给角速度环左右阶跃目标，判断角速度环、差速限幅、轮速环谁在限制转向力度。",
+                     "kGyroPidP/I/D、kGyroFeedforwardGain、kDiffOutputMaxDelta、kGyroPidOutputLimit、kGyroTargetPositive/NegativeGain，以及差速限幅。",
+                     "不要在本测试里改摄像头中线、视觉Kp/Kd、元素补线或提速参数；本测试只判断角速度环和差速执行能力。",
+                     "T11左右响应都健康后，再回到T06/T07判断视觉外环和提速回归。");
+    printf("[安全] 小车会低速左右摆动，不使用摄像头。请放在普通地面/赛道空旷处，手边准备Ctrl+C。base_speed=%d hold_ms=%d\n",
+           base_speed, hold_ms);
+    printf("[参数快照] gyro(P/I/D=%.3f/%.4f/%.4f ff=%.3f out=%.1f dOut=%.1f/%.1f pos/neg=%.2f/%.2f dead=%.1f lpf=%.2f maxDiffRatio=%.2f)\n",
+           car_config::kGyroPidP, car_config::kGyroPidI, car_config::kGyroPidD,
+           car_config::kGyroFeedforwardGain, car_config::kGyroPidOutputLimit,
+           car_config::kDiffOutputMaxDelta, car_config::kDiffOutputReverseMaxDelta,
+           car_config::kGyroTargetPositiveGain, car_config::kGyroTargetNegativeGain,
+           car_config::kGyroDeadBandDps, car_config::kGyroLpfAlpha,
+           car_config::kMaxDiffRatio);
+
+    g_enable_element_process = false;
+    init_control_for_motor_tests();
+    safe_stop_and_print("T11");
+    usleep(300 * 1000);
+
+    MyMpu6050 local_imu;
+    if (!local_imu.init()) {
+        printf("[T11_SUMMARY] init_failed=1\n");
+        printf("[RETURN] 4=MPU6050初始化失败。\n");
+        return 4;
+    }
+
+    AttitudeCascade local_cascade;
+    local_cascade.init();
+    local_cascade.reset_runtime_state();
+
+    speed_out_l = 0.0f;
+    speed_out_r = 0.0f;
+    speed_last_erro_L = 0.0f;
+    speed_last_erro_R = 0.0f;
+
+    struct StepSummary {
+        float target = 0.0f;
+        float cmd = 0.0f;
+        int samples = 0;
+        int read_fail = 0;
+        int cap_cnt = 0;
+        int reverse_cnt = 0;
+        RunningStat real;
+        RunningStat gf;
+        RunningStat err;
+        RunningStat late_err;
+        RunningStat diff;
+        RunningStat speed_l;
+        RunningStat speed_r;
+        RunningStat se_l;
+        RunningStat se_r;
+    };
+
+    const float targets[] = {0.0f, 35.0f, 70.0f, 0.0f, -35.0f, -70.0f, 0.0f};
+    const int target_count = sizeof(targets) / sizeof(targets[0]);
+    std::vector<StepSummary> summaries(target_count);
+    int total_samples = 0;
+    int total_read_fail = 0;
+    int total_cap = 0;
+    int total_reverse = 0;
+    int print_divider = 0;
+    auto last_time = std::chrono::steady_clock::now();
+
+    for (int s = 0; s < target_count && !exit_flag; ++s) {
+        StepSummary &st = summaries[s];
+        st.target = targets[s];
+        st.cmd = st.target;
+        if (st.cmd > 0.0f) st.cmd *= car_config::kGyroTargetPositiveGain;
+        if (st.cmd < 0.0f) st.cmd *= car_config::kGyroTargetNegativeGain;
+
+        printf("[T11_STEP_BEGIN] idx=%d/%d target=%.1f cmd=%.1f hold_ms=%d\n",
+               s + 1, target_count, st.target, st.cmd, hold_ms);
+
+        auto step_start = std::chrono::steady_clock::now();
+        while (!exit_flag) {
+            auto now = std::chrono::steady_clock::now();
+            int elapsed_ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - step_start).count();
+            if (elapsed_ms >= hold_ms) break;
+
+            std::chrono::duration<float> dt_span = now - last_time;
+            float dt = dt_span.count();
+            last_time = now;
+            if (dt <= 0.0001f || dt > 0.1f) dt = car_config::kOuterLoopFallbackPeriodSec;
+
+            Mpu6050Data data;
+            if (!local_imu.read_processed_data(data)) {
+                st.read_fail++;
+                total_read_fail++;
+                usleep(5 * 1000);
+                continue;
+            }
+
+            float diff_speed = local_cascade.calc_diff_speed_bypass_angle(st.cmd, data, dt);
+            float diff_before_limit = diff_speed;
+            float max_diff = std::max(base_speed * car_config::kMaxDiffRatio, 6.0f);
+            int cap = 0;
+            if (diff_speed > max_diff) {
+                diff_speed = max_diff;
+                cap = 1;
+            }
+            if (diff_speed < -max_diff) {
+                diff_speed = -max_diff;
+                cap = 1;
+            }
+
+            Speed_Goal = base_speed;
+            Speed_Goal_l = base_speed - diff_speed;
+            Speed_Goal_r = base_speed + diff_speed;
+            if (Speed_Goal_l < car_config::kMinWheelSpeedGoal) Speed_Goal_l = car_config::kMinWheelSpeedGoal;
+            if (Speed_Goal_r < car_config::kMinWheelSpeedGoal) Speed_Goal_r = car_config::kMinWheelSpeedGoal;
+            if (Speed_Goal_l > car_config::kMaxWheelSpeedGoal) Speed_Goal_l = car_config::kMaxWheelSpeedGoal;
+            if (Speed_Goal_r > car_config::kMaxWheelSpeedGoal) Speed_Goal_r = car_config::kMaxWheelSpeedGoal;
+
+            speed_encoder_L = encoder_num_L();
+            speed_encoder_R = encoder_num_R();
+            Speed_PID_L();
+            Speed_PID_R();
+            motor_Duty_L(speed_out_l);
+            motor_Duty_R(speed_out_r);
+
+            const float gf = local_cascade.last_filtered_gyro_z();
+            const float gerr = local_cascade.gyro_pid.err;
+            const bool reverse = (std::fabs(st.cmd) > 20.0f &&
+                                  st.cmd * gf < -car_config::kGyroDeadBandDps);
+
+            st.samples++;
+            total_samples++;
+            if (cap) {
+                st.cap_cnt++;
+                total_cap++;
+            }
+            if (reverse) {
+                st.reverse_cnt++;
+                total_reverse++;
+            }
+            st.real.add(data.gyro_z);
+            st.gf.add(gf);
+            st.err.add(gerr);
+            st.diff.add(diff_speed);
+            st.speed_l.add(speed_encoder_L);
+            st.speed_r.add(speed_encoder_R);
+            st.se_l.add(Speed_Goal_l - speed_encoder_L);
+            st.se_r.add(Speed_Goal_r - speed_encoder_R);
+            if (elapsed_ms > hold_ms / 3) st.late_err.add(gerr);
+
+            if (++print_divider >= 12) {
+                print_divider = 0;
+                printf("[T11] idx=%d t=%.2f target=%6.1f cmd=%6.1f real=%6.1f gf=%6.1f err=%6.1f diff0=%6.1f diff=%6.1f cap=%d max=%4.1f goalL/R=%5.1f/%5.1f encL/R=%5.1f/%5.1f se=%5.1f/%5.1f out=%5.0f/%5.0f\n",
+                       s + 1, elapsed_ms / 1000.0,
+                       st.target, st.cmd, data.gyro_z, gf, gerr,
+                       diff_before_limit, diff_speed, cap, max_diff,
+                       Speed_Goal_l, Speed_Goal_r, speed_encoder_L, speed_encoder_R,
+                       Speed_Goal_l - speed_encoder_L, Speed_Goal_r - speed_encoder_R,
+                       speed_out_l, speed_out_r);
+            }
+
+            usleep(5 * 1000);
+        }
+    }
+
+    safe_stop_and_print("T11");
+    Speed_Goal = 0;
+
+    double total_cap_rate = total_samples ? (double)total_cap / total_samples : 0.0;
+    double total_fail_rate = (total_samples + total_read_fail) ?
+                             (double)total_read_fail / (total_samples + total_read_fail) : 0.0;
+    double total_reverse_rate = total_samples ? (double)total_reverse / total_samples : 0.0;
+    int weak_track_steps = 0;
+    int cap_steps = 0;
+    int speed_weak_steps = 0;
+    int reverse_steps = 0;
+
+    for (int s = 0; s < target_count; ++s) {
+        const StepSummary &st = summaries[s];
+        if (st.samples == 0) continue;
+        double cap_rate = (double)st.cap_cnt / st.samples;
+        double reverse_rate = (double)st.reverse_cnt / st.samples;
+        double late_abs_err = st.late_err.mean_abs();
+        double speed_err_abs = std::max(st.se_l.mean_abs(), st.se_r.mean_abs());
+        double target_abs = std::fabs(st.cmd);
+        bool active_step = target_abs > 1.0;
+        if (active_step && cap_rate > 0.35) cap_steps++;
+        if (active_step && cap_rate <= 0.35 && late_abs_err > std::max(18.0, target_abs * 0.45)) weak_track_steps++;
+        if (active_step && speed_err_abs > 6.0) speed_weak_steps++;
+        if (active_step && reverse_rate > 0.20) reverse_steps++;
+        printf("[T11_STEP_SUMMARY] idx=%d target=%.1f cmd=%.1f samples=%d read_fail=%d gf_mean=%.2f gf_abs=%.2f real_abs=%.2f err_abs=%.2f late_err_abs=%.2f diff_abs=%.2f cap_rate=%.2f reverse_rate=%.2f speed_err_abs=%.2f/%2.2f enc_abs=%.2f/%2.2f\n",
+               s + 1, st.target, st.cmd, st.samples, st.read_fail,
+               st.gf.mean(), st.gf.mean_abs(), st.real.mean_abs(),
+               st.err.mean_abs(), late_abs_err, st.diff.mean_abs(),
+               cap_rate, reverse_rate, st.se_l.mean_abs(), st.se_r.mean_abs(),
+               st.speed_l.mean_abs(), st.speed_r.mean_abs());
+    }
+
+    printf("[T11_SUMMARY] samples=%d read_fail=%d fail_rate=%.3f cap_rate=%.2f reverse_rate=%.2f weak_track_steps=%d cap_steps=%d speed_weak_steps=%d reverse_steps=%d base_speed=%d hold_ms=%d\n",
+           total_samples, total_read_fail, total_fail_rate, total_cap_rate, total_reverse_rate,
+           weak_track_steps, cap_steps, speed_weak_steps, reverse_steps, base_speed, hold_ms);
+    printf("[T11_RECOMMEND] ");
+    if (total_fail_rate > 0.10) {
+        printf("先修IMU读取/I2C/供电；角速度环没有稳定输入，不能继续调PID。\n");
+    } else if (reverse_steps > 0) {
+        printf("目标角速度与实际角速度长期反向：优先检查左右电机差速方向、陀螺仪Z轴符号或正负方向补偿，不要直接加P。\n");
+    } else if (cap_steps > 0) {
+        printf("差速限幅经常压住输出：这更像maxDiff/速度目标/输出限幅瓶颈；先看diff0与diff、goalL/R是否被截断，再决定是否小幅放宽kGyroPidOutputLimit或kMaxDiffRatio。\n");
+    } else if (speed_weak_steps > 0) {
+        printf("角速度环给了差速但轮速跟不上：优先回T05调速度环/电机输出/PWM限幅，不要把问题全推给角速度P。\n");
+    } else if (weak_track_steps > 0) {
+        printf("无明显限幅但GF跟目标差距大：可小幅增加kGyroFeedforwardGain或kGyroPidP；若GF抖动/过冲再增D或降低kGyroLpfAlpha。\n");
+    } else {
+        printf("角速度环左右阶跃基本可用；若T06/T07仍觉得转向不够，下一步重点看视觉外环目标、目标变化率和提速保护。\n");
+    }
+    printf("[调参意义] T11只隔离角速度内环；T11正常但T07转不过，优先查Tgt是否太小/变化率太慢/提速保护；T11也弱，才动角速度环参数。\n");
+    printf("[RETURN] 0=角速度环可继续；1=差速限幅瓶颈；2=角速度跟踪弱；3=轮速跟不上；4=IMU读取失败；5=方向响应异常。\n");
+
+    if (total_fail_rate > 0.10) return 4;
+    if (reverse_steps > 0) return 5;
+    if (cap_steps > 0) return 1;
+    if (speed_weak_steps > 0) return 3;
+    if (weak_track_steps > 0) return 2;
+    return 0;
+}
+
 static int run_flow_step(const char *label,
                          const std::function<int()> &fn,
                          bool stop_on_fail = true) {
@@ -2009,6 +2724,8 @@ int run_low_speed_pipeline(void) {
     release_camera_for_imu_test();
     ret = run_flow_step("T10 gyro_static_noise", [](){ return test_10_gyro_static_noise(); });
     if (ret != 0) return 100 + ret;
+    ret = run_flow_step("T11 gyro_loop_step_response", [](){ return test_11_gyro_loop_step_response(); });
+    if (ret != 0) return 110 + ret;
     ret = run_flow_step("T06 low_speed_visual_gyro_closed_loop", [](){ return test_06_low_speed_visual_gyro_closed_loop(); });
     if (ret != 0) return 60 + ret;
     printf("[FLOW_SUMMARY] low_speed_pipeline PASS。可以继续做速度提升或元素调试。\n");
@@ -2029,7 +2746,7 @@ int run_element_pipeline(void) {
 
 // =============================================================================
 // 对外函数：你只需要在 main.cpp 里选择性调用这些函数即可。
-// 建议顺序：00 -> 01(架空) -> 02 -> 03 -> 04 -> 05(架空) -> 06 -> 07 -> 08 -> 09
+// 建议顺序：12(参数地图) -> 00 -> 01(架空) -> 02 -> 03 -> 04 -> 05(架空) -> 10 -> 11 -> 06 -> 07 -> 08 -> 09
 // =============================================================================
 
 int lq_param_test_00_precheck_config(void) { return param_step_demo::run_with_log("T00_precheck_config", [](){ return param_step_demo::test_00_precheck_config(); }); }
@@ -2045,6 +2762,9 @@ int lq_param_test_08_element_debug(void) { return param_step_demo::run_with_log(
 int lq_param_test_08h_element_push_image_debug(void) { return param_step_demo::run_with_log("T08H_element_push_image_debug", [](){ return param_step_demo::test_08_element_push_image_debug(); }); }
 int lq_param_test_09_voltage_light_regression(void) { return param_step_demo::run_with_log("T09_voltage_light_regression", [](){ return param_step_demo::test_09_voltage_light_regression(); }); }
 int lq_param_test_10_gyro_static_noise(void) { return param_step_demo::run_with_log("T10_gyro_static_noise", [](){ return param_step_demo::test_10_gyro_static_noise(); }); }
+int lq_param_test_11_gyro_loop_step_response(void) { return param_step_demo::run_with_log("T11_gyro_loop_step_response", [](){ return param_step_demo::test_11_gyro_loop_step_response(); }); }
+int lq_param_test_12_parameter_debug_plan(void) { return param_step_demo::run_with_log("T12_parameter_debug_plan", [](){ return param_step_demo::test_12_parameter_debug_plan(); }); }
+int lq_param_test_13_pose_reference_push(void) { return param_step_demo::run_with_log("T13_pose_reference_push", [](){ return param_step_demo::test_13_pose_reference_push(); }); }
 int lq_param_flow_visual(void) { return param_step_demo::run_with_log("FLOW_A_visual_pipeline", [](){ return param_step_demo::run_visual_pipeline(); }); }
 int lq_param_flow_airborne(void) { return param_step_demo::run_with_log("FLOW_B_airborne_pipeline", [](){ return param_step_demo::run_airborne_pipeline(); }); }
 int lq_param_flow_sensor(void) { return param_step_demo::run_with_log("FLOW_C_sensor_pipeline", [](){ return param_step_demo::run_sensor_pipeline(); }); }
@@ -2065,6 +2785,7 @@ void lq_parameter_step_tuning_demo(void) {
     printf("\n========== DEMO 33 parameter_step_tuning_demo ==========" "\n");
     printf("这是一个分阶段调参向导。建议先跑流程函数，再按失败步骤单独复测；不要跨阶段混改参数。\n\n");
     printf("[推荐流程]\n");
+    printf("  lq_param_test_12_parameter_debug_plan(); // 不跑车：打印每个参数该看哪个测试、怎么改\n");
     printf("  lq_param_flow_visual();        // 不跑电机：配置、摄像头重复性、二值、ROI/扫线\n");
     printf("  lq_param_flow_airborne();      // 必须架空：电机/编码器方向、速度环基础\n");
     printf("  lq_param_flow_sensor();        // 不跑车：二值质量 + MPU6050静止噪声\n");
@@ -2078,7 +2799,10 @@ void lq_parameter_step_tuning_demo(void) {
     printf("  T04: 只看前瞻、扫线和直道判断，手推普通弯观察jump/edge_bad/straight_rate。\n");
     printf("  T05: 架空测速度环阶跃，只调速度环P/I/D、PWM限幅、左右机械一致性。\n");
     printf("  T10: 静止测IMU噪声，只调gyro死区/滤波/排查I2C供电，不用PID掩盖尖峰。\n");
-    printf("  T06: 低速闭环后才调视觉Kp/Kd、目标角速度限幅、角速度环和差速限幅。\n");
+    printf("  T11: 低速直接给角速度阶跃，只调角速度环/差速输出/正负方向补偿，判断是不是内环跟不上。\n");
+    printf("  T12: 不跑车，打印所有关键参数的阶段归属、观察指标、调整方向和禁忌。\n");
+    printf("  T13: 手推正常路径视觉基准，只记录边界覆盖/道路宽度/左右安全余量；跳变类只作REF_ONLY参考。\n");
+    printf("  T06: 低速闭环后才调视觉Kp/Kd、目标角速度限幅和视觉到角速度目标的衔接。\n");
     printf("  T07/T08/T09: 分别用于提速回归、元素调试、电压/光照回归，不能拿回归问题反推前面所有参数一起改。\n\n");
     printf("[中线校准规则]\n");
     printf("  单次T02的err_mean包含人工摆车误差，只能参考；先看det_std/det_span/det_jump是否稳定。\n");
@@ -2096,8 +2820,11 @@ void lq_parameter_step_tuning_demo(void) {
     printf("  lq_camera_tft18_demo();                        // 单独手推测试TFT18补线/元素状态，电机关闭\n");
     printf("  lq_param_test_09_voltage_light_regression();\n");
     printf("  lq_param_test_10_gyro_static_noise();             // 无需赛道，静止IMU噪声\n");
+    printf("  lq_param_test_11_gyro_loop_step_response();       // 上地面低速，隔离角速度环阶跃响应\n");
+    printf("  lq_param_test_12_parameter_debug_plan();          // 不跑车，参数级调试方案\n");
+    printf("  lq_param_test_13_pose_reference_push();           // 不跑电机，手推正常路径视觉/姿态基准\n");
     printf("\n[返回码]\n");
-    printf("  单项测试返回值见各自日志；流程返回 20/30/40/50/60/100 + 子错误码，表示停在哪个阶段。\n");
+    printf("  单项测试返回值见各自日志；流程返回 20/30/40/50/60/100/110 + 子错误码，表示停在哪个阶段。\n");
     printf("  图像不过不要调PID；架空不过不要上赛道；IMU静态不过不要调角速度环。\n\n");
     printf("示例：int ret = lq_param_flow_visual(); printf(\"ret=%d\\n\", ret); return 0;\n");
     param_step_demo::print_config_snapshot();

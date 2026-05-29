@@ -441,145 +441,90 @@ fi
 # 该指令表示任意指令执行失败，立即终止脚本
 set -e
 
-# 打印关键路径
-log_info "================================================================= 调试信息：关键路径 ================================================================="
-log_info "脚本所在目录 ---> SCRIPT_DIR：${SCRIPT_DIR}"
-log_info "上级所在目录 ---> PARENT_DIR：${PARENT_DIR}"
-log_info "工具所在目录 ---> TOOLS_DIR ：${TOOLS_DIR}"
-log_info "依赖库所在目录 -> TARGET_DIR：${TARGET_DIR}"
-log_info "依赖库完整路径 -> target_dir_full：${TOOLS_DIR}/${TARGET_DIR}"
-log_info "依赖库的列表 ---> DEP_LIBS  ：${DEP_LIBS}"
-log_info "======================================================================================================================================================\n"
-
 # 脚本执行路径切换到脚本所在目录
 cd "${SCRIPT_DIR}"
-log_info "🔧 脚本开始执行，当前工作目录：$(pwd)\n"
 
 # 先检查 tools 目录是否存在
 if [ ! -d "${TOOLS_DIR}" ]; then
     log_error "❌ tools 目录不存在！预期路经：${TOOLS_DIR}，请确认目录结构！"
 fi
 
-# 检测并安装 pkg-config（函数）
-# check_and_install_pkgconfig
-function main() {
-    # 定义编译工程需要用到的依赖列表
-    local REQUIRED_DEPS=(
-        "pkg-config"
-        "cmake"
-    )
-    check_and_install_deps "${REQUIRED_DEPS[@]}"
-}
+# ==================== 快速依赖检测 ====================
+HASH_FILE="${BUILD_DIR}/.build_hash"
+NEED_RECONFIGURE=false
 
-main
+# 快速检测必要工具（不走 apt 安装流程，只检查是否存在）
+for cmd in pkg-config cmake; do
+    if ! command -v "${cmd}" &>/dev/null; then
+        log_error "❌ 未找到 ${cmd}，请手动安装：sudo apt install -y ${cmd}"
+    fi
+done
 
-# 配置交叉编译工具链
-log_info "================================================================= 处理交叉编译工具链 ================================================================="
-# 拼接工具链路径
+# ==================== 工具链处理（仅首次需要） ====================
 toolchain_dir_full="${TOOLS_DIR}/${TOOLCHAIN_DIR_NAME}"
 toolchain_tar_full="${TOOLS_DIR}/${TOOLCHAIN_TAR_NAME}"
 
-log_info "🔍 开始检查 tools 目录下的交叉编译工具链：${toolchain_dir_full}"
-
-# 检查工具链目录是否存在
-if [ -d "${toolchain_dir_full}" ]; then
-    log_info "✅ tools 目录下找到交叉编译工具链：${toolchain_dir_full}"
-    toolchain_path="${toolchain_dir_full}"
-else
-    log_warn "⚠️ tools 目录下未找到交叉编译工具链，检查压缩包：${toolchain_tar_full}"
-
-    # 检查压缩包是否存在
+if [ ! -d "${toolchain_dir_full}" ]; then
+    log_info "🔧 解压工具链..."
     if [ -f "${toolchain_tar_full}" ]; then
-        log_info "✅ 找到交叉编译工具链压缩包，开始解压到 tools 目录下..."
-        # 解压压缩包到 tools 目录下（保留权限，显示进度）
-        tar -xvf "${toolchain_tar_full}" -C "${TOOLS_DIR}" || log_error "❌ 解压交叉编译工具链压缩包失败！"
-        log_info "✅ 解压交叉编译工具链完成：${TOOLCHAIN_TAR_NAME} --> ${toolchain_dir_full}"
-        # 验证解压后的交叉编译工具链目录
-        if [ -d "${toolchain_dir_full}" ]; then
-            toolchain_path="${toolchain_dir_full}"
-            log_info "✅ 解压后找到交叉编译工具链目录：${toolchain_path}"
-        else
-            log_error "❌ 解压后未找到交叉编译工具链目录 ${TOOLCHAIN_DIR_NAME}，请检查压缩包内容！"
-        fi
+        tar -xf "${toolchain_tar_full}" -C "${TOOLS_DIR}" || log_error "❌ 解压工具链失败！"
     else
-        # 文件夹和压缩包都不存在
-        log_error "❌ 交叉编译工具链和压缩包都不存在！
-        预期目录：${toolchain_dir_full}
-        预期压缩包：${toolchain_tar_full}
-        请将压缩包放到 tools 目录下，或手动解压到 tools 目录下！"
+        log_error "❌ 工具链目录和压缩包都不存在！\n预期目录：${toolchain_dir_full}\n预期压缩包：${toolchain_tar_full}"
     fi
 fi
-log_info "======================================================================================================================================================\n"
 
-# 生成 CMake 可识别的宏文件
-log_info "================================================================== CMake 宏文件生成 =================================================================="
-log_info "🔧 开始生成 CMake 宏文件：${TOOLCHAIN_CMAKE_MACRO_FILE}"
-# 写入相对路径宏（CMAKE_TOOLCHAIN_PATH 供 CMake 调用）
-cat > "${TOOLCHAIN_CMAKE_MACRO_FILE}" << EOF
-set(CMAKE_TOOLCHAIN_PATH "\${CMAKE_CURRENT_LIST_DIR}/../tools/${TOOLCHAIN_DIR_NAME}" CACHE PATH "Loongson toolchain path" FORCE)
-EOF
-# 验证宏文件是否生成
-if [ -f "${TOOLCHAIN_CMAKE_MACRO_FILE}" ]; then
-    log_info "✅ CMake 宏文件生成成功！内容："
-    cat "${TOOLCHAIN_CMAKE_MACRO_FILE}" | grep -v "^#" | grep -v "^$"
-else
-    log_error "❌ CMake 宏文件生成失败！"
+# 生成 CMake 宏文件（仅内容变化时写入）
+TOOLCHAIN_MACRO_CONTENT="set(CMAKE_TOOLCHAIN_PATH \"\${CMAKE_CURRENT_LIST_DIR}/../tools/${TOOLCHAIN_DIR_NAME}\" CACHE PATH \"Loongson toolchain path\" FORCE)"
+if [ ! -f "${TOOLCHAIN_CMAKE_MACRO_FILE}" ] || [ "$(cat "${TOOLCHAIN_CMAKE_MACRO_FILE}")" != "${TOOLCHAIN_MACRO_CONTENT}" ]; then
+    echo "${TOOLCHAIN_MACRO_CONTENT}" > "${TOOLCHAIN_CMAKE_MACRO_FILE}"
 fi
-log_info "======================================================================================================================================================\n"
 
-# 处理常驻依赖库目录
-log_info "================================================================= 处理常驻依赖库目录 ================================================================="
+# ==================== 依赖库检测（仅目录不存在时解压） ====================
 target_dir_full="${TOOLS_DIR}/${TARGET_DIR}"
-log_info "🔍 检测常驻依赖库目录：${target_dir_full}"
-# 检查LQ_Dep_libs常驻目录是否存在
 if [ ! -d "${target_dir_full}" ]; then
-    log_error "❌ 常驻依赖库目录 ${TARGET_DIR} 不存在！
-    预期路径：${target_dir_full}
-    请先创建该目录：mkdir -p ${target_dir_full}"
+    log_error "❌ 依赖库目录 ${TARGET_DIR} 不存在！路径：${target_dir_full}"
 fi
-log_info "✅ 找到常驻依赖库目录：${target_dir_full}"
-log_info "======================================================================================================================================================\n"
 
-# 遍历所有依赖库（纯路径赋值，无日志污染）
-log_info "=================================================================== 遍历处理依赖库 ==================================================================="
-current_idx=0
-total_libs=$(echo ${DEP_LIBS} | tr ' ' '\n' | wc -l)
-for lib_dir_name in $(echo ${DEP_LIBS} | tr ' ' '\n'); do
-    current_idx=$((current_idx + 1))
-    log_info "🔧 开始处理依赖库：${lib_dir_name}"
-    # 仅获取函数返回的纯路径（日志已输出到标准错误，不会污染）（函数）
+for lib_dir_name in ${DEP_LIBS}; do
     process_single_dep_lib "${lib_dir_name}" "${target_dir_full}"
-    # 保存每个库的纯路径
     eval "${lib_dir_name}_PATH='${target_dir_full}/${lib_dir_name}/'"
-    eval "lib_full_path=\${${lib_dir_name}_PATH}"
-    if [ ${current_idx} -eq ${total_libs} ]; then
-        log_info "✅ ${lib_dir_name} 路径保存成功：\$${lib_dir_name}_PATH = ${lib_full_path}"
-    else
-        log_info "✅ ${lib_dir_name} 路径保存成功：\$${lib_dir_name}_PATH = ${lib_full_path}\n"
-    fi
 done
-log_info "======================================================================================================================================================\n"
 
-# 配置 PKG_CONFIG_PATH
-setup_pkgconfig_path
+# ==================== PKG_CONFIG_PATH 配置（精简版） ====================
+pkg_path_list=""
+for lib_dir_name in ${DEP_LIBS}; do
+    eval "lib_full_path=\${${lib_dir_name}_PATH}"
+    pkg_dir="${lib_full_path}${PKG_REL_PATH}"
+    if [ ! -d "${pkg_dir}" ]; then
+        log_error "❌ ${lib_dir_name} pkgconfig 目录不存在：${pkg_dir}"
+    fi
+    pkg_path_list+="${pkg_dir}:"
+done
+export PKG_CONFIG_PATH=$(echo "${pkg_path_list}${PKG_CONFIG_PATH:-}" | tr ':' '\n' | sort -u | tr '\n' ':' | sed 's/:$//')
 
-# 构建编译项目
-log_info "====================================================================== 编译项目 ======================================================================"
-# 删除旧的build目录
-if [ -d "${BUILD_DIR}" ]; then
-    log_info "🔧 删除旧的 build 目录：${BUILD_DIR}"
-    rm -rf "${BUILD_DIR}"
+# ==================== 判断是否需要重新配置 CMake ====================
+CURRENT_HASH="$(md5sum CMakeLists.txt 2>/dev/null | cut -d' ' -f1)|$(md5sum "${TOOLCHAIN_CMAKE_MACRO_FILE}" 2>/dev/null | cut -d' ' -f1)"
+
+if [ ! -d "${BUILD_DIR}" ] || [ ! -f "${BUILD_DIR}/Makefile" ]; then
+    NEED_RECONFIGURE=true
+    log_info "🔧 首次编译，创建 build 目录"
+elif [ -f "${HASH_FILE}" ] && [ "$(cat "${HASH_FILE}")" = "${CURRENT_HASH}" ]; then
+    log_info "✅ CMakeLists.txt 未变化，跳过 cmake 配置"
+else
+    NEED_RECONFIGURE=true
+    log_info "🔧 CMakeLists.txt 或 toolchain 变化，重新配置"
 fi
 
-# 创建并配置构建目录
-log_info "🔧 创建并配置构建目录：${BUILD_DIR}"
-cmake -B "${BUILD_DIR}" || log_error "❌ cmake 配置失败！"
+# ==================== CMake 配置（仅需要时） ====================
+if [ "${NEED_RECONFIGURE}" = true ]; then
+    cmake -B "${BUILD_DIR}" || log_error "❌ cmake 配置失败！"
+    echo "${CURRENT_HASH}" > "${HASH_FILE}"
+fi
 
-# 编译项目
-log_info "🔧 开始编译项目（线程数：${BUILD_THREADS}）"
+# ==================== 增量编译 ====================
+log_info "🔧 编译中（${BUILD_THREADS} 线程）..."
 cmake --build "${BUILD_DIR}" -j"${BUILD_THREADS}" || log_error "❌ 编译失败！"
-log_info "✅ 项目编译完成！"
-log_info "======================================================================================================================================================\n"
+log_info "✅ 编译完成！"
 
 # SCP 传输到开发板
 if [ -n "${BOARD_IP}" ]; then

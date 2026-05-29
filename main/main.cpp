@@ -69,12 +69,10 @@ int main()
     signal(SIGSEGV, signal_handler);  // 捕获段错误(访问了空指针等崩溃)
     signal(SIGPIPE, SIG_IGN);         // 忽略破损管道信号(当图传UDP发送失败时忽略之，不退出程序)
 
-    // demo33 T07：低速基线已通过后，进入无元素速度提升回归。
+    // demo33 T07：提速回归测试，验证提速后是否压线/出界/震荡。
     int demo33_ret = lq_param_test_07_speed_up_regression();
     printf("[MAIN] demo33 speed_up_regression ret=%d\n", demo33_ret);
     return demo33_ret;
-
-    // return 0;
 
     // InitMH();       //  模糊pid初始化
     motor_Init();     // 电机初始化

@@ -228,6 +228,7 @@ void speed_dif_cascade()
     static float last_diff_speed = 0.0f;
     static int last_effective_speed_goal = 0;
     static int s_curve_hold_frames = 0;
+    static int curve_entry_brake_frames = 0;
     static bool was_in_ring = false;
     static float last_target_gyro_z = 0.0f;
 
@@ -238,6 +239,7 @@ void speed_dif_cascade()
         last_diff_speed = 0.0f;
         last_effective_speed_goal = 0;
         s_curve_hold_frames = 0;
+        curve_entry_brake_frames = 0;
         dbg_steer_error = 0.0f;
         dbg_target_gyro_z = 0.0f;
         dbg_diff_speed = 0.0f;
@@ -304,6 +306,7 @@ void speed_dif_cascade()
         last_diff_speed = 0.0f;
         last_target_gyro_z = 0.0f;
         s_curve_hold_frames = 0;
+        curve_entry_brake_frames = 0;
         cascade_ctrl.reset_runtime_state();
     }
     if (ring_just_finished) {
@@ -312,6 +315,7 @@ void speed_dif_cascade()
         last_diff_speed = 0.0f;
         last_target_gyro_z = 0.0f;
         s_curve_hold_frames = 0;
+        curve_entry_brake_frames = 0;
         cascade_ctrl.reset_runtime_state();
     }
     if (!raw_steer_initialized) {
@@ -424,10 +428,29 @@ void speed_dif_cascade()
     bool extreme_turn_active =
         (std::fabs(raw_steer_error) > car_config::kExtremeTurnRawThreshold) ||
         (std::fabs(steer_error) > car_config::kExtremeTurnFiltThreshold);
+    bool curve_entry_brake_prepare =
+        !ring_now &&
+        (ImageStatus.Road_type == Normol || ImageStatus.Road_type == Straight) &&
+        !s_curve_active &&
+        !extreme_turn_active &&
+        Speed_Goal > car_config::kCurveEntryBrakeSpeedGoal &&
+        (std::fabs(control_raw_steer_error) >= car_config::kCurveEntryBrakeRawThreshold) &&
+        (std::fabs(steer_error) >= car_config::kCurveEntryBrakeFiltThreshold) &&
+        (control_raw_steer_error * diff_steer >= 0.0f) &&
+        (std::fabs(diff_steer) >= car_config::kCurveEntryBrakeDerivativeThreshold);
+    if (curve_entry_brake_prepare) {
+        curve_entry_brake_frames = car_config::kCurveEntryBrakeHoldFrames;
+    } else if (curve_entry_brake_frames > 0) {
+        --curve_entry_brake_frames;
+    }
 
     // 弯道大偏角强制降速保护
     if (abs(steer_error) > car_config::kSharpTurnSteerError) {
         Speed_Goal = WD_Speed_Goal; // 弯道强制降速
+    }
+    if (Speed_Goal > car_config::kCurveEntryBrakeSpeedGoal &&
+        curve_entry_brake_frames > 0) {
+        Speed_Goal = car_config::kCurveEntryBrakeSpeedGoal;
     }
     if (Speed_Goal > car_config::kSCurveSpeedGoal && s_curve_active) {
         Speed_Goal = car_config::kSCurveSpeedGoal;
