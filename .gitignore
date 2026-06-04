@@ -29,3 +29,7 @@ main/toolchain_path.cmake
 Thumbs.db
 *.swp
 *.swo
+
+# MATLAB autotune runtime files
+lq_autotune_stage.txt
+*.autotune_bak

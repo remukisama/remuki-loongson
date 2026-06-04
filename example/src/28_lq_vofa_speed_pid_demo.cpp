@@ -1,48 +1,67 @@
 #include "lq_all_demo.hpp"
-#include "lq_tcp_client.hpp"
+#include "lq_udp_client.hpp"
 #include <iostream>
 #include <unistd.h>
 #include <atomic>
 #include <cstdio>
+#include <csignal>
+#include <cmath>
+#include <sys/select.h>
+#include <string>
+#include <sstream>
 
 // ==========================================
 // 【基于 VOFA+ 的速度环(PID) 波形调参演示程序】
+//   所有速度单位统一为 m/s（轮胎直径 64mm）
 // ==========================================
+
+// --- 轮胎 & 齿轮参数 ---
+// 轮胎直径 64mm, 车轮大齿轮 68 齿, 编码器小齿轮 30 齿
+// 编码器返回电机轴 RPS, 换算为车轮线速度 (m/s):
+//   wheel_RPS = motor_RPS × (30/68)
+//   m/s       = wheel_RPS × π × 0.064
+//   ENC_TO_MS = motor_RPS × (30/68) × π × 0.064 ≈ motor_RPS × 0.08870
+#define WHEEL_DIAMETER_M       ( 0.064f )
+#define GEAR_TEETH_WHEEL       ( 68 )
+#define GEAR_TEETH_ENCODER     ( 30 )
+#define GEAR_RATIO             ( (float)GEAR_TEETH_ENCODER / (float)GEAR_TEETH_WHEEL )  // 30/68
+#define WHEEL_CIRCUMFERENCE_M  ( (float)M_PI * WHEEL_DIAMETER_M )                        // ≈ 0.20106 m
+#define ENC_TO_MS(rps)         ( (float)(rps) * GEAR_RATIO * WHEEL_CIRCUMFERENCE_M )     // ≈ rps × 0.08870
 
 // 用于安全退出
 static std::atomic<bool> exit_vofa_demo(false);
 
 void signal_handler_vofa_tuning(int signum) {
+    (void)signum;
     exit_vofa_demo = true;
 }
 
 // 可在下面修改 VOFA+ 服务器（PC端）的 IP 和 端口
-#define SERVER_IP       "192.168.77.22"
+#define SERVER_IP       "192.168.90.22"
 #define SERVER_PORT     8080
 
+// ==========================================
+// 1. 固定目标速度 PID 调参 (m/s)
+// ==========================================
 void lq_vofa_speed_pid_demo(void)
 {
-    std::cout << "========== 基于 VOFA+ 的速度环波形调参演示程序启动 ==========" << std::endl;
-    std::cout << ">>> 尝试连接 VOFA+ 服务器..." << std::endl;
-    std::cout << ">>> 服务器 IP  : " << SERVER_IP << std::endl;
-    std::cout << ">>> 服务器 Port: " << SERVER_PORT << std::endl;
+    exit_vofa_demo = false;
+    signal(SIGINT, signal_handler_vofa_tuning);
+    signal(SIGTERM, signal_handler_vofa_tuning);
+
+    std::cout << "========== 基于 UDP/FireWater 的速度环波形调参演示程序启动 ==========" << std::endl;
+    std::cout << ">>> UDP 目标 IP  : " << SERVER_IP << std::endl;
+    std::cout << ">>> UDP 目标 Port: " << SERVER_PORT << std::endl;
+    std::cout << ">>> 轮胎周长: " << WHEEL_CIRCUMFERENCE_M << " m  (直径 " << WHEEL_DIAMETER_M << " m)" << std::endl;
+    std::cout << ">>> 速度单位: m/s" << std::endl;
     std::cout << "按 Ctrl+C 安全退出并停止电机。" << std::endl;
 
-    // 1. 初始化 TCP 客户端并连接 VOFA+ 服务器
-    lq_tcp_client client;
-    while (!exit_vofa_demo && !client.is_connected())
-    {
-        client.tcp_client_init(SERVER_IP, SERVER_PORT);
-        if (!client.is_connected()) {
-            std::cout << "VOFA+ 服务器连接失败, 1秒后重试..." << std::endl;
-            usleep(1000000); // 延时 1 秒
-        }
-    }
-    
-    if (exit_vofa_demo) return;
-    std::cout << ">>> VOFA+ 服务器连接成功！" << std::endl;
+    // 1. 初始化 UDP 客户端
+    lq_udp_client client;
+    client.udp_client_init(SERVER_IP, SERVER_PORT);
+    std::cout << ">>> UDP 波形发送已初始化。" << std::endl;
 
-    // 2. 初始化电机 PWM 控制 (频率10KHz，初始占空比0)
+    // 2. 初始化电机 PWM 控制
     ls_atim_pwm motor_L(ATIM_PWM0_PIN81, 25000, 0, ATIM_PWM_POL_INV);
     ls_atim_pwm motor_R(ATIM_PWM1_PIN82, 25000, 0, ATIM_PWM_POL_INV);
     
@@ -53,50 +72,355 @@ void lq_vofa_speed_pid_demo(void)
     motor_L.atim_pwm_enable();
     motor_R.atim_pwm_enable();
 
-    // 4. 初始化编码器 (使用普通PWM脉冲+方向编码器)
+    auto stop_motors = [&]() {
+        motor_L.atim_pwm_set_duty(0);
+        motor_R.atim_pwm_set_duty(0);
+    };
+
+    auto shutdown_motors = [&]() {
+        stop_motors();
+        motor_L.atim_pwm_disable();
+        motor_R.atim_pwm_disable();
+    };
+
+    // 4. 初始化编码器
     ls_encoder_pwm encoder_L(ENC_PWM3_PIN67, PIN_75);
     ls_encoder_pwm encoder_R(ENC_PWM0_PIN64, PIN_72);
 
-    // --- PID 调参变量区 ---
+    // --- PID 调参变量区 (单位: m/s) ---
     // 【请在这里修改您的 PID 参数】
-    float Kp = 57.0;
-    float Ki = 26.5;
-    float Kd = 0.0;
+    float Kp_L = 643.0f;          // 比例系数  (原 RPS 版 57 / 换算因子≈0.0887 → 643)
+    float Ki_L = 299.0f;          // 积分系数  (原 RPS 版 26.5 / 换算因子≈0.0887 → 299)
+    float Kd_L = 0.0f;
+    float target_speed_L = 1.0f;  // 左轮目标线速度 (m/s)
 
-    int target_speed = 0; // 设定目标转速
-    int MAX_PWM = 7000;    // PWM最大限制
+    float Kp_R = 643.0f;
+    float Ki_R = 299.0f;
+    float Kd_R = 0.0f;
+    float target_speed_R = 1.0f;  // 右轮目标线速度 (m/s)
 
-    // 左轮 PID 变量
-    int speed_out_L = 0;
-    int last_error_L = 0;
-    
-    // 右轮 PID 变量
-    int speed_out_R = 0;
-    int last_error_R = 0;
+    int MAX_PWM = 7000;           // PWM 最大限制
+
+    // PID 状态变量
+    float speed_out_L = 0.0f;
+    float last_error_L = 0.0f;
+    float speed_out_R = 0.0f;
+    float last_error_R = 0.0f;
 
     int loop_count = 0;
 
     while(!exit_vofa_demo)
     {
         // ==============================================
-        // 1. 获取当前速度
+        // 1. 获取当前速度 (RPS → m/s)
         // ==============================================
-        int current_encoder_L = - encoder_L.encoder_get_count();
-        int current_encoder_R = encoder_R.encoder_get_count();
+        float current_speed_L = ENC_TO_MS(-encoder_L.encoder_get_count());
+        float current_speed_R = ENC_TO_MS( encoder_R.encoder_get_count());
 
         // ==============================================
         // 2. 计算误差
         // ==============================================
-        int error_L = target_speed - current_encoder_L;
-        int error_R = target_speed - current_encoder_R; 
+        float error_L = target_speed_L - current_speed_L;
+        float error_R = target_speed_R - current_speed_R;
 
         // ==============================================
-        // 3. 增量式(近似) PID 计算 (P项为加号)
+        // 3. 增量式(近似) PID 计算
         // ==============================================
-        speed_out_L += Ki * error_L + Kp * (error_L - last_error_L) + Kd * (error_L - 2 * last_error_L + current_encoder_L);
-        speed_out_R += Ki * error_R + Kp * (error_R - last_error_R) + Kd * (error_R - 2 * last_error_R + current_encoder_R);
+        if (target_speed_L == 0.0f) {
+            speed_out_L = 0.0f;
+            last_error_L = 0.0f;
+            error_L = 0.0f;
+        } else {
+            speed_out_L += Ki_L * error_L + Kp_L * (error_L - last_error_L)
+                         + Kd_L * (error_L - 2.0f * last_error_L + current_speed_L);
+            last_error_L = error_L;
+        }
 
+        if (target_speed_R == 0.0f) {
+            speed_out_R = 0.0f;
+            last_error_R = 0.0f;
+            error_R = 0.0f;
+        } else {
+            speed_out_R += Ki_R * error_R + Kp_R * (error_R - last_error_R)
+                         + Kd_R * (error_R - 2.0f * last_error_R + current_speed_R);
+            last_error_R = error_R;
+        }
+
+        // ==============================================
+        // 4. PWM 限幅
+        // ==============================================
+        if (speed_out_L > MAX_PWM) speed_out_L = MAX_PWM;
+        if (speed_out_L < -MAX_PWM) speed_out_L = -MAX_PWM;
+        if (speed_out_R > MAX_PWM) speed_out_R = MAX_PWM;
+        if (speed_out_R < -MAX_PWM) speed_out_R = -MAX_PWM;
+
+        if (target_speed_L == 0.0f && target_speed_R == 0.0f) {
+            stop_motors();
+        } else {
+            // ==============================================
+            // 5. 电机方向控制及 PWM 占空比输出
+            // ==============================================
+            if (speed_out_L >= 0.0f) {
+                motor_L_Dir.gpio_level_set(GPIO_LOW);
+                motor_L.atim_pwm_set_duty((int)speed_out_L);
+            } else {
+                motor_L_Dir.gpio_level_set(GPIO_HIGH);
+                motor_L.atim_pwm_set_duty((int)(-speed_out_L));
+            }
+
+            if (speed_out_R >= 0.0f) {
+                motor_R_Dir.gpio_level_set(GPIO_LOW);
+                motor_R.atim_pwm_set_duty((int)speed_out_R);
+            } else {
+                motor_R_Dir.gpio_level_set(GPIO_HIGH);
+                motor_R.atim_pwm_set_duty((int)(-speed_out_R));
+            }
+        }
+
+        // ==============================================
+        // 6. 通过 VOFA+ 客户端发送波形数据
+        //    FireWater 协议: ware:目标L,实际L,目标R,实际R\n
+        //    单位: m/s
+        // ==============================================
+        char send_buf[128];
+        int len = snprintf(send_buf, sizeof(send_buf), "ware:%.3f,%.3f,%.3f,%.3f\n",
+                           target_speed_L, current_speed_L,
+                           target_speed_R, current_speed_R);
+        if (len > 0) {
+            client.udp_send(send_buf, len);
+        }
+
+        // 控制台打印 (降低频率)
+        loop_count++;
+        if (loop_count >= 50) {
+            std::cout << ">>> 正在持续发送 VOFA 波形数据..."
+                      << " Target L: " << target_speed_L << " m/s"
+                      << ", R: " << target_speed_R << " m/s" << std::endl;
+            loop_count = 0;
+        }
+
+        // 控制周期 20ms (闭环频率 50Hz)
+        usleep(20000);
+    }
+
+    std::cout << "正在关闭电机与连接..." << std::endl;
+    shutdown_motors();
+    client.udp_close();
+}
+
+// ==========================================
+// 2. 交互式阶跃速度测试 (m/s)
+//    终端输入目标速度/时长/[Kp]/[Ki] 执行单次阶跃，
+//    等待期间目标速度为 0，仅通过 UDP 发送波形。
+//    格式: <目标速度(m/s)> <持续时间(ms)> [Kp] [Ki]
+//    示例: 1.5 3000            (1.5 m/s 跑 3 秒)
+//    示例: 2.0 5000 700 320    (2.0 m/s 跑 5 秒, Kp=700 Ki=320)
+// ==========================================
+void lq_vofa_speed_step_demo(void)
+{
+    exit_vofa_demo = false;
+    signal(SIGINT, signal_handler_vofa_tuning);
+    signal(SIGTERM, signal_handler_vofa_tuning);
+
+    std::cout << "========== 交互式阶跃速度测试程序启动 ==========" << std::endl;
+    std::cout << ">>> UDP 目标 IP  : " << SERVER_IP << std::endl;
+    std::cout << ">>> UDP 目标 Port: " << SERVER_PORT << std::endl;
+    std::cout << ">>> 轮胎周长: " << WHEEL_CIRCUMFERENCE_M << " m  (直径 " << WHEEL_DIAMETER_M << " m)" << std::endl;
+    std::cout << ">>> 速度单位: m/s" << std::endl;
+    std::cout << "------------------------------------------------------------" << std::endl;
+    std::cout << ">>> 格式: <目标速度(m/s)> <持续时间(ms)> [Kp] [Ki]" << std::endl;
+    std::cout << ">>> 示例: 1.5 3000          (保持当前 PI)" << std::endl;
+    std::cout << ">>> 示例: 2.0 5000 700 320  (同时更新 PI)" << std::endl;
+    std::cout << ">>> 输入 q 或 quit 退出" << std::endl;
+    std::cout << "------------------------------------------------------------" << std::endl;
+    std::cout << "按 Ctrl+C 安全退出并停止电机。" << std::endl;
+
+    // 1. 初始化 UDP 客户端
+    lq_udp_client client;
+    client.udp_client_init(SERVER_IP, SERVER_PORT);
+
+    // 2. 初始化电机 PWM 控制
+    ls_atim_pwm motor_L(ATIM_PWM0_PIN81, 25000, 0, ATIM_PWM_POL_INV);
+    ls_atim_pwm motor_R(ATIM_PWM1_PIN82, 25000, 0, ATIM_PWM_POL_INV);
+    
+    // 3. 初始化电机方向控制引脚
+    ls_gpio motor_L_Dir(PIN_21, GPIO_MODE_OUT);
+    ls_gpio motor_R_Dir(PIN_22, GPIO_MODE_OUT);
+
+    motor_L.atim_pwm_enable();
+    motor_R.atim_pwm_enable();
+
+    auto stop_motors = [&]() {
+        motor_L.atim_pwm_set_duty(0);
+        motor_R.atim_pwm_set_duty(0);
+    };
+
+    auto shutdown_motors = [&]() {
+        stop_motors();
+        motor_L.atim_pwm_disable();
+        motor_R.atim_pwm_disable();
+    };
+
+    // 4. 初始化编码器
+    ls_encoder_pwm encoder_L(ENC_PWM3_PIN67, PIN_75);
+    ls_encoder_pwm encoder_R(ENC_PWM0_PIN64, PIN_72);
+
+    // --- PID 调参变量区 (单位: m/s) ---
+    float Kp_L = 643.0f;
+    float Ki_L = 299.0f;
+    float Kd_L = 0.0f;
+
+    float Kp_R = 643.0f;
+    float Ki_R = 299.0f;
+    float Kd_R = 0.0f;
+
+    int MAX_PWM = 7000;
+
+    // --- 任务状态 ---
+    float target_speed_L   = 0.0f;
+    float target_speed_R   = 0.0f;
+    int   task_remaining_ms = 0;       // 剩余运行时间 (ms)，0 表示无任务
+
+    // --- PID 运行时状态 ---
+    float speed_out_L  = 0.0f;
+    float speed_out_R  = 0.0f;
+    float last_error_L = 0.0f;
+    float last_error_R = 0.0f;
+
+    // --- 终端输入缓冲区 ---
+    std::string input_buf;
+    bool prompt_shown = false;
+
+    auto show_prompt = [&]() {
+        if (!prompt_shown) {
+            std::cout << ">>> [等待输入] 当前 Kp=" << Kp_L << " Ki=" << Ki_L
+                      << " | 输入目标速度(m/s) 时长(ms) [Kp] [Ki]: " << std::flush;
+            prompt_shown = true;
+        }
+    };
+
+    show_prompt();
+
+    while(!exit_vofa_demo)
+    {
+        // ==============================================
+        // 非阻塞检查终端输入
+        // ==============================================
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(STDIN_FILENO, &fds);
+        struct timeval tv = {0, 0};
+        if (select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0)
+        {
+            char c;
+            if (read(STDIN_FILENO, &c, 1) > 0)
+            {
+                if (c == '\n' || c == '\r')
+                {
+                    if (!input_buf.empty())
+                    {
+                        // 去掉首尾空白
+                        while (!input_buf.empty() && input_buf.back() == '\r') input_buf.pop_back();
+
+                        if (input_buf == "q" || input_buf == "quit")
+                        {
+                            std::cout << ">>> 用户请求退出。" << std::endl;
+                            exit_vofa_demo = true;
+                            input_buf.clear();
+                            continue;
+                        }
+
+                        // 解析: speed duration [Kp] [Ki]
+                        std::istringstream iss(input_buf);
+                        float in_speed = 0.0f;
+                        int   in_duration = 0;
+                        float in_Kp = 0.0f;
+                        float in_Ki = 0.0f;
+
+                        if (iss >> in_speed >> in_duration)
+                        {
+                            task_remaining_ms = in_duration;
+                            target_speed_L   = in_speed;
+                            target_speed_R   = in_speed;
+
+                            // 可选 PI 参数: 输入了 Kp 才更新
+                            if (iss >> in_Kp)
+                            {
+                                Kp_L = in_Kp;
+                                Kp_R = in_Kp;
+                                if (iss >> in_Ki)
+                                {
+                                    Ki_L = in_Ki;
+                                    Ki_R = in_Ki;
+                                }
+                            }
+
+                            speed_out_L  = 0.0f;
+                            speed_out_R  = 0.0f;
+                            last_error_L = 0.0f;
+                            last_error_R = 0.0f;
+
+                            std::cout << ">>> [执行] 目标=" << target_speed_L << " m/s"
+                                      << ", 时长=" << task_remaining_ms << " ms"
+                                      << ", Kp=" << Kp_L << ", Ki=" << Ki_L << std::endl;
+                            prompt_shown = false;  // 任务完成后重新显示提示
+                        }
+                        else
+                        {
+                            std::cout << ">>> [错误] 无法解析输入: " << input_buf << std::endl;
+                        }
+
+                        input_buf.clear();
+                    }
+                }
+                else
+                {
+                    input_buf += c;
+                }
+            }
+        }
+
+        // ==============================================
+        // 任务计时: 到期自动将目标速度归零
+        // ==============================================
+        if (task_remaining_ms > 0)
+        {
+            task_remaining_ms -= 20;
+            if (task_remaining_ms <= 0)
+            {
+                task_remaining_ms = 0;
+                target_speed_L = 0.0f;
+                target_speed_R = 0.0f;
+                speed_out_L  = 0.0f;
+                speed_out_R  = 0.0f;
+                last_error_L = 0.0f;
+                last_error_R = 0.0f;
+                std::cout << ">>> [完成] 任务结束，目标速度已归零。" << std::endl;
+                show_prompt();
+            }
+        }
+
+        // ==============================================
+        // 1. 获取当前速度 (RPS → m/s)
+        // ==============================================
+        float current_speed_L = ENC_TO_MS(-encoder_L.encoder_get_count());
+        float current_speed_R = ENC_TO_MS( encoder_R.encoder_get_count());
+
+        // ==============================================
+        // 2. 计算误差
+        // ==============================================
+        float error_L = target_speed_L - current_speed_L;
+        float error_R = target_speed_R - current_speed_R;
+
+        // ==============================================
+        // 3. 增量式(近似) PID 计算（目标=0 时也运行，主动制动维持速度为零）
+        // ==============================================
+        speed_out_L += Ki_L * error_L + Kp_L * (error_L - last_error_L)
+                     + Kd_L * (error_L - 2.0f * last_error_L + current_speed_L);
         last_error_L = error_L;
+
+        speed_out_R += Ki_R * error_R + Kp_R * (error_R - last_error_R)
+                     + Kd_R * (error_R - 2.0f * last_error_R + current_speed_R);
         last_error_R = error_R;
 
         // ==============================================
@@ -104,79 +428,336 @@ void lq_vofa_speed_pid_demo(void)
         // ==============================================
         if (speed_out_L > MAX_PWM) speed_out_L = MAX_PWM;
         if (speed_out_L < -MAX_PWM) speed_out_L = -MAX_PWM;
-
         if (speed_out_R > MAX_PWM) speed_out_R = MAX_PWM;
         if (speed_out_R < -MAX_PWM) speed_out_R = -MAX_PWM;
-
-        // // 停车保护
-        // if (target_speed == 0) {
-        //     speed_out_L = 0;
-        //     speed_out_R = 0;
-        //     last_error_L = 0;
-        //     last_error_R = 0;
-        // }
 
         // ==============================================
         // 5. 电机方向控制及 PWM 占空比输出
         // ==============================================
-        // 左轮
-        if (speed_out_L >= 0) {
-            motor_L_Dir.gpio_level_set(GPIO_LOW);  
-            motor_L.atim_pwm_set_duty(speed_out_L);
+        if (speed_out_L >= 0.0f) {
+            motor_L_Dir.gpio_level_set(GPIO_LOW);
+            motor_L.atim_pwm_set_duty((int)speed_out_L);
         } else {
-            motor_L_Dir.gpio_level_set(GPIO_HIGH); 
-            motor_L.atim_pwm_set_duty(-speed_out_L);
+            motor_L_Dir.gpio_level_set(GPIO_HIGH);
+            motor_L.atim_pwm_set_duty((int)(-speed_out_L));
         }
 
-        // 右轮
-        if (speed_out_R >= 0) {
-            motor_R_Dir.gpio_level_set(GPIO_LOW);  
-            motor_R.atim_pwm_set_duty(speed_out_R);
+        if (speed_out_R >= 0.0f) {
+            motor_R_Dir.gpio_level_set(GPIO_LOW);
+            motor_R.atim_pwm_set_duty((int)speed_out_R);
         } else {
-            motor_R_Dir.gpio_level_set(GPIO_HIGH); 
-            motor_R.atim_pwm_set_duty(-speed_out_R);
+            motor_R_Dir.gpio_level_set(GPIO_HIGH);
+            motor_R.atim_pwm_set_duty((int)(-speed_out_R));
         }
 
         // ==============================================
-        // 6. 通过 VOFA+ 客户端发送波形数据 (通道: 目标速度, 左轮实际, 左轮PWM, 右轮实际, 右轮PWM)
-        //    使用 FireWater 协议: ware:xxx,xxx,xxx\n
+        // 6. 通过 VOFA+ 客户端发送波形数据 (m/s)
+        //    (始终发送，不阻塞)
         // ==============================================
-        if(client.is_connected()) {
-            char send_buf[128];
-            // int len = snprintf(send_buf, sizeof(send_buf), "ware:%.3f,%.3f,%.3f,%.3f,%.3f\n", 
-            //                    (float)target_speed, 
-            //                    (float)current_encoder_L, (float)speed_out_L,
-            //                    (float)current_encoder_R, (float)speed_out_R);
-            int len = snprintf(send_buf, sizeof(send_buf), "ware:%.3f,%.3f\n", 
-                               (float)target_speed, (float)current_encoder_L);
-            if (len > 0) {
-                client.tcp_send(send_buf, len);
-            }
-        } else {
-            client.tcp_client_init(SERVER_IP, SERVER_PORT); // 尝试重连
+        char send_buf[128];
+        int len = snprintf(send_buf, sizeof(send_buf), "ware:%.3f,%.3f,%.3f,%.3f\n",
+                           target_speed_L, current_speed_L,
+                           target_speed_R, current_speed_R);
+        if (len > 0) {
+            client.udp_send(send_buf, len);
         }
 
-        // 控制台打印 (降低频率防止卡顿)
-        loop_count++;
-        if (loop_count >= 50) { 
-            std::cout << ">>> 正在持续发送 VOFA 波形数据... Target Speed: " << target_speed << std::endl;
-            loop_count = 0;
-        }
-
-        // 控制周期 20ms (闭环频率 50Hz) (可根据实际需求调整为 5000)
-        usleep(20000); 
+        usleep(20000);
     }
 
-    // ==============================================
-    // 安全断电与回收资源
-    // ==============================================
     std::cout << "正在关闭电机与连接..." << std::endl;
-    motor_L.atim_pwm_set_duty(0);
-    motor_R.atim_pwm_set_duty(0);
-    motor_L.atim_pwm_disable();
-    motor_R.atim_pwm_disable();
+    shutdown_motors();
+    client.udp_close();
+}
+
+// ==========================================
+// 3. 交互式正弦速度跟随测试 (m/s)
+//    终端输入基准速度/最高速度/周期/时长/[Kp]/[Ki]，
+//    目标按正弦波形连续变化，等待期间目标速度为 0。
+//    公式: target = base + (max - base) * sin(2π * t / period)
+//    格式: <基准速度(m/s)> <最高速度(m/s)> <周期(s)> <运行时长(ms)> [Kp] [Ki]
+//    示例: 1.0 2.0 3.0 10000        (1~2 m/s 正弦, 周期 3s, 跑 10s)
+//    示例: 0.5 1.5 2.0 8000 700 320 (同时更新 PI)
+// ==========================================
+void lq_vofa_speed_sine_demo(void)
+{
+    exit_vofa_demo = false;
+    signal(SIGINT, signal_handler_vofa_tuning);
+    signal(SIGTERM, signal_handler_vofa_tuning);
+
+    std::cout << "========== 交互式正弦速度跟随测试程序启动 ==========" << std::endl;
+    std::cout << ">>> UDP 目标 IP  : " << SERVER_IP << std::endl;
+    std::cout << ">>> UDP 目标 Port: " << SERVER_PORT << std::endl;
+    std::cout << ">>> 轮胎周长: " << WHEEL_CIRCUMFERENCE_M << " m  (直径 " << WHEEL_DIAMETER_M << " m)" << std::endl;
+    std::cout << ">>> 速度单位: m/s" << std::endl;
+    std::cout << "------------------------------------------------------------" << std::endl;
+    std::cout << ">>> 公式: target = base + (max - base) * sin(2π * t / period)" << std::endl;
+    std::cout << ">>> 格式: <基准速度> <最高速度> <周期(s)> <运行时长(ms)> [Kp] [Ki]" << std::endl;
+    std::cout << ">>> 示例: 1.0 2.0 3.0 10000         (1~2 m/s 正弦, 3s 周期, 跑 10s)" << std::endl;
+    std::cout << ">>> 示例: 0.5 1.5 2.0 8000 700 320  (同时更新 PI)" << std::endl;
+    std::cout << ">>> 输入 q 或 quit 退出" << std::endl;
+    std::cout << "------------------------------------------------------------" << std::endl;
+    std::cout << "按 Ctrl+C 安全退出并停止电机。" << std::endl;
+
+    // 1. 初始化 UDP 客户端
+    lq_udp_client client;
+    client.udp_client_init(SERVER_IP, SERVER_PORT);
+
+    // 2. 初始化电机 PWM 控制
+    ls_atim_pwm motor_L(ATIM_PWM0_PIN81, 25000, 0, ATIM_PWM_POL_INV);
+    ls_atim_pwm motor_R(ATIM_PWM1_PIN82, 25000, 0, ATIM_PWM_POL_INV);
     
-    if (client.is_connected()) {
-        client.tcp_close();
+    // 3. 初始化电机方向控制引脚
+    ls_gpio motor_L_Dir(PIN_21, GPIO_MODE_OUT);
+    ls_gpio motor_R_Dir(PIN_22, GPIO_MODE_OUT);
+
+    motor_L.atim_pwm_enable();
+    motor_R.atim_pwm_enable();
+
+    auto stop_motors = [&]() {
+        motor_L.atim_pwm_set_duty(0);
+        motor_R.atim_pwm_set_duty(0);
+    };
+
+    auto shutdown_motors = [&]() {
+        stop_motors();
+        motor_L.atim_pwm_disable();
+        motor_R.atim_pwm_disable();
+    };
+
+    // 4. 初始化编码器
+    ls_encoder_pwm encoder_L(ENC_PWM3_PIN67, PIN_75);
+    ls_encoder_pwm encoder_R(ENC_PWM0_PIN64, PIN_72);
+
+    // --- PID 调参变量区 (单位: m/s) ---
+    float Kp_L = 643.0f;
+    float Ki_L = 299.0f;
+    float Kd_L = 0.0f;
+
+    float Kp_R = 643.0f;
+    float Ki_R = 299.0f;
+    float Kd_R = 0.0f;
+
+    int MAX_PWM = 7000;
+    const float DT_SEC = 0.02f;   // 控制周期 20ms
+
+    // --- 任务状态 ---
+    float target_speed_L   = 0.0f;
+    float target_speed_R   = 0.0f;
+    float sine_base        = 1.0f;    // 基准速度 (m/s)
+    float sine_amplitude   = 1.0f;    // 振幅 = max - base (m/s)
+    float sine_period_s    = 3.0f;    // 正弦周期 (s)
+    int   task_remaining_ms = 0;      // 剩余运行时间 (ms)，0 表示无任务
+    uint64_t sine_tick = 0;           // 正弦相位计数器
+
+    // --- PID 运行时状态 ---
+    float speed_out_L  = 0.0f;
+    float speed_out_R  = 0.0f;
+    float last_error_L = 0.0f;
+    float last_error_R = 0.0f;
+
+    // --- 终端输入缓冲区 ---
+    std::string input_buf;
+    bool prompt_shown = false;
+
+    auto show_prompt = [&]() {
+        if (!prompt_shown) {
+            std::cout << ">>> [等待输入] 当前 Kp=" << Kp_L << " Ki=" << Ki_L
+                      << " | 输入 基准 最高 周期(s) 时长(ms) [Kp] [Ki]: " << std::flush;
+            prompt_shown = true;
+        }
+    };
+
+    show_prompt();
+
+    while(!exit_vofa_demo)
+    {
+        // ==============================================
+        // 非阻塞检查终端输入
+        // ==============================================
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(STDIN_FILENO, &fds);
+        struct timeval tv = {0, 0};
+        if (select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0)
+        {
+            char c;
+            if (read(STDIN_FILENO, &c, 1) > 0)
+            {
+                if (c == '\n' || c == '\r')
+                {
+                    if (!input_buf.empty())
+                    {
+                        while (!input_buf.empty() && input_buf.back() == '\r') input_buf.pop_back();
+
+                        if (input_buf == "q" || input_buf == "quit")
+                        {
+                            std::cout << ">>> 用户请求退出。" << std::endl;
+                            exit_vofa_demo = true;
+                            input_buf.clear();
+                            continue;
+                        }
+
+                        // 解析: base max period_ms duration [Kp] [Ki]
+                        std::istringstream iss(input_buf);
+                        float in_base     = 0.0f;
+                        float in_max      = 0.0f;
+                        float in_period   = 0.0f;
+                        int   in_duration = 0;
+                        float in_Kp = 0.0f;
+                        float in_Ki = 0.0f;
+
+                        if (iss >> in_base >> in_max >> in_period >> in_duration)
+                        {
+                            if (in_base < 0.0f) in_base = 0.0f;
+                            if (in_max  < in_base) in_max = in_base;
+                            if (in_period <= 0.1f) in_period = 0.1f;
+
+                            sine_base      = in_base;
+                            sine_amplitude = in_max - in_base;
+                            sine_period_s  = in_period;
+                            task_remaining_ms = in_duration;
+                            sine_tick = 0;
+
+                            // 可选 PI 参数
+                            if (iss >> in_Kp)
+                            {
+                                Kp_L = in_Kp;
+                                Kp_R = in_Kp;
+                                if (iss >> in_Ki)
+                                {
+                                    Ki_L = in_Ki;
+                                    Ki_R = in_Ki;
+                                }
+                            }
+
+                            speed_out_L  = 0.0f;
+                            speed_out_R  = 0.0f;
+                            last_error_L = 0.0f;
+                            last_error_R = 0.0f;
+
+                            std::cout << ">>> [执行] 基准=" << sine_base << " m/s"
+                                      << ", 最高=" << in_max << " m/s"
+                                      << ", 周期=" << sine_period_s << " s"
+                                      << ", 时长=" << task_remaining_ms << " ms"
+                                      << ", Kp=" << Kp_L << ", Ki=" << Ki_L << std::endl;
+                            prompt_shown = false;
+                        }
+                        else
+                        {
+                            std::cout << ">>> [错误] 无法解析输入: " << input_buf << std::endl;
+                        }
+
+                        input_buf.clear();
+                    }
+                }
+                else
+                {
+                    input_buf += c;
+                }
+            }
+        }
+
+        // ==============================================
+        // 任务计时: 到期自动将目标速度归零
+        // ==============================================
+        if (task_remaining_ms > 0)
+        {
+            task_remaining_ms -= 20;
+            if (task_remaining_ms <= 0)
+            {
+                task_remaining_ms = 0;
+                target_speed_L = 0.0f;
+                target_speed_R = 0.0f;
+                speed_out_L  = 0.0f;
+                speed_out_R  = 0.0f;
+                last_error_L = 0.0f;
+                last_error_R = 0.0f;
+                sine_tick = 0;
+                std::cout << ">>> [完成] 任务结束，目标速度已归零。" << std::endl;
+                show_prompt();
+            }
+        }
+
+        // ==============================================
+        // 计算正弦目标速度 (m/s)
+        // ==============================================
+        if (task_remaining_ms > 0)
+        {
+            float t = (float)sine_tick * DT_SEC;
+            float sine_val = sinf(2.0f * (float)M_PI * t / sine_period_s);
+            target_speed_L = sine_base + sine_amplitude * sine_val;
+            target_speed_R = target_speed_L;
+            if (target_speed_L < 0.0f) target_speed_L = 0.0f;
+            if (target_speed_R < 0.0f) target_speed_R = 0.0f;
+        }
+
+        // ==============================================
+        // 1. 获取当前速度 (RPS → m/s)
+        // ==============================================
+        float current_speed_L = ENC_TO_MS(-encoder_L.encoder_get_count());
+        float current_speed_R = ENC_TO_MS( encoder_R.encoder_get_count());
+
+        // ==============================================
+        // 2. 计算误差
+        // ==============================================
+        float error_L = target_speed_L - current_speed_L;
+        float error_R = target_speed_R - current_speed_R;
+
+        // ==============================================
+        // 3. 增量式(近似) PID 计算（目标=0 时也运行，主动制动维持速度为零）
+        // ==============================================
+        speed_out_L += Ki_L * error_L + Kp_L * (error_L - last_error_L)
+                     + Kd_L * (error_L - 2.0f * last_error_L + current_speed_L);
+        last_error_L = error_L;
+
+        speed_out_R += Ki_R * error_R + Kp_R * (error_R - last_error_R)
+                     + Kd_R * (error_R - 2.0f * last_error_R + current_speed_R);
+        last_error_R = error_R;
+
+        // ==============================================
+        // 4. PWM 限幅
+        // ==============================================
+        if (speed_out_L > MAX_PWM) speed_out_L = MAX_PWM;
+        if (speed_out_L < -MAX_PWM) speed_out_L = -MAX_PWM;
+        if (speed_out_R > MAX_PWM) speed_out_R = MAX_PWM;
+        if (speed_out_R < -MAX_PWM) speed_out_R = -MAX_PWM;
+
+        // ==============================================
+        // 5. 电机方向控制及 PWM 占空比输出
+        // ==============================================
+        if (speed_out_L >= 0.0f) {
+            motor_L_Dir.gpio_level_set(GPIO_LOW);
+            motor_L.atim_pwm_set_duty((int)speed_out_L);
+        } else {
+            motor_L_Dir.gpio_level_set(GPIO_HIGH);
+            motor_L.atim_pwm_set_duty((int)(-speed_out_L));
+        }
+
+        if (speed_out_R >= 0.0f) {
+            motor_R_Dir.gpio_level_set(GPIO_LOW);
+            motor_R.atim_pwm_set_duty((int)speed_out_R);
+        } else {
+            motor_R_Dir.gpio_level_set(GPIO_HIGH);
+            motor_R.atim_pwm_set_duty((int)(-speed_out_R));
+        }
+
+        // ==============================================
+        // 6. 通过 VOFA+ 客户端发送波形数据 (m/s)
+        // ==============================================
+        char send_buf[128];
+        int len = snprintf(send_buf, sizeof(send_buf), "ware:%.3f,%.3f,%.3f,%.3f\n",
+                           target_speed_L, current_speed_L,
+                           target_speed_R, current_speed_R);
+        if (len > 0) {
+            client.udp_send(send_buf, len);
+        }
+
+        usleep(20000);
+        if (task_remaining_ms > 0) sine_tick++;
     }
+
+    std::cout << "正在关闭电机与连接..." << std::endl;
+    shutdown_motors();
+    client.udp_close();
 }

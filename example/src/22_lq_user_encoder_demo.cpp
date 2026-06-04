@@ -12,10 +12,10 @@ void lq_user_encoder_demo(void)
 
     while (1)
     {
-        int enc_l = encoder_num_L();
-        int enc_r = encoder_num_R();
+        float enc_l = encoder_num_L();
+        float enc_r = encoder_num_R();
 
-        printf("Encoder Left: %6d  |  Encoder Right: %6d\n", enc_l, enc_r);
+        printf("Encoder Left: %7.2f  |  Encoder Right: %7.2f\n", enc_l, enc_r);
         
         // 延时 20ms，与你闭环控制的周期类似
         usleep(20000); 

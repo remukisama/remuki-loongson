@@ -13,7 +13,7 @@
 extern std::atomic<bool> exit_flag;
 extern ImageStatustypedef ImageStatus;
 
-extern int Speed_Goal;
+extern float Speed_Goal;
 extern float Speed_Goal_l;
 extern float Speed_Goal_r;
 extern float speed_out_l;

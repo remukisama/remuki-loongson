@@ -5,59 +5,74 @@
 
 namespace car_config
 {
+// =====================================================================
 // 电机硬件与最内层速度环参数
+// 速度单位: m/s (车轮线速度)
+// 换算: m/s = 电机RPS × (30/68) × π × 0.064 ≈ RPS × 0.08870
+// 齿轮: 编码器小齿轮30齿, 车轮大齿轮68齿, 轮胎直径64mm
+// =====================================================================
+constexpr float kEncoderRpsToMS = 0.08870f;      // 编码器电机RPS→车轮线速度m/s换算系数
 constexpr int kMotorPwmFrequencyHz = 25000;      // 电机 PWM 频率，频率过低电机会啸叫，过高会降低有效分辨率；通常保持 20k-25kHz，除非驱动器发热或响应异常。
 constexpr int kMotorInitialDuty = 0;             // 电机上电初始占空比，建议保持 0；调车时不要改大，避免程序启动瞬间冲车。
-constexpr float kSpeedPidP = 57.0f;              // 速度环比例项，调大响应更快但易抖动/超调；先从较小值逐步加到轮速能跟随目标且不过冲。
-constexpr float kSpeedPidI = 26.5f;              // 速度环积分项，调大能消除稳态误差但易积累导致冲击；车速跟不上目标时小幅增加，停车后仍顶电机则减小。
-constexpr float kSpeedPidD = 0.0f;               // 速度环微分项，能抑制快速变化但会放大编码器噪声；编码器速度很干净时再尝试 0.5-2.0。
+constexpr float kSpeedPidP = 2400.0f;              // 速度环比例项，用户实测值，保持不动。
+constexpr float kSpeedPidI = 300.0f;              // 速度环积分项，用户实测值，保持不动。
+constexpr float kSpeedPidD = 0.0f;               // 速度环微分项，保持0。
 constexpr int kMotorMaxPwm = 8000;               // PWM 输出限幅，调大动力更强但更容易打滑和烧驱动；先确保满电、空载和上赛道都不发热再提高。
-constexpr int kCurveSpeedGoal = 14;              // 弯道基础轮速目标，调大过弯更快但易内切/甩尾；本次只压弯道，不改直道速度。
-constexpr int kStraightSpeedGoal = 20;           // 直道基础轮速目标，调大直道速度；弯道稳定后再提高，若入弯刹不住则降低或加入直道末端降速。
-constexpr int kMaxWheelSpeedGoal = 100;          // 单轮目标速度上限，防止差速分配过大；若调参时目标速度经常被截断，先检查差速参数而不是直接放大。
+constexpr float kCurveSpeedGoal = 1.15f;         // 弯道基础轮速目标 m/s (原13RPS×0.0887≈1.15)
+constexpr float kStraightSpeedGoal = 1.60f;      // 直道基础轮速目标 m/s (原18RPS×0.0887≈1.60)
+constexpr float kMaxWheelSpeedGoal = 4.0f;       // 单轮目标速度上限 m/s (原100RPS×0.0887≈8.9)
 
 // 视觉外环与差速分配参数
-constexpr float kSteerKp = 10.2f;                // 视觉偏差到目标角速度的 P 项，调大转向更积极但易左右摆；本次压低稳态大弯输出，减少车身外甩。
-constexpr float kSteerKd = 6.2f;                 // 视觉偏差变化率 D 项，调大能提前抑制过冲但会放大跳线噪声；本次略收，降低连续弯抽动。
-constexpr float kMaxDiffRatio = 1.20f;           // 最大差速占基础速度的比例，调大原地机动更强但易内轮反转和甩尾；急弯 goal=10 时给角速度环多一点余量。
-constexpr int kSteerDeadBandDefault = 1;         // 默认视觉偏差死区，调大直道更稳但小弯响应迟钝；图像中心稳定后尽量保持 1-2。
-constexpr int kSteerDeadBandStraight = 2;        // 直道死区，调大可减少直道细碎修正；偏小可让入弯更早降速和打方向。
+constexpr float kSteerKp = 3.9f;                  // 视觉偏差到目标角速度的 P 项；从3.5提到3.9增强转向响应，让大弯更快打够。
+constexpr float kSteerKd = 3.0f;                  // 视觉偏差变化率 D 项；从2.5提到3.0，入弯瞬间dE放大响应更快。
+constexpr float kMaxDiffRatio = 1.85f;           // 最大差速占基础速度的比例；从1.75提到1.85，差速余量更大。
+constexpr int kSteerDeadBandDefault = 1;          // 默认视觉偏差死区，收回到1，避免raw=1~2的小偏差被吞掉后突然积累。
+constexpr int kSteerDeadBandStraight = 1;        // 直道死区，收小让直道轻微偏移能连续修正，避免入弯前已经偏外。
 constexpr int kSteerDeadBandCurve = 1;           // 弯道死区，调小弯道更灵敏但噪声更多；本次降到 1，减小小弯迟钝。
-constexpr int kMinWheelSpeedGoal = 1;            // 单轮最低目标速度，避免急弯内轮长时间停住造成拖拽/甩尾；本次降到 1，提高急弯内侧转向余量。
+constexpr float kMinWheelSpeedGoal = 0.36f;       // 单轮最低目标速度 m/s (原4RPS×0.0887≈0.36)
 constexpr float kOuterLoopMinPeriodSec = 0.02f;  // 视觉/IMU 外环最小刷新周期，0.02s 约 50Hz；CPU 忙或 I2C 卡顿可增大到 0.03s，响应慢则减小。
 constexpr float kOuterLoopFallbackPeriodSec = 0.02f; // dt 异常时使用的兜底周期，应与外环周期一致；改外环频率时同步修改。
-constexpr float kSteerFilterAlpha = 0.42f;       // 视觉偏差一阶低通系数，越大越跟手但越抖，越小越稳但延迟；本次提高跟随，减少过弯外切。
+constexpr float kSteerFilterAlpha = 0.55f;        // 视觉偏差一阶低通系数，从0.5提到0.6加快滤波跟踪，S弯换向更果断。
+constexpr float kSteerRawJumpThreshold = 14.0f;  // Raw单帧突变判定阈值，兼容当前S弯跳边保护逻辑。
+constexpr float kSteerRawMaxStepPerFrame = 7.0f; // Raw突变时每帧最大接纳步长，避免识别跳边直接反打。
+constexpr float kSteerFilterMaxStepPerFrame = 5.2f; // Filt最终单帧最大变化量，限制滤波输出突跳。
+constexpr float kSteerFilterSignFlipMaxStepPerFrame = 3.2f; // Filt跨符号换向时更严格，避免一帧大幅反打。
 constexpr float kSteerFastFlipAlpha = 0.78f;     // S 弯大幅换向时的快速滤波系数，让 Filt 尽快跟上 Raw，避免继续朝旧方向打。
-constexpr float kSteerFastFlipRawThreshold = 10.0f; // 触发快速换向的 Raw 最小幅度，小偏差噪声不触发。
-constexpr float kSteerFastFlipGap = 18.0f;       // Raw 与 Filt 差值超过该值才认为是明确换向，避免普通抖动误触发。
-constexpr int kSCurveSpeedGoal = 10;             // S 弯换向/大幅预判时的临时基础速度，最后弯道大偏差时优先降低车身惯性。
-constexpr float kSCurveMinDiff = 14.0f;          // S 弯保护时保留的最小差速余量，避免 goal=10 时 Max 只有 12 导致反打救不回来。
-constexpr int kSCurveHoldFrames = 16;            // S 弯触发后保持保护的外环帧数，约 320ms，避免车身角速度还没收回就恢复速度。
-constexpr int kExtremeTurnSpeedGoal = 8;         // 极限贴边急弯速度，只在 Raw/Filt 已接近图像边缘时启用，普通弯不受影响。
-constexpr float kExtremeTurnMinDiff = 17.0f;     // 极限弯降速后保留的最小差速余量，贴边段给外轮更多速度，减少冲出赛道。
+constexpr float kSteerFastFlipRawThreshold = 8.0f;  // 触发快速换向的 Raw 最小幅度，从 10 降到 8 让 S 弯更早触发快速跟踪。
+constexpr float kSteerFastFlipGap = 15.0f;        // Raw 与 Filt 差值换向判定，从 18 降到 15 让中等换向也能触发。
+constexpr float kSCurveSpeedGoal = 0.44f;          // S弯换向速度 m/s (原5RPS×0.0887≈0.44)
+constexpr float kCurveEntryBrakeSpeedGoal = 0.53f; // 直道刚进弯预刹车速度 m/s (原6RPS×0.0887≈0.53)
+constexpr int kCurveEntryBrakeHoldFrames = 14;   // 入弯预刹车保持帧数；从18降到14（约0.28s），短狠快：触发后快速释放。
+constexpr float kCurveEntryBrakeRawThreshold = 4.0f; // Raw 出现中等偏差就提前刹车，避免等到急弯阈值才降速。
+constexpr float kCurveEntryBrakeFiltThreshold = 3.0f; // Filt 同步偏离中心后才触发，过滤直道轻微噪声。
+constexpr float kCurveEntryBrakeDerivativeThreshold = 0.15f; // 偏差继续向外增大时触发入口预刹车；从0.25降到0.15，19速弯前提前减速。
+constexpr float kSCurveMinDiff = 7.0f;           // S 弯保护时保留的最小差速余量，收小一点让内轮持续滚动。
+constexpr int kSCurveHoldFrames = 28;            // S弯触发后保持保护的外环帧数，延长保护避免二次反冲。
+constexpr float kExtremeTurnSpeedGoal = 1.15f;    // 极限急弯速度 m/s (原13RPS×0.0887≈1.15)
+constexpr float kExtremeTurnMinDiff = 35.0f;     // 极限弯降速后保留的最小差速余量；从32提到35，急弯差速更强。
 constexpr float kExtremeTurnExitRawThreshold = 3.0f; // 极限弯出弯判定 Raw 阈值，Raw 回到中心附近时加快滤波和目标角速度回收。
 constexpr float kExtremeTurnExitFiltThreshold = 8.0f; // 极限弯出弯判定 Filt 阈值，只有滤波仍明显滞后时才触发快收。
 constexpr float kExtremeTurnExitFilterAlpha = 0.82f;  // 出极限弯时临时加大的视觉滤波系数，减少 Filt 拖着旧方向继续打。
-constexpr float kSCurveRawMinError = 4.0f;       // S 弯预判最小 Raw 偏差，小于该值多半是中心附近噪声，不触发降速。
+constexpr float kSCurveRawMinError = 4.0f;       // S 弯预判最小 Raw 偏差，小于该值多半是中心附近噪声；急弯出界时提前触发保护。
 constexpr float kSCurveEarlyRawMinError = 1.0f;  // Raw 刚越过中心但幅度还小时，也允许配合 Filt 反向和大 dE 提前预警。
 constexpr float kSCurveEarlyFiltMinError = 1.0f; // Filt 仍停在旧方向的最小幅度，过滤中心附近抖动。
 constexpr float kSCurveEarlyDerivativeThreshold = 2.2f; // 小 Raw 换向预警的 dE 阈值，专门抓 S 弯初始过零帧。
 constexpr float kSCurveRawFiltGap = 8.0f;        // Raw 与 Filt 差值较大说明图像已经换向但车身/滤波还在旧方向，提前降速。
 constexpr float kSCurveDerivativeThreshold = 1.8f; // S 弯/急变的单帧滤波偏差变化阈值，超过后给目标角速度更快跟随。
-constexpr float kSCurveSharpRawThreshold = 14.0f;  // Raw 已经较大时即使 Filt 还没跟上，也持续按 S 弯/急弯保护速度处理。
-constexpr float kExtremeTurnRawThreshold = 24.0f;  // 极限贴边急弯 Raw 阈值，接近图像边缘时进一步降速。
-constexpr float kExtremeTurnFiltThreshold = 22.0f; // 极限贴边急弯 Filt 阈值，防止 Raw 单帧噪声误触发。
-constexpr float kSharpTurnSteerError = 13.0f;    // 大偏差判定阈值，超过后强制用弯道速度；按 80 列图像偏差量级设置，避免急弯仍按直道跑。
-constexpr float kVisualGyroLimitDps = 180.0f;    // 视觉外环输出目标角速度限幅，调大转向上限更高但冲击更强；本次压低，避免普通大弯长时间贴顶。
-constexpr float kTargetGyroMaxDeltaDps = 32.0f;  // 目标角速度变化率限制，调小更平顺但入弯慢，调大响应快但可能抽动；稳态变化继续收紧。
-constexpr float kTargetGyroSCurveMaxDeltaDps = 44.0f; // S 弯换向/Raw-Filt 大分离时放宽目标变化率，避免车身先出界再救回；过大容易连续反冲。
+constexpr float kSCurveSharpRawThreshold = 10.0f;  // Raw 已经较大时即使 Filt 还没跟上，也持续按 S 弯/急弯保护速度处理。
+constexpr float kExtremeTurnRawThreshold = 4.0f;   // 极限贴边急弯 Raw 阈值，从6降到4，直角弯需要更早触发。
+constexpr float kExtremeTurnFiltThreshold = 3.0f;  // 极限贴边急弯 Filt 阈值，从5降到3，配合更早触发。
+constexpr float kSharpTurnSteerError = 10.0f;    // 大偏差判定阈值，超过后强制用弯道速度；大弯出界时提前进入降速/强转状态。
+constexpr float kVisualGyroLimitDps = 180.0f;     // 视觉外环输出目标角速度限幅，避免大偏差时内环长期追不上。
+constexpr float kTargetGyroMaxDeltaDps = 48.0f;  // 目标角速度变化率限制；56配合高P导致振荡，回退到48。
+constexpr float kTargetGyroSCurveMaxDeltaDps = 38.0f; // S 弯换向/Raw-Filt 大分离时放宽目标变化率，但避免连续反冲。
 constexpr float kTargetGyroSignFlipMaxDeltaDps = 210.0f; // 目标角速度换向时的变化率限制，只在正负号切换时放宽；确保大幅换向先跨过零，不继续朝旧方向打。
 constexpr float kTargetGyroDeadbandReturnDeltaDps = 72.0f; // 视觉进入死区后目标角速度回零速度，调大出弯姿态收得更快，过大则直道可能有回正抽动。
 constexpr float kExtremeTurnExitTargetDeltaDps = 140.0f; // 极限弯出弯时目标角速度允许更快回收，防止 Raw 已回中但 Tgt 仍长时间贴顶。
-constexpr float kOpposingGyroHoldDps = 24.0f;   // S 弯反打时，如果车身仍在旧方向旋转，先限制目标角速度，避免差速瞬间打满。
-constexpr float kOpposingGyroTargetLimitDps = 52.0f; // 反向旋转未收住时的临时目标角速度上限，保留反打但避免反冲过大。
-constexpr int kOpposingGyroRecoveryFrames = 18; // 反向保护触发后继续保持几帧较低目标，避免 GF 刚过零就立刻反冲。
-constexpr float kOpposingGyroRecoveryLimitDps = 62.0f; // 反向保护解除后的短暂恢复目标上限，比首拍略高但低于普通 S 弯目标。
+constexpr float kOpposingGyroHoldDps = 24.0f;   // S弯反打时，如果车身仍在旧方向旋转，先限制目标角速度，从24降到18减少误触发。
+constexpr float kOpposingGyroTargetLimitDps = 95.0f; // 反向旋转未收住时的临时目标角速度上限，从95提到130避免S弯换向时目标被过度限制。
+constexpr int kOpposingGyroRecoveryFrames = 18; // 反向保护触发后继续保持几帧较低目标，从18降到10加快恢复。
+constexpr float kOpposingGyroRecoveryLimitDps = 115.0f; // 反向保护解除后的短暂恢复目标上限，从115提到145加快S弯换向恢复。
 constexpr bool kSteerDebugPrintEnable = true;    // 置 false 可关闭位置环/视觉调试串口打印。
 constexpr int kSteerDebugPrintDivider = 10;      // 外环每 N 次刷新打印一次；10 次约 200ms，调小更密集。
 constexpr float kFallbackDiffLimit = 250.0f;     // IMU 失效时纯视觉差速限幅，主要是保护值；若 IMU 偶发断联导致猛打方向，应降低。
@@ -77,22 +92,22 @@ constexpr float kYawTrackFineRateDps = 12.0f;    // 小误差末端微调角速�
 constexpr float kYawTrackMinRateStartDeg = 6.0f; // 大误差最低角速度启用阈值。
 constexpr float kYawTrackFineRateStartDeg = 1.2f;// 小误差微调启用阈值。
 constexpr float kYawTrackDefaultMaxRateDps = 45.0f; // 角度目标默认最大角速度，90度调试时稳定可用。
-constexpr float kGyroPidP = 0.132f;              // 角速度环 P，调大更能跟随目标角速度但会加剧差速冲击；本次回收一点，减少弯中差速打满和甩尾。
+constexpr float kGyroPidP = 0.20f;                // 角速度环 P；T06 IMU异常(204dps重复锁死)，从0.32降到0.20压带宽。
 constexpr float kGyroPidI = 0.0f;                // 角速度环 I，通常保持 0；存在长期角速度误差时再从 0.001 级别试，防止积累甩尾。
-constexpr float kGyroPidD = 0.0045f;             // 角速度环 D，抑制角速度突变；车身甩动可加一点，电机咔咔响或噪声放大就减。
+constexpr float kGyroPidD = 0.006f;               // 角速度环 D；0.020崩跟踪(35dps仅36%)，回退到0.006，前馈已高D不需要太大。
 constexpr float kGyroPidIntegralLimit = 50.0f;   // 角速度环积分限幅，当前 I 为 0 基本不起作用；启用 I 时先降到 5-10 再试。
-constexpr float kGyroPidOutputLimit = 31.0f;     // 角速度环差速输出限幅，调大弯道能力更强但易侧滑；本次收回，避免内轮贴 0 后速度环跟不上。
-constexpr float kGyroDeadBandDps = 1.5f;         // 陀螺仪角速度死区，小于该值认为是 0；静止数据漂移大就加，低速小修正迟钝就减。
+constexpr float kGyroPidOutputLimit = 65.0f;     // 角速度环差速输出限幅；78配合0.55P导致振荡，回退到65。
+constexpr float kGyroDeadBandDps = 5.0f;         // 陀螺仪角速度死区，T06 IMU异常，从3.0提到5.0扩大死区。
 constexpr float kGyroMeasurementLimitDps = 260.0f; // 陀螺仪测量限幅，需高于视觉目标角速度上限，否则 220dps 急弯会被内部截断成假误差。
-constexpr float kGyroLpfAlpha = 0.32f;           // 陀螺仪低通滤波系数，越大越灵敏越抖，越小越平顺越慢；本次加快 GF 跟随，减少内环迟滞。
-constexpr float kGyroFeedforwardGain = 0.027f;   // 目标角速度前馈系数，调大入弯更快但易冲；本次补回入弯响应。
-constexpr float kDiffOutputMaxDelta = 3.6f;      // 差速输出变化率限制，调小更稳但转向慢，调大更灵敏但易抽动；恢复足够过弯响应。
+constexpr float kGyroLpfAlpha = 0.25f;           // 陀螺仪低通滤波系数，IMU读数异常(连续锁死)，从0.40降到0.25强力滤波。
+constexpr float kGyroFeedforwardGain = 0.025f;   // 目标角速度前馈系数；IMU异常恢复原值，避免前馈放大异常读数。
+constexpr float kDiffOutputMaxDelta = 1.8f;      // 差速输出变化率限制，咔咔声从2.5再降到1.8进一步平滑差速输出。
 constexpr float kDiffOutputReverseMaxDelta = 13.0f; // 目标与实际角速度反向时的差速变化率，专门救 S 弯回正慢；只在车身还朝旧方向转时启用。
 constexpr float kReverseGyroTargetThresholdDps = 55.0f; // 反向救车启用的目标角速度阈值，避免直道小修正误触发。
 constexpr float kReverseGyroRealThresholdDps = 35.0f;   // 反向救车启用的实际角速度阈值，过滤静止零漂和小幅摆动。
-constexpr float kGyroRawSpikeRejectDps = 360.0f; // 原始陀螺仪单帧尖峰过滤阈值，超过该值视为 I2C/采样异常，沿用上一帧滤波状态。
-constexpr float kGyroTargetPositiveGain = 1.03f; // 目标角速度正向补偿系数，用于修正车体正反向驱动不对称；正向欠转时略增。
-constexpr float kGyroTargetNegativeGain = 1.00f; // 目标角速度负向补偿系数；负向偏大时可略降到 0.98 左右。
+constexpr float kGyroRawSpikeRejectDps = 260.0f; // 原始陀螺仪单帧尖峰过滤阈值；静止实测偶发-359dps，需在进入角速度环前拒绝。
+constexpr float kGyroTargetPositiveGain = 0.97f; // 目标角速度正向补偿系数，T11正向gf=23(65%)优于负向-16(45%)，正向略降以平衡。
+constexpr float kGyroTargetNegativeGain = 1.08f; // 目标角速度负向补偿系数，T11负向跟踪弱(gf=-16 vs 目标-35)，从1.00提到1.08补强。
 constexpr float kStraightHighGyroLimitDps = 120.0f; // 直行目标下异常高角速度阈值，超过后收紧差速；直道突然甩尾可降低。
 constexpr float kStraightHighGyroDiffLimit = 8.0f;  // 直行异常角速度时差速限幅，调小保护更强但恢复慢；救车不足可略增。
 
@@ -105,35 +120,72 @@ constexpr int kMpu6050BiasSampleDelayUs = 10000; // 零偏采样间隔，10000us
 // 摄像头与二值化预处理参数
 constexpr int kCameraWidth = 160;                // 摄像头采集宽度，调大图像更细但 CPU 压力更高；循迹优先保持 160。
 constexpr int kCameraHeight = 120;               // 摄像头采集高度，调大能看更远但处理更慢；当前只取下半部分，通常保持 120。
-constexpr int kCameraFps = 180;                  // 摄像头目标帧率，调大延迟更低但可能丢帧；实际帧率达不到时应降低到稳定值。
-constexpr lq_camera_format_t kCameraFormat = LQ_CAMERA_0CPU_MJPG; // 摄像头格式，低 CPU 模式适合主控；若画面异常再尝试其他格式。
-constexpr const char *kCameraDevicePath = LQ_CAMERA_PATH; // 摄像头设备节点，默认由底层库定义；换摄像头编号时改这里，如 LQ_CAMERA_PATH 指向的设备不对。
-constexpr int kCameraManualExposure = 100;       // 手动曝光值，调大画面更亮但运动拖影可能增加；先在赛道强光/暗光下分别确认蓝底和线能分开。
+constexpr int kCameraFps = 120;                  // 新摄像头实际只能到 120fps；按实测值配置，避免每次启动出现 FPS adjusted 警告。
+constexpr lq_camera_format_t kCameraFormat = LQ_CAMERA_0CPU_MJPG; // 摄像头格式，低 CPU 占用模式适合主控；若画面异常再尝试 HIGH_MJPG。
+constexpr const char *kCameraDevicePath = LQ_CAMERA_PATH; // 摄像头设备节点，默认 /dev/video0；换摄像头编号时改这里。
+constexpr int kCameraManualExposure = 55;       // 手动曝光值，调大画面更亮但运动拖影可能增加；先固定曝光再看OTSU质量。
 constexpr int kCameraRoiX = 0;                   // ROI 左上角 X，通常保持 0；摄像头画面横向偏移明显时先机械校正，再微调。
-constexpr int kCameraRoiY = 60;                  // ROI 左上角 Y，越大越看近端、响应快但预判少；高速时可减小看远一点，误判远端噪声就增大。
+constexpr int kCameraRoiY = 60;                  // ROI 左上角 Y，越大越看近端、响应快但预判少；当前 ROI 高度为 60，120 高图像下这里保持最大安全值。
 constexpr int kCameraRoiWidth = 160;             // ROI 宽度，应与采集宽度和压缩逻辑匹配；非必要不要改。
 constexpr int kCameraRoiHeight = 60;             // ROI 高度，越大信息更多但处理慢；若远端元素判断不足可适当增大。
 constexpr int kCameraColumnSampleStep = 2;       // 横向采样步长，2 表示 160 压缩到 80 列；调大更快但精度低，调小要同步修改图像数组宽度。
 constexpr int kBlueHueLower = 90;                // 蓝色背景 H 下限，背景被漏检时降低，黑线被误当蓝色时提高。
-constexpr int kBlueSaturationLower = 60;         // 蓝色背景 S 下限，光照弱导致蓝色饱和度低时降低，杂色误检为蓝色时提高。
+constexpr int kBlueSaturationLower = 100;         // 蓝色背景 S 下限，光照弱导致蓝色饱和度低时降低，杂色误检为蓝色时提高。
 constexpr int kBlueValueLower = 60;              // 蓝色背景 V 下限，暗场漏检时降低，阴影噪点误检时提高。
 constexpr int kBlueHueUpper = 130;               // 蓝色背景 H 上限，背景偏紫/偏青时调整；上限过高可能吞掉非赛道区域。
 constexpr int kBlueSaturationUpper = 255;        // 蓝色背景 S 上限，通常保持 255；只有特殊反光场景才收窄。
 constexpr int kBlueValueUpper = 255;             // 蓝色背景 V 上限，通常保持 255；强反光误检严重时可略降。
 
+// 图像二值化算法选择
+constexpr int kImageAlgorithm = 2;               // 0=HSV蓝色背景提取，1=灰度静态阈值，2=灰度+OTSU自动阈值（当前推荐）
+constexpr int kImageOtsuBlurKernel = 3;          // OTSU前灰度滤波核大小，只支持奇数；3可抑制噪点且不明显糊边。
+constexpr int kImageMorphKernel = 3;             // 二值图形态学核大小，3用于去孤立点/小孔洞；过大会吞细节。
+
 // 图像循迹与元素判断阈值
-constexpr int kImageMiddleLine = 39;             // 图像压缩后中心列，80 列图像中心约 39；车身或摄像头偏装时先机械校正，再微调 1-2。
-constexpr int kImageTowPoint = 14;               // 前瞻行，数值越小看得越远、越提前，越大看近端、越稳；最后大弯 Raw 贴边，继续前移提前发现弯道。
-constexpr int kImageThresholdStatic = 70;        // 传统静态阈值备用参数，当前 HSV 方案为主；若切回灰度二值化，暗场降低、亮场升高。
+constexpr int kImageMiddleLine = 38;             // 图像压缩后中心列；T13手推直道minL=13比minR=15少2，向右修正1列平衡左右margin。
+constexpr int kImageTowPoint = 12;               // 前瞻行，数值越小看得越远、越提前，越大看近端、越稳；大弯出界时继续前移。
+constexpr int kImageThresholdStatic = 130;       // 灰度二值化阈值；110时white_avg仍≈0.480且边界稳定，本轮提高到130验证能否压低白色比例。
 constexpr int kImageThresholdDetach = 180;       // 阳光/亮斑分离阈值备用参数，强反光误判时提高，暗场丢线时降低。
 constexpr int kImageScanInterval = 3;            // 普通扫边范围，调大容错更强但可能跨到错误边界；本次回到 3，减少跳到错误边线。
 constexpr int kImageScanIntervalCross = 4;       // 十字/复杂元素扫边范围，调大更容易找回边但更易误补线；本次收紧，减少十字路口连转误判。
 constexpr int kImageVariance = 90;               // 直道判断方差阈值，越大越容易判直道；直道不加速可增大，弯道误判直道则降低。
 constexpr int kImageVarianceAcc = 45;            // 直线加速检测阈值备用参数，越大越容易进入加速；确认直线判断可靠后再放宽。
-constexpr int kStraightVarianceAccThreshold = 5; // 当前严格直道方差阈值，越大越容易判直道；若直道从不识别可逐步加到 8-12。
+constexpr int kElementRingConfirmFrames = 1;     // 圆环入口连续确认帧数；十字口误入左环时先加大确认。
+constexpr int kElementRingExitConfirmFrames = 4; // 圆环结束连续确认帧数，防止出环瞬间边界抖动导致状态来回跳。
+constexpr int kElementCooldownFrames = 45;        // 特殊元素退出后的识别冷却帧数，避免刚回普通赛道又立刻误触发。
+constexpr int kElementRingExitStraightHoldFrames = 14; // 圆环结束后短暂锁直行，让出环姿态先收稳。
+constexpr int kElementRingMinActiveFrames = 55;   // 入环后最少保持约1.1s，再允许进入结束判定，避免刚拐进环就被出口条件拉直。
+constexpr int kRingEntryCenterBias = 30;          // 圆环进环阶段中线向环心侧额外偏置，帮助车头真正切入环岛；不进环先增大。
+constexpr int kRingInnerCenterBias = 18;          // 圆环内阶段中线向环心侧额外偏置；过小会持续骑外侧，过大容易内切。
+constexpr int kLeftRingRightLineBlockMax = 12;   // 左圆环入口允许的右侧丢线上限；左环入口左侧缺线为主，对侧少量异常不直接拒绝。
+constexpr int kLeftRingOfflineBlockMax = 18;     // 左圆环入口允许的顶端丢线上限。
+constexpr int kLeftRingMinLeftLost = 5;          // 左圆环入口最小左侧丢线数；调小更容易进左环，调大更抗普通左弯误判。
+constexpr int kLeftRingMaxPoint2Y = 42;          // 左圆环第二特征点最高允许位置；调大可放宽左环识别。
+constexpr int kRightRingLeftLineBlockMax = 18;   // 右圆环入口允许的左侧丢线上限；右环入口伴随左侧少量异常时仍允许确认。
+constexpr int kRightRingOfflineBlockMax = 25;    // 右圆环入口允许的顶端丢线上限；U型入口远端缺线较多，过低会漏检。
+constexpr int kRightRingMinRightLost = 6;        // 右圆环入口最小右侧丢线数；调小更容易进右环，调大更抗普通右弯误判。
+constexpr int kRightRingMinPoint2Y = 15;         // 右圆环第二特征点最低位置；调小可提前识别右环，调大更保守。
+constexpr int kRingLossOnlyMinLost = 18;         // 无几何特征时的单侧丢线兜底门槛；提高以过滤十字/U弯单侧丢线。
+constexpr int kRingLossOnlyMaxEntryError = 30;   // 单侧丢线兜底只允许在车身尚未大幅偏离中线时入环，避免十字急弯误触发。
+constexpr float kRingSpeedGoal = 0.53f;           // 环岛内速度上限 m/s (原6RPS×0.0887≈0.53)
+constexpr float kRingForcedSteerError = 18.0f;   // 环岛已锁定后，视觉回到中线/死区时仍保持最小转向量，防止在环内走直。
+constexpr int kRingForcedSteerReleaseFlag = 7;   // 到环内/出环阶段后释放强制转向，避免一直同向绕圈。
+constexpr float kRingExitSteerError = -10.0f;    // 左环进入flag>=7后给反向出环转向；右环自动取相反号。
+constexpr float kRingEntryGyroLimitDps = 64.0f;  // 入环前段目标角速度上限，避免入口一把打死冲出边界。
+constexpr float kRingSceneGyroLimitDps = 62.0f;  // 已锁定环岛场景后的视觉目标角速度上限，防止环内长期贴边。
+constexpr float kRingEntryMaxDiff = 15.0f;       // 入环前段最大差速，压住外轮过快导致的入口甩出。
+constexpr float kRingMaxDiff = 13.0f;            // 环岛内最大差速；绕圈说明同向角速度太强，先压低一点帮助出环。
+constexpr float kUnclassifiedTurnTriggerError = 16.0f; // 未识别成元素时提前进入急弯保护的偏差阈值；降低可减少十字/漏检环岛处猛打。
+constexpr float kUnclassifiedTurnGyroLimitDps = 68.0f; // 未识别成元素但偏差较大时的目标角速度上限；68速陀螺仪GErr=31爆了,回退到56。
+constexpr int kBadVisionOfflineThreshold = 45;    // 顶部大面积丢线时认为远端图像不可靠，常见于十字/出界边缘。
+constexpr int kBadVisionCenterHoldOfflineThreshold = 56; // 近乎全丢线时不沿用旧偏差，先按中线低速通过。
+constexpr float kBadVisionSpeedGoal = 0.36f;       // 图像不可靠时的保护速度 m/s (原4RPS×0.0887≈0.36)
+constexpr float kBadVisionGyroLimitDps = 22.0f;   // 图像不可靠时目标角速度上限，避免十字口/丢线时一脚打死冲出界。
+constexpr int kStraightVarianceAccThreshold = 12; // 静态直道 var≈9.96 已贴近阈值，略放宽到 12，避免直道在边界处反复 Normol/Straight。
 constexpr int kStraightOfflineMax = 8;           // 直道允许的顶边丢线数，调大更容易判直道但可能误判弯道；丢线多时先查二值化再改。
 constexpr int kStraightLeftLineMax = 3;          // 直道允许的左丢边数，调大更宽松；左边界不稳定时先调曝光和 HSV，再微调。
 constexpr int kStraightRightLineMax = 3;         // 直道允许的右丢边数，调大更宽松；右边界不稳定时同样先处理图像质量。
+constexpr int kSingleSideLossThreshold = 32;      // 单侧丢线触发单边中线追踪的阈值；T13弯道峰值49-52远超28，提高到32减少普通弯误触发center-bias。
 }
 
 #endif

@@ -5,26 +5,7 @@
 #include "lq_app_inc.hpp"
 #include "lq_common.hpp"
 
-void lq_gpio_output_demo(void);     // GPIO 输出模式测试
-void lq_gpio_input_demo(void);      // GPIO 输入模式测试
-void lq_pwm_demo(void);             // PWM 输出模式测试
-void lq_gtim_pwm_demo(void);        // GTIM PWM 输出模式测试
-void lq_atim_pwm_demo(void);        // ATIM PWM 输出模式测试
-void lq_encoder_pwm_demo(void);     // 编码器 PWM 输出模式测试
-void lq_canfd_demo(void);           // CANFD 测试
-void lq_ncnn_demo(void);            // NCNN 测试
-void lq_ncnn_photo_demo(void);      // NCNN 图像分类测试
-void lq_ips20_demo(void);           // IPS屏幕测试
 void lq_mpu6050_demo(void);         // MPU6050 测试
-void lq_lsm6dsr_demo(void);         // LSM6DSR 测试
-void lq_vl53l0x_demo(void);         // VL53L0X 测试
-void lq_udp_img_trans_demo(void);   // UDP 图像传输测试
-void lq_udp_wavefrom_demo(void);    // UDP 波形传输测试
-void lq_icm42688_demo(void);        // ICM42688 测试
-void lq_ntp_demo(void);             // NTP 获取网络时间并更新到系统中测试
-void lq_timer_demo(void);           // 定时器回调测试
-void lq_module_load_demo(void);     // 模块加载函数测试
-void lq_ips20_show_img_demo(void);  // IPS20 显示图像测试
 void lq_motor_pid_demo(void);
 void lq_direaction(void);
 void lq_quadrature_encoder_demo(void);
@@ -34,7 +15,10 @@ void lq_car_encoder_test_demo(void);
 void lq_line_patrol_debug_demo(void); // 添加巡线算法调试图传 Demo
 void lq_speed_pid_tuning_demo(void);  // 速度环PID调参Demo
 void lq_vofa_speed_pid_demo(void);    // VOFA+ 速度环PID波形调参Demo
+void lq_vofa_speed_step_demo(void);   // VOFA+ 阶梯式速度变化测试Demo
+void lq_vofa_speed_sine_demo(void);   // VOFA+ 正弦速度跟随测试Demo
 void lq_tft18_demo(void);           // TFT18 屏幕测试
+void lq_camera_tft18_demo(void);    // TFT18 摄像头补线/元素状态显示测试
 void lq_angle_pid_tuning_demo(void); // 角度环PID调参Demo
 void lq_gyro_pid_tuning_demo(void);  // 角速度环PID调参Demo
 void lq_mpu6050_scale_dt_diagnose_demo(void); // MPU6050量程、dt、零偏联合诊断Demo
@@ -42,6 +26,29 @@ void lq_car_steer_debug_demo(void); // 30. 查偏向不出弯原因调试连线
 void lq_pos_pid_tuning_demo(void);  // 31. 联合调参位置环和角速度环
 void lq_gyro_loop_verify_demo(void); // 29. 角速度环输出差速验证Demo
 void lq_camera_capture_demo(void); // 摄像头拍照测试
-void lq_udp_img_trans_ex_demo(void); // 32. UDP 图像传输测试（增强版摄像头）
+void lq_parameter_step_tuning_demo(void); // 33. PARAMETER_TUNING_METHODS.md 一体化分步调参Demo
+void lq_parameter_step_interactive_demo(void); // 33. 交互式分步调试入口（输入编号运行对应测试）
+int lq_left_ring_exit_recommend_demo(void); // 34. 左环岛出环防兜圈专项Demo
+int lq_param_test_00_precheck_config(void);
+int lq_param_test_01_motor_encoder_direction(void);
+int lq_param_test_02_camera_center_angle_static(void);
+int lq_param_test_03_exposure_otsu_quality(void);
+int lq_param_test_03_exposure_hsv_quality(void);
+int lq_param_test_04_roi_scan_straight(void);
+int lq_param_test_05_speed_loop_airborne(void);
+int lq_param_test_06_low_speed_visual_gyro_closed_loop(void);
+int lq_param_test_07_speed_up_regression(void);
+int lq_param_test_08_element_debug(void);
+int lq_param_test_08h_element_push_image_debug(void);
+int lq_param_test_09_voltage_light_regression(void);
+int lq_param_test_10_gyro_static_noise(void);
+int lq_param_test_11_gyro_loop_step_response(void);
+int lq_param_test_12_parameter_debug_plan(void);
+int lq_param_test_13_pose_reference_push(void);
+int lq_param_flow_visual(void);
+int lq_param_flow_airborne(void);
+int lq_param_flow_sensor(void);
+int lq_param_flow_low_speed(void);
+int lq_param_flow_element(void);
 
 #endif

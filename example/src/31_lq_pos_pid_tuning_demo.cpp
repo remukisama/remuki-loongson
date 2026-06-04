@@ -16,7 +16,7 @@ extern std::atomic<bool> exit_flag;
 extern ImageStatustypedef ImageStatus;
 extern bool g_enable_element_process;
 
-extern int Speed_Goal;
+extern float Speed_Goal;
 extern float Speed_Goal_l;
 extern float Speed_Goal_r;
 extern float speed_encoder_L;

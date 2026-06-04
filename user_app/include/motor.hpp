@@ -3,7 +3,8 @@
 
 #include <atomic>
 
-#define MAX_SPEED 100  // 适配512线4倍频调整，从100改为400
+// MAX_SPEED 已废弃，使用 car_config::kMaxWheelSpeedGoal 代替
+// #define MAX_SPEED 100
 
 extern std::atomic<bool> exit_flag;
 void emergency_stop();

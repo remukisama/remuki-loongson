@@ -1,5 +1,9 @@
 #include "main.hpp"
 #include "thread"
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <string>
 // HWGpio beep(61, GPIO_Mode_Out);
 ls_gpio beep(PIN_61, GPIO_MODE_OUT);
 
@@ -11,6 +15,41 @@ double end_time = 0;   // 结束时间
 
 // 定义定时器间隔（5ms）
 const auto timer_interval_1 = std::chrono::milliseconds(5);
+
+static std::string read_autotune_stage()
+{
+    const char *paths[] = {
+        "lq_autotune_stage.txt",
+        "/tmp/lq_autotune_stage.txt",
+    };
+    for (const char *path : paths) {
+        std::ifstream in(path);
+        if (!in.good()) continue;
+        std::string stage;
+        std::getline(in, stage);
+        while (!stage.empty() && (stage.back() == '\r' || stage.back() == '\n' || stage.back() == ' ' || stage.back() == '\t')) {
+            stage.pop_back();
+        }
+        return stage;
+    }
+    return "";
+}
+
+static int run_autotune_stage_if_requested()
+{
+    std::string stage = read_autotune_stage();
+    if (stage.empty()) return -999;
+
+    std::printf("[AUTOTUNE] requested_stage=%s\n", stage.c_str());
+    if (stage == "T10") return lq_param_test_10_gyro_static_noise();
+    if (stage == "T11") return lq_param_test_11_gyro_loop_step_response();
+    if (stage == "T06") return lq_param_test_06_low_speed_visual_gyro_closed_loop();
+    if (stage == "T07") return lq_param_test_07_speed_up_regression();
+    if (stage == "FLOW_LOW_SPEED") return lq_param_flow_low_speed();
+
+    std::printf("[AUTOTUNE] unknown_stage=%s, expected T10/T11/T06/T07/FLOW_LOW_SPEED\n", stage.c_str());
+    return 98;
+}
 
 // 闭环控制定时器（极高优先级）
 void timer_thread_1()
@@ -69,7 +108,22 @@ int main()
     signal(SIGSEGV, signal_handler);  // 捕获段错误(访问了空指针等崩溃)
     signal(SIGPIPE, SIG_IGN);         // 忽略破损管道信号(当图传UDP发送失败时忽略之，不退出程序)
 
+    int autotune_ret = run_autotune_stage_if_requested();
+    if (autotune_ret != -999) {
+        printf("[AUTOTUNE] stage_ret=%d\n", autotune_ret);
+        return autotune_ret;
+    }
+
+    // lq_parameter_step_interactive_demo();
     // return 0;
+
+    lq_vofa_speed_sine_demo();
+    return 0;
+
+    // demo33 T07：提速回归测试，验证提速后是否压线/出界/震荡。
+    // int demo33_ret = lq_param_test_01_motor_encoder_direction();
+    // printf("[MAIN] demo33 speed_up_regression ret=%d\n", demo33_ret);
+    // return demo33_ret;
 
     // InitMH();       //  模糊pid初始化
     motor_Init();     // 电机初始化
@@ -101,8 +155,10 @@ int main()
     // lq_car_steer_debug_demo();
     // 29: 角速度环(中环) 输出差速验证演示程序
     // lq_gyro_loop_verify_demo();
-    // 31: 联合位置环与角速度环调参，重点观测数据输出
-    lq_pos_pid_tuning_demo();
+    // 校赛无元素竞速模式：关闭元素识别/处理，只跑基础循迹闭环。
+    // 若要重新调元素，再改回 lq_camera_tft18_demo() 或 34 号元素专项 Demo。
+    g_enable_element_process = false;
+    printf("[RACE_MODE] no-element race mode: element process disabled, main loop enabled.\n");
     
     // 调用摄像头拍照测试Demo并阻断后面的逻辑
     // lq_camera_capture_demo();
@@ -110,14 +166,8 @@ int main()
     // 调用巡线算法图传调试 Demo 并阻断后面的逻辑
     // lq_line_patrol_debug_demo();
     // lq_udp_img_trans_ex_demo();
-    return 0;
-
-    // 以下代码因为上面的 return 0 已经不会被执行到了。
-    // 如果您需要更彻底，可以把这里到文件末尾的线程(timer_thread_1)等都注释起来。
-    
     // 分离线程，允许后台运行高速闭环控制代码
     std::thread threadA(timer_thread_1);
-    threadA.detach();
 
     while (1)
     {

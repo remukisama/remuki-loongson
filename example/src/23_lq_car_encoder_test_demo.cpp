@@ -21,8 +21,8 @@ void lq_car_encoder_test_demo(void)
     printf("-> [1/3] 电机外设初始化完成。\n");
 
     // 2. 为了安全，先清零一遍计数器
-    int trash_l = encoder_num_L();
-    int trash_r = encoder_num_R();
+    float trash_l = encoder_num_L();
+    float trash_r = encoder_num_R();
     (void)trash_l; 
     (void)trash_r;
     printf("-> [2/3] 编码器历史数据已清零。\n");
@@ -41,10 +41,10 @@ void lq_car_encoder_test_demo(void)
     while (!exit_flag)
     {
         // 每 100 毫秒读取一次编码器并清零（模拟闭环中的采集频率）
-        int enc_l = encoder_num_L();
-        int enc_r = encoder_num_R();
+        float enc_l = encoder_num_L();
+        float enc_r = encoder_num_R();
 
-        printf("循环第 [%4d] 次 | 电机占空比: %d | 左轮读数: %6d | 右轮读数: %6d\n", ++count, test_duty, enc_l, enc_r);
+        printf("循环第 [%4d] 次 | 电机占空比: %d | 左轮读数: %7.2f | 右轮读数: %7.2f\n", ++count, test_duty, enc_l, enc_r);
 
         // 如果想测试手动拨动轮子，也可以把上面的 motor_Duty 注释掉，或者改为 0。
         // 比如如果转得太快，可以在循环第 30 次后停止电机，只看空转时的编码器数据：

@@ -260,15 +260,15 @@ typedef struct
 
 typedef struct
 {
-  float nowspeed;     // pulse表示nowspeed
-  int expectspeed;    // speed表示expectspeed
-  int motor_duty;     //电机占空比
-  float Length;       //走过路程
+  float nowspeed;           // 当前速度 m/s
+  float expectspeed;        // 期望速度 m/s
+  int motor_duty;           // 电机占空比
+  float Length;             // 走过路程
   int Circle_OUT_th;
-  int MinSpeed;             //最低速度
-  int MaxSpeed;             //最高速度
-  float expect_True_speed;  //实际期望速度
-  int straight_speed;       //直道速度
+  float MinSpeed;           // 最低速度 m/s
+  float MaxSpeed;           // 最高速度 m/s
+  float expect_True_speed;  // 实际期望速度 m/s
+  float straight_speed;     // 直道速度 m/s
 } SpeedDatatypedef;
 
 typedef struct
@@ -355,7 +355,7 @@ typedef struct
 
 
   int rounds; // 圈数
-  int speed_per_round; // 每圈减速多少
+  float speed_per_round; // 每圈减速多少 (m/s)
 
   SpeedDatatypedef SpeedData;
 } SystemDatatypdef, SystemDatatypedef;
