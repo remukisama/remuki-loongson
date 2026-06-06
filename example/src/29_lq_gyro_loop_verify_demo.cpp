@@ -145,14 +145,21 @@ void lq_gyro_loop_verify_demo(void)
             motor_R.atim_pwm_set_duty((int)(-pwm_cmd_r));
         }
 
-        // 打印
+        // 打印 (每10个循环 ≈ 100ms 一次)
         loop_count++;
         if (loop_count >= 10) {
             float gf = cascade_ctrl.last_filtered_gyro_z();
+            // PID 各分量分解（便于远程调试角速度环参数）
+            float pid_p = cascade_ctrl.gyro_pid.P * cascade_ctrl.gyro_pid.err;
+            float pid_i = cascade_ctrl.gyro_pid.I * cascade_ctrl.gyro_pid.integral;
+            float ff    = cmd * car_config::kGyroFeedforwardGain;
+            float pid_d = cascade_ctrl.gyro_pid.output - (pid_p + pid_i + ff);
             printf("[GYRO] t=%.2f target=%.1f cmd=%.1f real=%.1f gf=%.1f err=%.1f "
-                   "diff0=%.1f diff=%.1f cap=%d max=%.1f pwm=%.0f/%.0f\n",
+                   "| P=%.1f I=%.1f D=%.1f FF=%.1f out=%.1f "
+                   "| diff0=%.1f diff=%.1f cap=%d max=%.1f pwm=%.0f/%.0f\n",
                    elapsed_ms / 1000.0f, target_gyro_z, cmd,
                    imu_data.gyro_z, gf, (cmd - gf),
+                   pid_p, pid_i, pid_d, ff, cascade_ctrl.gyro_pid.output,
                    diff_before, diff_speed, cap, max_diff,
                    pwm_cmd_l, pwm_cmd_r);
             loop_count = 0;

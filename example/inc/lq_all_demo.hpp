@@ -13,6 +13,7 @@ void lq_quadrature_encoder_kernel_demo(void);
 void lq_user_encoder_demo(void);
 void lq_car_encoder_test_demo(void);
 void lq_line_patrol_debug_demo(void); // 添加巡线算法调试图传 Demo
+void lq_udp_center_line_send_one_frame(lq_udp_client &client, int quality); // 非阻塞版：发送一帧中线叠加图（供主循环调用）
 void lq_speed_pid_tuning_demo(void);  // 速度环PID调参Demo
 void lq_vofa_speed_pid_demo(void);    // VOFA+ 速度环PID波形调参Demo
 void lq_vofa_speed_step_demo(void);   // VOFA+ 阶梯式速度变化测试Demo
@@ -35,7 +36,7 @@ int lq_param_test_02_camera_center_angle_static(void);
 int lq_param_test_03_exposure_otsu_quality(void);
 int lq_param_test_03_exposure_hsv_quality(void);
 int lq_param_test_04_roi_scan_straight(void);
-int lq_param_test_05_speed_loop_airborne(void);
+int lq_param_test_05_speed_loop_airborne(void);          // T05 实地直线速度环测试（保留旧函数名）
 int lq_param_test_06_low_speed_visual_gyro_closed_loop(void);
 int lq_param_test_07_speed_up_regression(void);
 int lq_param_test_08_element_debug(void);
@@ -45,6 +46,7 @@ int lq_param_test_10_gyro_static_noise(void);
 int lq_param_test_11_gyro_loop_step_response(void);
 int lq_param_test_12_parameter_debug_plan(void);
 int lq_param_test_13_pose_reference_push(void);
+int lq_param_test_14_push_line_patrol_tft(void);  // T14 手推补线TFT观察 (FPS+补线)
 int lq_param_flow_visual(void);
 int lq_param_flow_airborne(void);
 int lq_param_flow_sensor(void);

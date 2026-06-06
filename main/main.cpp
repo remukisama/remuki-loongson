@@ -115,10 +115,11 @@ int main()
     }
 
     // lq_parameter_step_interactive_demo();
+    // // lq_vofa_speed_sine_demo();
     // return 0;
 
-    lq_vofa_speed_sine_demo();
-    return 0;
+    // lq_gyro_loop_verify_demo();
+    // return 0;
 
     // demo33 T07：提速回归测试，验证提速后是否压线/出界/震荡。
     // int demo33_ret = lq_param_test_01_motor_encoder_direction();
@@ -157,7 +158,7 @@ int main()
     // lq_gyro_loop_verify_demo();
     // 校赛无元素竞速模式：关闭元素识别/处理，只跑基础循迹闭环。
     // 若要重新调元素，再改回 lq_camera_tft18_demo() 或 34 号元素专项 Demo。
-    g_enable_element_process = false;
+    g_enable_element_process = true;
     printf("[RACE_MODE] no-element race mode: element process disabled, main loop enabled.\n");
     
     // 调用摄像头拍照测试Demo并阻断后面的逻辑
@@ -166,8 +167,16 @@ int main()
     // 调用巡线算法图传调试 Demo 并阻断后面的逻辑
     // lq_line_patrol_debug_demo();
     // lq_udp_img_trans_ex_demo();
+
+    // UDP 图传初始化（192.168.90.22:8080）
+    lq_udp_client udp_debug;
+    udp_debug.udp_client_init("192.168.90.22", 8080);
+    printf("[UDP_DEBUG] center-line overlay to 192.168.90.22:8080, every 5 frames\n");
+
     // 分离线程，允许后台运行高速闭环控制代码
     std::thread threadA(timer_thread_1);
+
+    int udp_frame_count = 0;
 
     while (1)
     {
@@ -198,6 +207,12 @@ int main()
 
         // 图像处理
         imageprocess();
+
+        // UDP 图传：每5帧发送一次（调用 demo24 中的函数）
+        if ((udp_frame_count % 5) == 0) {
+            lq_udp_center_line_send_one_frame(udp_debug, 50);
+        }
+        udp_frame_count++;
         // image_show();
         
 

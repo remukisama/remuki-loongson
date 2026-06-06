@@ -82,21 +82,50 @@ bool image_cv_zip(void)
         car_config::kCameraRoiWidth,
         car_config::kCameraRoiHeight));
 
-    cv::Mat hsv, blue_mask, binary;
-    // 使用裁剪后的小图(roi_frame)进行 HSV 转换
-    cv::cvtColor(roi_frame, hsv, cv::COLOR_BGR2HSV);
+    cv::Mat binary;
 
-    // 1. 提取蓝色背景
-    cv::inRange(hsv,
-        cv::Scalar(car_config::kBlueHueLower, car_config::kBlueSaturationLower, car_config::kBlueValueLower),
-        cv::Scalar(car_config::kBlueHueUpper, car_config::kBlueSaturationUpper, car_config::kBlueValueUpper),
-        blue_mask);
+    // 按 car_config::kImageAlgorithm 选择真实二值化链路：
+    // 0 = HSV蓝色背景提取后反相；1 = 灰度静态阈值；2 = 灰度+OTSU自适应阈值。
+    if (car_config::kImageAlgorithm == 0)
+    {
+        cv::Mat hsv, blue_mask;
+        cv::cvtColor(roi_frame, hsv, cv::COLOR_BGR2HSV);
+        cv::inRange(hsv,
+            cv::Scalar(car_config::kBlueHueLower, car_config::kBlueSaturationLower, car_config::kBlueValueLower),
+            cv::Scalar(car_config::kBlueHueUpper, car_config::kBlueSaturationUpper, car_config::kBlueValueUpper),
+            blue_mask);
+        // 蓝色赛道背景为0，非蓝色线/标记为1。
+        cv::bitwise_not(blue_mask, binary);
+    }
+    else
+    {
+        cv::Mat gray;
+        cv::cvtColor(roi_frame, gray, cv::COLOR_BGR2GRAY);
 
-    // 2. 反相 (蓝色变黑，非蓝色变白)
-    cv::bitwise_not(blue_mask, binary);
+        if (car_config::kImageAlgorithm == 2)
+        {
+            const int blur_kernel = (car_config::kImageOtsuBlurKernel % 2 == 1 && car_config::kImageOtsuBlurKernel > 1)
+                ? car_config::kImageOtsuBlurKernel
+                : 3;
+            cv::GaussianBlur(gray, gray, cv::Size(blur_kernel, blur_kernel), 0);
+            cv::threshold(gray, binary, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
+        }
+        else
+        {
+            cv::threshold(gray, binary, car_config::kImageThresholdStatic, 255, cv::THRESH_BINARY);
+        }
+    }
 
-    // 3. 降噪 (滤除躁点，提高寻线稳定性)
-    cv::GaussianBlur(binary, binary, cv::Size(3, 3), 0);
+    // 统一形态学后处理：先开运算去孤点，再闭运算补小孔；kernel<=1时跳过。
+    if (car_config::kImageMorphKernel > 1)
+    {
+        const int morph_kernel = (car_config::kImageMorphKernel % 2 == 1)
+            ? car_config::kImageMorphKernel
+            : (car_config::kImageMorphKernel + 1);
+        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(morph_kernel, morph_kernel));
+        cv::morphologyEx(binary, binary, cv::MORPH_OPEN, kernel);
+        cv::morphologyEx(binary, binary, cv::MORPH_CLOSE, kernel);
+    }
 
     // ================= 核心优化点 3：指针快速遍历 =================
     // 由于 roi_frame 已经是 160x60，所以行数从 0~59

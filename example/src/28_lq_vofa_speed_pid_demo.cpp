@@ -28,6 +28,20 @@
 #define WHEEL_CIRCUMFERENCE_M  ( (float)M_PI * WHEEL_DIAMETER_M )                        // ≈ 0.20106 m
 #define ENC_TO_MS(rps)         ( (float)(rps) * GEAR_RATIO * WHEEL_CIRCUMFERENCE_M )     // ≈ rps × 0.08870
 
+static constexpr float kTunedSpeedKp = 1800.0f;
+static constexpr float kTunedSpeedKi = 35.0f;
+static constexpr float kTargetAccelLimit = 1.8f;  // m/s^2, 0 -> 0.9m/s 约 0.5s
+static constexpr float kTargetDecelLimit = 2.0f;  // m/s^2, 略强一点便于下降段收速
+
+static inline float slew_limit(float current, float desired, float accel_limit, float decel_limit, float dt_sec)
+{
+    float delta = desired - current;
+    float limit = (delta >= 0.0f ? accel_limit : decel_limit) * dt_sec;
+    if (delta > limit) return current + limit;
+    if (delta < -limit) return current - limit;
+    return desired;
+}
+
 // 用于安全退出
 static std::atomic<bool> exit_vofa_demo(false);
 
@@ -89,13 +103,13 @@ void lq_vofa_speed_pid_demo(void)
 
     // --- PID 调参变量区 (单位: m/s) ---
     // 【请在这里修改您的 PID 参数】
-    float Kp_L = 643.0f;          // 比例系数  (原 RPS 版 57 / 换算因子≈0.0887 → 643)
-    float Ki_L = 299.0f;          // 积分系数  (原 RPS 版 26.5 / 换算因子≈0.0887 → 299)
+    float Kp_L = kTunedSpeedKp;
+    float Ki_L = kTunedSpeedKi;
     float Kd_L = 0.0f;
     float target_speed_L = 1.0f;  // 左轮目标线速度 (m/s)
 
-    float Kp_R = 643.0f;
-    float Ki_R = 299.0f;
+    float Kp_R = kTunedSpeedKp;
+    float Ki_R = kTunedSpeedKi;
     float Kd_R = 0.0f;
     float target_speed_R = 1.0f;  // 右轮目标线速度 (m/s)
 
@@ -266,12 +280,12 @@ void lq_vofa_speed_step_demo(void)
     ls_encoder_pwm encoder_R(ENC_PWM0_PIN64, PIN_72);
 
     // --- PID 调参变量区 (单位: m/s) ---
-    float Kp_L = 643.0f;
-    float Ki_L = 299.0f;
+    float Kp_L = kTunedSpeedKp;
+    float Ki_L = kTunedSpeedKi;
     float Kd_L = 0.0f;
 
-    float Kp_R = 643.0f;
-    float Ki_R = 299.0f;
+    float Kp_R = kTunedSpeedKp;
+    float Ki_R = kTunedSpeedKi;
     float Kd_R = 0.0f;
 
     int MAX_PWM = 7000;
@@ -471,13 +485,13 @@ void lq_vofa_speed_step_demo(void)
 }
 
 // ==========================================
-// 3. 交互式正弦速度跟随测试 (m/s)
-//    终端输入基准速度/最高速度/周期/时长/[Kp]/[Ki]，
-//    目标按正弦波形连续变化，等待期间目标速度为 0。
-//    公式: target = base + (max - base) * sin(2π * t / period)
-//    格式: <基准速度(m/s)> <最高速度(m/s)> <周期(s)> <运行时长(ms)> [Kp] [Ki]
-//    示例: 1.0 2.0 3.0 10000        (1~2 m/s 正弦, 周期 3s, 跑 10s)
-//    示例: 0.5 1.5 2.0 8000 700 320 (同时更新 PI)
+// 3. 交互式实地速度波形测试 (m/s)
+//    终端输入最低速度/最高速度/周期/时长/[Kp]/[Ki]，
+//    目标按半余弦曲线在[min,max]之间平滑往返，等待期间目标速度为 0。
+//    公式: target = min + (max - min) * 0.5 * (1 - cos(2π * t / period))
+//    格式: <最低速度(m/s)> <最高速度(m/s)> <周期(s)> <运行时长(ms)> [Kp] [Ki]
+//    示例: 0.9 1.3 2.0 4000          (0.9~1.3 m/s, 周期 2s, 跑 4s)
+//    示例: 0.9 1.3 2.0 4000 1800 35  (同时更新 PI)
 // ==========================================
 void lq_vofa_speed_sine_demo(void)
 {
@@ -485,16 +499,17 @@ void lq_vofa_speed_sine_demo(void)
     signal(SIGINT, signal_handler_vofa_tuning);
     signal(SIGTERM, signal_handler_vofa_tuning);
 
-    std::cout << "========== 交互式正弦速度跟随测试程序启动 ==========" << std::endl;
+    std::cout << "========== VOFA 实地速度波形测试程序启动 ==========" << std::endl;
     std::cout << ">>> UDP 目标 IP  : " << SERVER_IP << std::endl;
     std::cout << ">>> UDP 目标 Port: " << SERVER_PORT << std::endl;
     std::cout << ">>> 轮胎周长: " << WHEEL_CIRCUMFERENCE_M << " m  (直径 " << WHEEL_DIAMETER_M << " m)" << std::endl;
     std::cout << ">>> 速度单位: m/s" << std::endl;
     std::cout << "------------------------------------------------------------" << std::endl;
-    std::cout << ">>> 公式: target = base + (max - base) * sin(2π * t / period)" << std::endl;
-    std::cout << ">>> 格式: <基准速度> <最高速度> <周期(s)> <运行时长(ms)> [Kp] [Ki]" << std::endl;
-    std::cout << ">>> 示例: 1.0 2.0 3.0 10000         (1~2 m/s 正弦, 3s 周期, 跑 10s)" << std::endl;
-    std::cout << ">>> 示例: 0.5 1.5 2.0 8000 700 320  (同时更新 PI)" << std::endl;
+    std::cout << ">>> 默认 PI: Kp=" << kTunedSpeedKp << " Ki=" << kTunedSpeedKi << std::endl;
+    std::cout << ">>> 公式: target = min + (max - min) * 0.5 * (1 - cos(2π * t / period))" << std::endl;
+    std::cout << ">>> 格式: <最低速度> <最高速度> <周期(s)> <运行时长(ms)> [Kp] [Ki]" << std::endl;
+    std::cout << ">>> 示例: 0.9 1.3 2.0 4000          (0.9~1.3 m/s, 2s 周期, 跑 4s)" << std::endl;
+    std::cout << ">>> 示例: 0.9 1.3 2.0 4000 1800 35  (同时更新 PI)" << std::endl;
     std::cout << ">>> 输入 q 或 quit 退出" << std::endl;
     std::cout << "------------------------------------------------------------" << std::endl;
     std::cout << "按 Ctrl+C 安全退出并停止电机。" << std::endl;
@@ -530,23 +545,26 @@ void lq_vofa_speed_sine_demo(void)
     ls_encoder_pwm encoder_R(ENC_PWM0_PIN64, PIN_72);
 
     // --- PID 调参变量区 (单位: m/s) ---
-    float Kp_L = 643.0f;
-    float Ki_L = 299.0f;
+    float Kp_L = kTunedSpeedKp;
+    float Ki_L = kTunedSpeedKi;
     float Kd_L = 0.0f;
 
-    float Kp_R = 643.0f;
-    float Ki_R = 299.0f;
+    float Kp_R = kTunedSpeedKp;
+    float Ki_R = kTunedSpeedKi;
     float Kd_R = 0.0f;
 
-    int MAX_PWM = 7000;
+    int MAX_PWM = 8000;
     const float DT_SEC = 0.02f;   // 控制周期 20ms
 
     // --- 任务状态 ---
     float target_speed_L   = 0.0f;
     float target_speed_R   = 0.0f;
-    float sine_base        = 1.0f;    // 基准速度 (m/s)
-    float sine_amplitude   = 1.0f;    // 振幅 = max - base (m/s)
-    float sine_period_s    = 3.0f;    // 正弦周期 (s)
+    float desired_speed_L  = 0.0f;
+    float desired_speed_R  = 0.0f;
+    float sine_base        = 0.9f;    // 最低速度 (m/s)
+    float sine_amplitude   = 0.4f;    // 速度范围 = max - min (m/s)
+    float sine_period_s    = 2.0f;    // 速度曲线周期 (s)
+    int   task_total_ms     = 0;      // 本次任务总时长 (ms)，用于终端日志时间轴
     int   task_remaining_ms = 0;      // 剩余运行时间 (ms)，0 表示无任务
     uint64_t sine_tick = 0;           // 正弦相位计数器
 
@@ -563,7 +581,7 @@ void lq_vofa_speed_sine_demo(void)
     auto show_prompt = [&]() {
         if (!prompt_shown) {
             std::cout << ">>> [等待输入] 当前 Kp=" << Kp_L << " Ki=" << Ki_L
-                      << " | 输入 基准 最高 周期(s) 时长(ms) [Kp] [Ki]: " << std::flush;
+                      << " | 输入 最低 最高 周期(s) 时长(ms) [Kp] [Ki]: " << std::flush;
             prompt_shown = true;
         }
     };
@@ -598,7 +616,7 @@ void lq_vofa_speed_sine_demo(void)
                             continue;
                         }
 
-                        // 解析: base max period_ms duration [Kp] [Ki]
+                        // 解析: min max period_s duration [Kp] [Ki]
                         std::istringstream iss(input_buf);
                         float in_base     = 0.0f;
                         float in_max      = 0.0f;
@@ -609,13 +627,14 @@ void lq_vofa_speed_sine_demo(void)
 
                         if (iss >> in_base >> in_max >> in_period >> in_duration)
                         {
-                            if (in_base < 0.0f) in_base = 0.0f;
+                            if (in_base < 0.2f) in_base = 0.2f;
                             if (in_max  < in_base) in_max = in_base;
-                            if (in_period <= 0.1f) in_period = 0.1f;
+                            if (in_period < 1.0f) in_period = 1.0f;
 
                             sine_base      = in_base;
                             sine_amplitude = in_max - in_base;
                             sine_period_s  = in_period;
+                            task_total_ms = in_duration;
                             task_remaining_ms = in_duration;
                             sine_tick = 0;
 
@@ -635,12 +654,18 @@ void lq_vofa_speed_sine_demo(void)
                             speed_out_R  = 0.0f;
                             last_error_L = 0.0f;
                             last_error_R = 0.0f;
+                            target_speed_L = 0.0f;
+                            target_speed_R = 0.0f;
+                            desired_speed_L = 0.0f;
+                            desired_speed_R = 0.0f;
 
-                            std::cout << ">>> [执行] 基准=" << sine_base << " m/s"
+                            std::cout << ">>> [执行] 最低=" << sine_base << " m/s"
                                       << ", 最高=" << in_max << " m/s"
                                       << ", 周期=" << sine_period_s << " s"
                                       << ", 时长=" << task_remaining_ms << " ms"
                                       << ", Kp=" << Kp_L << ", Ki=" << Ki_L << std::endl;
+                            std::printf("[T28_HEADER] period_ms=20 fields=t_ms,rem_ms,target,desired,encL,encR,errL,errR,pwmL,pwmR,kp,ki,rawL,rawR,ramp\n");
+                            std::fflush(stdout);
                             prompt_shown = false;
                         }
                         else
@@ -667,8 +692,11 @@ void lq_vofa_speed_sine_demo(void)
             if (task_remaining_ms <= 0)
             {
                 task_remaining_ms = 0;
+                task_total_ms = 0;
                 target_speed_L = 0.0f;
                 target_speed_R = 0.0f;
+                desired_speed_L = 0.0f;
+                desired_speed_R = 0.0f;
                 speed_out_L  = 0.0f;
                 speed_out_R  = 0.0f;
                 last_error_L = 0.0f;
@@ -680,23 +708,28 @@ void lq_vofa_speed_sine_demo(void)
         }
 
         // ==============================================
-        // 计算正弦目标速度 (m/s)
+        // 计算实地速度目标 (m/s): 在最低/最高速度之间平滑往返。
         // ==============================================
         if (task_remaining_ms > 0)
         {
             float t = (float)sine_tick * DT_SEC;
-            float sine_val = sinf(2.0f * (float)M_PI * t / sine_period_s);
-            target_speed_L = sine_base + sine_amplitude * sine_val;
-            target_speed_R = target_speed_L;
-            if (target_speed_L < 0.0f) target_speed_L = 0.0f;
-            if (target_speed_R < 0.0f) target_speed_R = 0.0f;
+            float phase = 2.0f * (float)M_PI * t / sine_period_s;
+            float profile = 0.5f * (1.0f - cosf(phase));
+            desired_speed_L = sine_base + sine_amplitude * profile;
+            desired_speed_R = desired_speed_L;
+            target_speed_L = slew_limit(target_speed_L, desired_speed_L,
+                                        kTargetAccelLimit, kTargetDecelLimit, DT_SEC);
+            target_speed_R = slew_limit(target_speed_R, desired_speed_R,
+                                        kTargetAccelLimit, kTargetDecelLimit, DT_SEC);
         }
 
         // ==============================================
         // 1. 获取当前速度 (RPS → m/s)
         // ==============================================
-        float current_speed_L = ENC_TO_MS(-encoder_L.encoder_get_count());
-        float current_speed_R = ENC_TO_MS( encoder_R.encoder_get_count());
+        float raw_speed_L = ENC_TO_MS(-encoder_L.encoder_get_count());
+        float raw_speed_R = ENC_TO_MS( encoder_R.encoder_get_count());
+        float current_speed_L = raw_speed_L;
+        float current_speed_R = raw_speed_R;
 
         // ==============================================
         // 2. 计算误差
@@ -751,6 +784,18 @@ void lq_vofa_speed_sine_demo(void)
                            target_speed_R, current_speed_R);
         if (len > 0) {
             client.udp_send(send_buf, len);
+        }
+
+        if (task_remaining_ms > 0) {
+            int elapsed_ms = task_total_ms - task_remaining_ms;
+            std::printf("[T28_LOG] t_ms=%d rem_ms=%d target=%.3f desired=%.3f encL=%.3f encR=%.3f errL=%.3f errR=%.3f pwmL=%.1f pwmR=%.1f kp=%.1f ki=%.1f rawL=%.3f rawR=%.3f ramp=1\n",
+                        elapsed_ms, task_remaining_ms, target_speed_L, desired_speed_L,
+                        current_speed_L, current_speed_R,
+                        error_L, error_R,
+                        speed_out_L, speed_out_R,
+                        Kp_L, Ki_L,
+                        raw_speed_L, raw_speed_R);
+            std::fflush(stdout);
         }
 
         usleep(20000);

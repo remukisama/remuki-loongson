@@ -1,0 +1,1 @@
+[T06_SUMMARY] samples=101 raw_abs=5.20 filt_abs=4.80 PD_abs=31.50 Tgt_abs=30.20 Real_abs=26.10 GF_abs=25.40 GErr_abs=7.10 Diff_abs=10.20 SE_abs=2.10/2.40 cap_rate=0.03 pd_sat_rate=0.00 imu_bad=0.00 img_bad=0.00 img_warn=0.12 dtmax_mean=0.023 DB_cnt=4

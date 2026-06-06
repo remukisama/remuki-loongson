@@ -170,3 +170,24 @@ void lq_line_patrol_debug_demo(void)
     }
 }
 
+// ==========================================
+// 非阻塞版：发送一帧中线叠加图（供主循环调用）
+// ==========================================
+void lq_udp_center_line_send_one_frame(lq_udp_client &client, int quality)
+{
+    cv::Mat frame(60, 80, CV_8UC3);
+    for (int y = 0; y < 60; ++y) {
+        for (int x = 0; x < 80; ++x) {
+            frame.at<cv::Vec3b>(y, x) = img1[y][x] ? cv::Vec3b(235, 235, 235)
+                                                   : cv::Vec3b(0, 0, 0);
+        }
+        int cx = ImageDeal[y].Center;
+        if (cx >= 0 && cx < 80) frame.at<cv::Vec3b>(y, cx) = cv::Vec3b(255, 0, 0);
+        int lx = ImageDeal[y].LeftBorder;
+        int rx = ImageDeal[y].RightBorder;
+        if (lx >= 0 && lx < 80) frame.at<cv::Vec3b>(y, lx) = cv::Vec3b(0, 0, 255);
+        if (rx >= 0 && rx < 80) frame.at<cv::Vec3b>(y, rx) = cv::Vec3b(0, 255, 0);
+    }
+    client.udp_send_image(frame, quality);
+}
+

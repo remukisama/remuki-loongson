@@ -35,8 +35,25 @@ extern ImageStatustypedef ImageStatus;
 extern ImageDealDatatypedef ImageDeal[60];
 extern ImageFlagtypedef ImageFlag;
 extern bool g_enable_element_process;
-extern ElementScene_e g_element_scene;
-extern uint8 g_element_cooldown_frames;
+
+enum ElementScene_e {
+    ElementScene_Normal = 0,
+    ElementScene_LeftRing,
+    ElementScene_RightRing,
+    ElementScene_Zebra,
+    ElementScene_Garage,
+};
+
+static inline ElementScene_e current_element_scene_from_flags() {
+    if (ImageFlag.image_element_rings == 1) return ElementScene_LeftRing;
+    if (ImageFlag.image_element_rings == 2) return ElementScene_RightRing;
+    if (ImageFlag.Zebra_Flag != 0) return ElementScene_Zebra;
+    return ElementScene_Normal;
+}
+
+#define g_element_scene current_element_scene_from_flags()
+#define g_element_cooldown_frames 0
+
 extern int img1[60][80];
 extern int imgdisplay[60][80];
 extern int Left_RingsFlag_Point1_Ysite;
@@ -51,6 +68,7 @@ extern float speed_encoder_L;
 extern float speed_encoder_R;
 extern float speed_out_l;
 extern float speed_out_r;
+extern float speed_P_l, speed_P_r, speed_I_l, speed_I_r;  // T05实地速度测试可热改
 extern float speed_last_erro_L;
 extern float speed_last_erro_R;
 extern int DEAD_BAND;
@@ -74,11 +92,11 @@ extern float dbg_speed_err_r;
 extern int dbg_diff_limited;
 extern int dbg_imu_ok;
 extern int dbg_deadband_active;
-extern int dbg_el_detect_open;
-extern int dbg_el_l_block, dbg_el_l_geom, dbg_el_l_loss, dbg_el_l_susp;
-extern int dbg_el_l_confirm, dbg_el_l_p1, dbg_el_l_p2, dbg_el_l_help;
-extern int dbg_el_r_block, dbg_el_r_geom, dbg_el_r_loss, dbg_el_r_susp;
-extern int dbg_el_r_confirm, dbg_el_r_p1, dbg_el_r_p2, dbg_el_r_help;
+int dbg_el_detect_open = 0;
+int dbg_el_l_block = 0, dbg_el_l_geom = 0, dbg_el_l_loss = 0, dbg_el_l_susp = 0;
+int dbg_el_l_confirm = 0, dbg_el_l_p1 = 0, dbg_el_l_p2 = 0, dbg_el_l_help = 0;
+int dbg_el_r_block = 0, dbg_el_r_geom = 0, dbg_el_r_loss = 0, dbg_el_r_susp = 0;
+int dbg_el_r_confirm = 0, dbg_el_r_p1 = 0, dbg_el_r_p2 = 0, dbg_el_r_help = 0;
 int dbg_frame_count = 0;
 int dbg_spike_count = 0;
 float dbg_dt_max = 0.0f;
@@ -89,9 +107,7 @@ float dbg_raw_gyro_z = 0.0f;
 extern void timer_thread_1();
 extern void emergency_stop();
 extern bool image_cv_Init(void);
-extern bool image_cv_IsReady(void);
 extern bool image_cv_zip(void);
-extern void image_cv_Deinit(void);
 extern void Data_Settings(void);
 extern void imageprocess(void);
 extern void motor_Init(void);
@@ -103,6 +119,13 @@ extern float encoder_num_L(void);
 extern float encoder_num_R(void);
 extern void motor_Duty_L(int duty);
 extern void motor_Duty_R(int duty);
+
+bool image_cv_IsReady(void) {
+    return false;
+}
+
+void image_cv_Deinit(void) {
+}
 
 namespace param_step_demo {
 
@@ -1009,6 +1032,75 @@ static cv::Mat make_element_tft_frame(int samples,
     return display;
 }
 
+// -----------------------------------------------------------------------------
+// 手推车 TFT 补线观察帧生成器 — 显示二值图 + 边线 + 中线 + 实时FPS
+// -----------------------------------------------------------------------------
+static cv::Mat make_push_tft_frame(float fps, int frame_count) {
+    cv::Mat base(60, 80, CV_8UC3);
+    for (int y = 0; y < 60; ++y) {
+        for (int x = 0; x < 80; ++x) {
+            base.at<cv::Vec3b>(y, x) = img1[y][x] ? cv::Vec3b(235, 235, 235)
+                                                  : cv::Vec3b(0, 0, 0);
+        }
+
+        int raw_l = ImageDeal[y].LeftBoundary_First;
+        int raw_r = ImageDeal[y].RightBoundary_First;
+        if (raw_l >= 0 && raw_l < 80) base.at<cv::Vec3b>(y, raw_l) = cv::Vec3b(0, 210, 210);
+        if (raw_r >= 0 && raw_r < 80) base.at<cv::Vec3b>(y, raw_r) = cv::Vec3b(210, 210, 0);
+
+        int left = ImageDeal[y].LeftBorder;
+        int right = ImageDeal[y].RightBorder;
+        int center = ImageDeal[y].Center;
+        if (left >= 0 && left < 80) {
+            base.at<cv::Vec3b>(y, left) =
+                (ImageDeal[y].IsLeftFind == 'W') ? cv::Vec3b(255, 0, 255) : cv::Vec3b(0, 0, 255);
+        }
+        if (right >= 0 && right < 80) {
+            base.at<cv::Vec3b>(y, right) =
+                (ImageDeal[y].IsRightFind == 'W') ? cv::Vec3b(255, 0, 255) : cv::Vec3b(0, 255, 0);
+        }
+        if (center >= 0 && center < 80) base.at<cv::Vec3b>(y, center) = cv::Vec3b(255, 0, 0);
+    }
+
+    cv::Mat display;
+    cv::resize(base, display, cv::Size(160, 120), 0, 0, cv::INTER_NEAREST);
+
+    auto draw_hline2 = [&](int y60, const cv::Scalar &color) {
+        if (y60 < 0 || y60 >= 60) return;
+        int y = y60 * 2 + 1;
+        cv::line(display, cv::Point(0, y), cv::Point(display.cols - 1, y), color, 1);
+    };
+    auto draw_point2 = [&](int x80, int y60, const cv::Scalar &color) {
+        if (x80 < 0 || x80 >= 80 || y60 < 0 || y60 >= 60) return;
+        cv::circle(display, cv::Point(x80 * 2 + 1, y60 * 2 + 1), 2, color, -1);
+    };
+
+    draw_hline2(ImageStatus.TowPoint, cv::Scalar(255, 255, 0));
+    draw_hline2(ImageStatus.OFFLine, cv::Scalar(0, 165, 255));
+    draw_point2(ImageStatus.Det_True, ImageStatus.TowPoint, cv::Scalar(0, 255, 255));
+    draw_point2(ImageStatus.MiddleLine, 55, cv::Scalar(255, 255, 255));
+
+    // Top info bar with FPS
+    cv::rectangle(display, cv::Point(0, 0), cv::Point(159, 35), cv::Scalar(0, 0, 0), -1);
+    char text[96];
+    snprintf(text, sizeof(text), "PUSH FPS:%.1f #%d", fps, frame_count);
+    cv::putText(display, text, cv::Point(2, 9), cv::FONT_HERSHEY_SIMPLEX, 0.30,
+                cv::Scalar(0, 255, 255), 1);
+    snprintf(text, sizeof(text), "Road:%s Det:%d Err:%d OFF:%d",
+             road_type_name(ImageStatus.Road_type),
+             ImageStatus.Det_True,
+             ImageStatus.MiddleLine - ImageStatus.Det_True,
+             ImageStatus.OFFLine);
+    cv::putText(display, text, cv::Point(2, 20), cv::FONT_HERSHEY_SIMPLEX, 0.28,
+                cv::Scalar(0, 255, 0), 1);
+    snprintf(text, sizeof(text), "L/R:%d/%d Tow:%d rawL=cyn rawR=yel L=red R=grn C=blu",
+             ImageStatus.Left_Line, ImageStatus.Right_Line, ImageStatus.TowPoint);
+    cv::putText(display, text, cv::Point(2, 31), cv::FONT_HERSHEY_SIMPLEX, 0.25,
+                cv::Scalar(255, 255, 255), 1);
+
+    return display;
+}
+
 static bool init_element_tft_once(const char *tag) {
     if (!kElementDebugTftEnable) return false;
     static bool inited = false;
@@ -1432,83 +1524,245 @@ int test_04_roi_scan_straight(int frames = 180) {
 }
 
 // -----------------------------------------------------------------------------
-// Step 7: 速度环闭环架空测试。不会跑视觉，左右轮同目标阶跃。
-// 返回值：0=跟随尚可；1=响应慢；2=振荡/过冲；3=左右不一致。
+// Step 5: 实地直线速度环测试
+//   终端实时调节：最低速度 最高速度 周期(s) 运行时长(ms) [Kp] [Ki]
+//   T05默认关闭速度环滤波，直接记录/控制编码器原始速度，方便判断落地负载下的真实跟随波形。
+//   控制周期 10ms，日志每 20ms 输出一帧，兼顾调参分辨率和打印扰动。
+//   目标速度用半余弦曲线在[min,max]之间平滑往返，适合短直道重复比较。
+//   公式: target = min + (max - min) * 0.5 * (1 - cos(2π * t / period))
 // -----------------------------------------------------------------------------
-int test_05_speed_loop_airborne(float target = 1.0f, int seconds = 5) {
-    printf("\n========== TEST 05 speed_loop_airborne 速度环架空阶跃 ==========" "\n");
-    print_stage_card("T05 speed_loop_airborne",
-                     "架空给左右轮同目标阶跃，确认速度环响应、振荡、饱和和左右一致性。",
-                     "kSpeedPidP/I/D、kMotorMaxPwm、机械阻力、左右轮差异。",
-                     "不要改视觉Kp/Kd、前瞻、角速度环、环岛限幅；架空速度环不评价循迹好坏。",
-                     "速度环误差和振荡可接受后再把车放回赛道跑T06。");
-    printf("[安全] 必须架空！自动闭环给左右同目标速度 target=%.1f seconds=%d。\n", target, seconds);
+int test_05_speed_loop_airborne(float /*unused_target*/ = 1.0f, int /*unused_seconds*/ = 5) {
+    printf("\n========== TEST 05 actual_speed_loop_straight 实地直线速度环 ==========\n");
+    print_stage_card("T05 actual_speed_loop_straight",
+                     "小车落地直线跑，左右同目标速度曲线。终端实时输入调节参数、即时验证PI组合。",
+                     "kSpeedPidP、kSpeedPidI、PWM限幅、左右机械一致性、落地速度跟随响应。",
+                     "不要在本测试调视觉/角速度/元素参数；本测试只评价直线速度环，不评价循迹好坏。",
+                     "速度跟随稳定后再跑T06/T07上赛道闭环。");
+    printf("[安全] 小车会直线前进！只在空旷直道/赛道直线段测试，车头对准安全方向，手边准备Ctrl+C。\n");
+    printf("\n");
+    printf("=== 实地速度环跟随测试 ===\n");
+    printf("公式: target = min + (max - min) * 0.5 * (1 - cos(2π * t / period))\n");
+    printf("格式: <最低速度(m/s)> <最高速度(m/s)> <周期(s)> <运行时长(ms)> [Kp] [Ki]\n");
+    printf("短场地示例: 0.9 1.3 2.0 4000 2000 40   (0.9~1.3 m/s，2s周期，跑2周期)\n");
+    printf("常规示例:   1.0 1.5 3.0 6000 2000 40   (1.0~1.5 m/s，3s周期，跑2周期)\n");
+    printf("输入 q 退出\n");
+    printf("========================================\n");
+    printf("注意: Kp/Ki热改对主PID有效(speed_P_l/r是全局变量); 测试结束后自动恢复car_config默认值。\n\n");
+
     init_control_for_motor_tests();
     Speed_Goal = 0;
     Speed_Goal_l = 0;
     Speed_Goal_r = 0;
     speed_out_l = speed_out_r = 0;
+    speed_last_erro_L = speed_last_erro_R = 0;
+    motor_Duty_L(0);
+    motor_Duty_R(0);
     usleep(300 * 1000);
 
-    RunningStat err_l, err_r, enc_l, enc_r, pwm_l, pwm_r, dpwm_l, dpwm_r;
-    int sat_cnt = 0, sign_flip_l = 0, sign_flip_r = 0, major_flip_l = 0, major_flip_r = 0;
-    double last_el = 0, last_er = 0;
-    double last_pwm_l = 0, last_pwm_r = 0;
-    int total = seconds * 50;
-    const double major_err = std::max(3.0, std::fabs((double)target) * 0.12);
-    for (int i = 0; i < total && !exit_flag; ++i) {
-        Speed_Goal = target;
-        Speed_Goal_l = target;
-        Speed_Goal_r = target;
+    // 保存原始 PID 参数，测试结束后恢复
+    float orig_Pl = speed_P_l, orig_Il = speed_I_l;
+    float orig_Pr = speed_P_r, orig_Ir = speed_I_r;
+
+    // --- 实地速度任务状态 ---
+    float sine_base      = 0.9f;    // 最低速度 m/s
+    float sine_max       = 1.3f;    // 最高速度 m/s
+    float sine_period_s  = 3.0f;    // 速度曲线周期 s
+    int   task_remaining_ms = 0;
+    int   sine_tick = 0;
+    const int DT_MS = 10;           // 控制周期 10ms = 100Hz
+    const int LOG_DT_MS = 20;       // 打印周期 20ms = 50Hz，适合后续AI分析相位/超调/PWM饱和
+    const int LOG_DIVIDER = LOG_DT_MS / DT_MS;
+    const float DT_SEC = DT_MS / 1000.0f;
+    int stuck_guard_ticks = 0;
+
+    // --- 终端输入缓冲区 ---
+    std::string input_buf;
+    bool need_prompt = true;
+
+    auto show_prompt = [&]() {
+        if (need_prompt) {
+            printf(">>> [T05] 当前 Kp=%.0f/%.0f Ki=%.0f/%.0f | 输入 最低 最高 周期 时长 [Kp] [Ki]: ",
+                   speed_P_l, speed_P_r, speed_I_l, speed_I_r);
+            fflush(stdout);
+            need_prompt = false;
+        }
+    };
+    show_prompt();
+
+    while (!exit_flag) {
+        // ==========================================
+        // 非阻塞终端输入
+        // ==========================================
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(STDIN_FILENO, &fds);
+        struct timeval tv = {0, 0};
+        if (select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0) {
+            char c;
+            if (read(STDIN_FILENO, &c, 1) > 0) {
+                if (c == '\n' || c == '\r') {
+                    if (!input_buf.empty()) {
+                        while (!input_buf.empty() && (input_buf.back() == '\r' || input_buf.back() == ' '))
+                            input_buf.pop_back();
+
+                        if (input_buf == "q") {
+                            printf("\n>>> [T05] 退出。\n");
+                            exit_flag = true;
+                            input_buf.clear();
+                            continue;
+                        }
+
+                        std::istringstream iss(input_buf);
+                        float in_base = 0, in_max = 0, in_period = 0;
+                        int in_duration = 0;
+                        float in_Kp = 0, in_Ki = 0;
+
+                        if (iss >> in_base >> in_max >> in_period >> in_duration) {
+                            if (in_base < 0.2f) in_base = 0.2f;
+                            if (in_max < in_base) in_max = in_base;
+                            if (in_period < 1.0f) in_period = 1.0f;
+                            if (in_duration < DT_MS) in_duration = DT_MS;
+
+                            sine_base      = in_base;
+                            sine_max       = in_max;
+                            sine_period_s  = in_period;
+                            task_remaining_ms = in_duration;
+                            sine_tick = 0;
+                            stuck_guard_ticks = 0;
+
+                            // 可选 Kp/Ki 热改
+                            if (iss >> in_Kp) {
+                                speed_P_l = in_Kp; speed_P_r = in_Kp;
+                                if (iss >> in_Ki) {
+                                    speed_I_l = in_Ki; speed_I_r = in_Ki;
+                                }
+                            }
+
+                            speed_out_l = speed_out_r = 0;
+                            speed_last_erro_L = speed_last_erro_R = 0;
+                            // 初始化速度滤波状态，避免上一轮旧值残留
+                            speed_encoder_L = encoder_num_L();
+                            speed_encoder_R = encoder_num_R();
+
+                            printf("\n>>> [执行] min=%.2f max=%.2f amplitude=%.2f period=%.1fs duration=%dms Kp=%.0f Ki=%.0f\n",
+                                   sine_base, sine_max, sine_max - sine_base, sine_period_s, task_remaining_ms,
+                                   speed_P_l, speed_I_l);
+                            printf("[T05_ACTUAL_HEADER] log_dt_ms=%d columns=t_ms,target,encL,encR,errL,errR,pwmL,pwmR\n", LOG_DT_MS);
+                            need_prompt = true;
+                        } else {
+                            printf("\n>>> [错误] 无法解析: %s\n", input_buf.c_str());
+                        }
+                        input_buf.clear();
+                    }
+                } else {
+                    input_buf += c;
+                }
+            }
+        }
+
+        // ==========================================
+        // 任务计时
+        // ==========================================
+        if (task_remaining_ms > 0) {
+            task_remaining_ms -= DT_MS;
+            if (task_remaining_ms <= 0) {
+                task_remaining_ms = 0;
+                sine_tick = 0;
+                Speed_Goal = Speed_Goal_l = Speed_Goal_r = 0;
+                speed_out_l = speed_out_r = 0;
+                speed_last_erro_L = speed_last_erro_R = 0;
+                motor_Duty_L(0); motor_Duty_R(0);
+                printf("\n>>> [T05] 实地速度任务完成，电机已停止。\n");
+                show_prompt();
+            }
+        }
+
+        // ==========================================
+        // 计算实地速度目标：在最低/最高速度之间平滑往返，避免短场地里夹到0。
+        // ==========================================
+        float target_speed = 0.0f;
+        if (task_remaining_ms > 0) {
+            float t = (float)sine_tick * DT_SEC;
+            float phase = 2.0f * (float)M_PI * t / sine_period_s;
+            float profile = 0.5f * (1.0f - cosf(phase));
+            target_speed = sine_base + (sine_max - sine_base) * profile;
+        }
+
+        // ==========================================
+        // 获取实际速度 + 执行 PID
+        // T05用于无速度环滤波调参：直接使用编码器原始速度，避免滤波掩盖超调/毛刺。
+        // ==========================================
+        Speed_Goal = Speed_Goal_l = Speed_Goal_r = target_speed;
         speed_encoder_L = encoder_num_L();
         speed_encoder_R = encoder_num_R();
         Speed_PID_L();
         Speed_PID_R();
-        motor_Duty_L((int)speed_out_l);
-        motor_Duty_R((int)speed_out_r);
 
-        double el = Speed_Goal_l - speed_encoder_L;
-        double er = Speed_Goal_r - speed_encoder_R;
-        err_l.add(el); err_r.add(er);
-        enc_l.add(speed_encoder_L); enc_r.add(speed_encoder_R);
-        pwm_l.add(speed_out_l); pwm_r.add(speed_out_r);
-        if (std::fabs(speed_out_l) > car_config::kMotorMaxPwm * 0.95 || std::fabs(speed_out_r) > car_config::kMotorMaxPwm * 0.95) sat_cnt++;
-        if (i > 0) {
-            dpwm_l.add(speed_out_l - last_pwm_l);
-            dpwm_r.add(speed_out_r - last_pwm_r);
-        }
-        if (i > 5 && el * last_el < 0) {
-            sign_flip_l++;
-            if (std::fabs(el) > major_err && std::fabs(last_el) > major_err) major_flip_l++;
-        }
-        if (i > 5 && er * last_er < 0) {
-            sign_flip_r++;
-            if (std::fabs(er) > major_err && std::fabs(last_er) > major_err) major_flip_r++;
-        }
-        last_el = el; last_er = er;
-        last_pwm_l = speed_out_l; last_pwm_r = speed_out_r;
+        int pwm_l = (int)speed_out_l;
+        int pwm_r = (int)speed_out_r;
+        // PWM 限幅
+        if (pwm_l > (int)car_config::kMotorMaxPwm)  pwm_l = (int)car_config::kMotorMaxPwm;
+        if (pwm_l < -(int)car_config::kMotorMaxPwm) pwm_l = -(int)car_config::kMotorMaxPwm;
+        if (pwm_r > (int)car_config::kMotorMaxPwm)  pwm_r = (int)car_config::kMotorMaxPwm;
+        if (pwm_r < -(int)car_config::kMotorMaxPwm) pwm_r = -(int)car_config::kMotorMaxPwm;
+        motor_Duty_L(pwm_l);
+        motor_Duty_R(pwm_r);
+        // 同步 speed_out 到限幅后的值，防止 I 项在限幅时继续累积
+        speed_out_l = (float)pwm_l;
+        speed_out_r = (float)pwm_r;
 
-        if (i % 10 == 0) {
-            printf("[T05_FRAME] t=%.1f target=%.1f Enc=%.1f/%.1f Err=%.1f/%.1f PWM=%.0f/%.0f\n",
-                   i * 0.02, target, speed_encoder_L, speed_encoder_R, el, er, speed_out_l, speed_out_r);
+        if (task_remaining_ms > 0 && sine_tick * DT_MS > 1000) {
+            float enc_abs_mean = 0.5f * (std::fabs(speed_encoder_L) + std::fabs(speed_encoder_R));
+            bool pwm_saturated = (std::fabs((float)pwm_l) > car_config::kMotorMaxPwm * 0.95f ||
+                                  std::fabs((float)pwm_r) > car_config::kMotorMaxPwm * 0.95f);
+            bool speed_too_low = enc_abs_mean < std::max(0.25f, target_speed * 0.35f);
+            if (pwm_saturated && speed_too_low) {
+                stuck_guard_ticks++;
+            } else {
+                stuck_guard_ticks = 0;
+            }
+            if (stuck_guard_ticks * DT_MS >= 300) {
+                printf("[T05_SAFETY_STOP] pwm_saturated=1 speed_too_low=1 t_ms=%d target=%.3f encL=%.3f encR=%.3f pwmL=%d pwmR=%d. 检查是否顶到场地边界、轮胎打滑、供电/驱动限流或机械卡滞。\n",
+                       (int)(sine_tick * DT_MS), target_speed, speed_encoder_L, speed_encoder_R, pwm_l, pwm_r);
+                task_remaining_ms = 0;
+                sine_tick = 0;
+                stuck_guard_ticks = 0;
+                Speed_Goal = Speed_Goal_l = Speed_Goal_r = 0;
+                speed_out_l = speed_out_r = 0;
+                speed_last_erro_L = speed_last_erro_R = 0;
+                motor_Duty_L(0);
+                motor_Duty_R(0);
+                show_prompt();
+                continue;
+            }
         }
-        usleep(20 * 1000);
+
+        // ==========================================
+        // 调参日志：20ms = 50Hz。比控制周期稀疏一半，减少终端打印对速度环的干扰。
+        // 格式: T05_ACTUAL t_ms,target,encL,encR,errL,errR,pwmL,pwmR
+        // ==========================================
+        if (task_remaining_ms > 0 && (sine_tick % LOG_DIVIDER) == 0) {
+            int t_ms = (int)(sine_tick * DT_MS);
+            float enc_l = speed_encoder_L;
+            float enc_r = speed_encoder_R;
+            float err_l = target_speed - enc_l;
+            float err_r = target_speed - enc_r;
+            printf("T05_ACTUAL %d,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d\n",
+                   t_ms, target_speed, enc_l, enc_r, err_l, err_r, pwm_l, pwm_r);
+        }
+
+        usleep(DT_MS * 1000);
+        if (task_remaining_ms > 0) sine_tick++;
     }
+
+    // 恢复原始 PID 参数
+    speed_P_l = orig_Pl; speed_I_l = orig_Il;
+    speed_P_r = orig_Pr; speed_I_r = orig_Ir;
     safe_stop_and_print("T05");
-    double balance = (std::fabs(enc_r.mean()) > 1e-3) ? std::fabs(enc_l.mean() / enc_r.mean()) : 999.0;
-    double sat_rate = total ? (double)sat_cnt / total : 0;
-    printf("[T05_SUMMARY] target=%.1f enc_mean=%.2f/%.2f err_abs=%.2f/%.2f err_rms=%.2f/%.2f pwm_mean=%.0f/%.0f pwm_std=%.0f/%.0f dpwm_abs=%.0f/%.0f sat_rate=%.2f flip=%d/%d major_flip=%d/%d balance=%.2f\n",
-           target, enc_l.mean(), enc_r.mean(), err_l.mean_abs(), err_r.mean_abs(), err_l.rms(), err_r.rms(),
-           pwm_l.mean(), pwm_r.mean(), pwm_l.stddev(), pwm_r.stddev(), dpwm_l.mean_abs(), dpwm_r.mean_abs(),
-           sat_rate, sign_flip_l, sign_flip_r, major_flip_l, major_flip_r, balance);
-    printf("[调参意义] err_abs长期大=速度环弱或动力不足；flip多但major_flip少=围绕目标小幅量化过零，通常可接受；major_flip/dpwm_abs大=明显振荡；balance偏离=左右轮机械/编码器/PWM差异。\n");
-    printf("[RETURN] 0=可用；1=响应慢/误差大；2=振荡；3=左右不一致。\n");
-    if (err_l.mean_abs() > target * 0.55 || err_r.mean_abs() > target * 0.55 || sat_rate > 0.20) return 1;
-    if (major_flip_l > seconds * 2 || major_flip_r > seconds * 2) return 2;
-    if ((sign_flip_l > seconds * 8 || sign_flip_r > seconds * 8) &&
-        (err_l.rms() > std::fabs((double)target) * 0.18 || err_r.rms() > std::fabs((double)target) * 0.18 ||
-         dpwm_l.mean_abs() > car_config::kMotorMaxPwm * 0.08 || dpwm_r.mean_abs() > car_config::kMotorMaxPwm * 0.08)) return 2;
-    if (balance < 0.65 || balance > 1.55) return 3;
+    exit_flag = false;
+
+    printf("[T05_RETURN] 0=测试结束。T05_ACTUAL日志可复制给AI分析。\n");
+    printf("[调参意义] 实地速度测试能暴露：低速段跟不跟得上=落地摩擦/死区；高速段跟不跟得上=动力/P增益；下降段拖尾/反向PWM=I累积或P过猛；左右差异=机械/编码器/地面接触差异。\n");
     return 0;
 }
 
@@ -1532,6 +1786,7 @@ int test_06_low_speed_visual_gyro_closed_loop(int seconds = 10) {
     std::thread ctrl_thread(timer_thread_1);
     RunningStat raw, filt, pd, tgt, cmd, real, gf, gerr, diff, se_l, se_r, dtmax;
     int cap_cnt = 0, imu_bad_cnt = 0, db_cnt = 0, img_bad_cnt = 0, img_warn_cnt = 0, pd_sat_cnt = 0;
+    int large_offset_cnt = 0;
     int total_prints = 0;
     auto start = std::chrono::steady_clock::now();
     auto last_print = start;
@@ -1563,8 +1818,13 @@ int test_06_low_speed_visual_gyro_closed_loop(int seconds = 10) {
                               std::abs(ImageStatus.MiddleLine - ImageStatus.Det_True) > 26);
             bool severe_img_bad = (ImageStatus.OFFLine > 35 ||
                                    (ImageStatus.Left_Line > 25 && ImageStatus.Right_Line > 25));
+            bool unsafe_offset = (std::fabs(dbg_raw_steer_error) > 20.0f ||
+                                  std::abs(ImageStatus.MiddleLine - ImageStatus.Det_True) > 20 ||
+                                  ImageStatus.Left_Line > 35 ||
+                                  ImageStatus.Right_Line > 35);
             if (edge_warn) img_warn_cnt++;
             if (severe_img_bad) img_bad_cnt++;
+            if (unsafe_offset) large_offset_cnt++;
             if (std::fabs(dbg_visual_pd_out) > car_config::kVisualGyroLimitDps * 0.90f) pd_sat_cnt++;
             printf("[T06] Raw:%5.1f Filt:%5.1f dE:%5.1f | PD:%6.1f Tgt:%6.1f Cmd:%6.1f Real:%6.1f GF:%6.1f GErr:%6.1f dT:%5.1f | D0:%6.1f D:%6.1f Cap:%d Max:%4.1f | L:%5.1f R:%5.1f Enc:%5.1f/%5.1f SE:%5.1f/%5.1f | imgErr:%d Road:%s OFF:%d L/R:%d/%d dt:%5.3f IMU:%d DB:%d | fc:%d sp:%d dt_max:%.3f rg:%.1f oa:%d tbo:%.1f\n",
                    dbg_raw_steer_error, dbg_steer_error, dbg_diff_steer,
@@ -1592,11 +1852,15 @@ int test_06_low_speed_visual_gyro_closed_loop(int seconds = 10) {
     double img_bad_rate = total_prints ? (double)img_bad_cnt / total_prints : 0;
     double img_warn_rate = total_prints ? (double)img_warn_cnt / total_prints : 0;
     double pd_sat_rate = total_prints ? (double)pd_sat_cnt / total_prints : 0;
-    printf("[T06_SUMMARY] samples=%d raw_abs=%.2f filt_abs=%.2f PD_abs=%.2f Tgt_abs=%.2f Real_abs=%.2f GF_abs=%.2f GErr_abs=%.2f Diff_abs=%.2f SE_abs=%.2f/%.2f cap_rate=%.2f pd_sat_rate=%.2f imu_bad=%.2f img_bad=%.2f img_warn=%.2f dtmax_mean=%.3f DB_cnt=%d\n",
-           total_prints, raw.mean_abs(), filt.mean_abs(), pd.mean_abs(), tgt.mean_abs(), real.mean_abs(), gf.mean_abs(), gerr.mean_abs(), diff.mean_abs(), se_l.mean_abs(), se_r.mean_abs(), cap_rate, pd_sat_rate, imu_bad_rate, img_bad_rate, img_warn_rate, dtmax.mean(), db_cnt);
-    printf("[调参意义] pd_sat高=外环/前瞻过猛；GErr_abs>20且持续=角速度环/GF跟不上；cap高=差速受限；img_bad=OFF>35或双边严重丢失；img_warn=急弯大偏差/单侧贴边/短暂OFF，需结合是否能稳定回中。\n");
-    printf("[RETURN] 0=低速闭环可继续；1=PD饱和；2=陀螺仪跟踪差；3=差速/速度受限；4=图像不稳。\n");
-    if (img_bad_rate > 0.20 || img_warn_rate > 0.70) return 4;
+    double large_offset_rate = total_prints ? (double)large_offset_cnt / total_prints : 0;
+    printf("[T06_SUMMARY] samples=%d raw_abs=%.2f filt_abs=%.2f PD_abs=%.2f Tgt_abs=%.2f Real_abs=%.2f GF_abs=%.2f GErr_abs=%.2f Diff_abs=%.2f SE_abs=%.2f/%.2f cap_rate=%.2f pd_sat_rate=%.2f imu_bad=%.2f img_bad=%.2f img_warn=%.2f large_offset=%.2f dtmax_mean=%.3f DB_cnt=%d\n",
+           total_prints, raw.mean_abs(), filt.mean_abs(), pd.mean_abs(), tgt.mean_abs(), real.mean_abs(), gf.mean_abs(), gerr.mean_abs(), diff.mean_abs(), se_l.mean_abs(), se_r.mean_abs(), cap_rate, pd_sat_rate, imu_bad_rate, img_bad_rate, img_warn_rate, large_offset_rate, dtmax.mean(), db_cnt);
+    printf("[调参意义] pd_sat高=外环/前瞻过猛；GErr_abs>20且持续=角速度环/GF跟不上；cap高=差速受限；img_bad=OFF>35或双边严重丢失；img_warn=急弯大偏差/单侧贴边/短暂OFF；large_offset=Raw/imgErr>20或单侧丢边>35，代表压线风险，不应直接进T07。\n");
+    printf("[RETURN] 0=低速闭环可继续；1=PD饱和；2=陀螺仪跟踪差；3=差速/速度受限；4=图像/贴边风险。\n");
+    if (img_bad_rate > 0.20 ||
+        img_warn_rate > 0.70 ||
+        large_offset_rate > 0.20 ||
+        (img_warn_rate > 0.45 && raw.mean_abs() > 12.0)) return 4;
     if (pd_sat_rate > 0.25) return 1;
     if (gerr.mean_abs() > 20.0 || imu_bad_rate > 0.05) return 2;
     if (cap_rate > 0.25 || se_l.mean_abs() > 6.0 || se_r.mean_abs() > 6.0) return 3;
@@ -1961,6 +2225,86 @@ int test_08_element_push_image_debug(int seconds = 40) {
     printf("[RETURN] 0=采集完成；2=未看到元素；3=图像不稳。\n");
     if (img_bad_rate > 0.25) return 3;
     if (special_cnt == 0) return 2;
+    return 0;
+}
+
+// -----------------------------------------------------------------------------
+// TEST 08P: 手推车 TFT 实时补线观察（带FPS显示）— 电机关闭，纯视觉验证
+// -----------------------------------------------------------------------------
+int test_08p_push_line_patrol_tft(int seconds = 120) {
+    printf("\n========== TEST 08P push_line_patrol_tft 手推补线TFT观察 ==========\n");
+    print_stage_card("T08P push_line_patrol_tft",
+                     "不开电机闭环，只手推小车，TFT18 逐帧显示二值图+原始/最终边线+中线+实时FPS。",
+                     "摄像头实际帧率、补线质量（直道/弯道中线走向）、边界稳定性。",
+                     "不要在本测试中开电机；本测试目标是在零风险下手推观察补线是否正确。",
+                     "手推通过直道和各曲率弯道，重点看TFT上红线(中线)是否在该行左右边界的正中间。");
+    printf("[运行] 手推模式：电机强制关闭。TFT18 实时显示补线画面+FPS。seconds=%d\n", seconds);
+    printf("[观察] 直道：左右边界平行、中线居中；弯道：补线边界连续、无大片OFF；FPS>=140 则正常。\n");
+
+    init_element_tft_once("T08P");
+    if (!ensure_camera_ready()) return -1;
+    init_control_for_motor_tests();
+    g_enable_element_process = false;
+    Speed_Goal = 0;
+    Speed_Goal_l = 0;
+    Speed_Goal_r = 0;
+    speed_out_l = 0;
+    speed_out_r = 0;
+    motor_Duty_L(0);
+    motor_Duty_R(0);
+
+    auto start = std::chrono::steady_clock::now();
+    auto last_fps_tick = start;
+    int frame_count = 0;
+    int fps_sample_count = 0;
+    float fps = 0.0f;
+    int img_bad_cnt = 0, samples = 0;
+
+    while (!exit_flag) {
+        Speed_Goal = 0;
+        Speed_Goal_l = 0;
+        Speed_Goal_r = 0;
+        speed_out_l = 0;
+        speed_out_r = 0;
+        motor_Duty_L(0);
+        motor_Duty_R(0);
+
+        if (!grab_and_process()) { img_bad_cnt++; break; }
+
+        frame_count++;
+        fps_sample_count++;
+
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_fps_tick).count();
+        if (elapsed_ms >= 500) {
+            fps = fps_sample_count * 1000.0f / elapsed_ms;
+            fps_sample_count = 0;
+            last_fps_tick = now;
+        }
+
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - start).count() >= seconds) break;
+
+        // 每帧都刷新 TFT
+        cv::Mat tft_frame = make_push_tft_frame(fps, frame_count);
+        lq_tft18_drv_road_color(kElementDebugTftX, kElementDebugTftY, tft_frame);
+
+        samples++;
+        bool severe_img_bad = (ImageStatus.OFFLine > 18 ||
+                               (ImageStatus.Left_Line > 25 && ImageStatus.Right_Line > 25) ||
+                               std::abs(ImageStatus.MiddleLine - ImageStatus.Det_True) > 26);
+        if (severe_img_bad) img_bad_cnt++;
+
+        usleep(2 * 1000);
+    }
+
+    safe_stop_and_print("T08P");
+    exit_flag = false;
+
+    double img_bad_rate = samples ? (double)img_bad_cnt / samples : 0.0;
+    printf("[T08P_SUMMARY] frames=%d fps=%.1f img_bad_rate=%.2f\n", frame_count, fps, img_bad_rate);
+    printf("[T08P调参意义] 观察TFT上中线位置：若弯道中线偏外/出界→调大弯补偿或视觉Kp；若FPS偏低→检查曝光/ROI。\n");
+    printf("[RETURN] 0=采集完成；3=图像质量不稳。\n");
+    if (img_bad_rate > 0.25) return 3;
     return 0;
 }
 
@@ -2682,21 +3026,21 @@ int run_visual_pipeline(void) {
     if (ret != 0) return 30 + ret;
     ret = run_flow_step("T04 roi_scan_straight", [](){ return test_04_roi_scan_straight(); });
     if (ret != 0) return 40 + ret;
-    printf("[FLOW_SUMMARY] visual_pipeline PASS。可以进入架空硬件或低速闭环测试。\n");
+    printf("[FLOW_SUMMARY] visual_pipeline PASS。可以进入T01方向检查、T05实地速度环或低速闭环测试。\n");
     return 0;
 }
 
 int run_airborne_pipeline(void) {
-    printf("\n========== FLOW B airborne_pipeline 架空硬件调参流程 ==========" "\n");
-    printf("[安全] 必须架空小车。会短时输出电机PWM，用于确认电机/编码器方向和速度环基础响应。\n");
+    printf("\n========== FLOW B motor_speed_pipeline 电机/速度环调参流程 ==========" "\n");
+    printf("[安全] T01必须架空确认方向；T05会让小车落地直线前进，用于确认实际速度环基础响应。\n");
     int ret = 0;
     ret = run_flow_step("T00 precheck_config", [](){ return test_00_precheck_config(); });
     if (ret != 0) return ret;
     ret = run_flow_step("T01 motor_encoder_direction", [](){ return test_01_motor_encoder_direction(); });
     if (ret != 0) return 10 + std::abs(ret);
-    ret = run_flow_step("T05 speed_loop_airborne", [](){ return test_05_speed_loop_airborne(); });
+    ret = run_flow_step("T05 actual_speed_loop_straight", [](){ return test_05_speed_loop_airborne(); });
     if (ret != 0) return 50 + ret;
-    printf("[FLOW_SUMMARY] airborne_pipeline PASS。可以把车放回赛道做低速闭环。\n");
+    printf("[FLOW_SUMMARY] motor_speed_pipeline PASS。可以继续做低速闭环。\n");
     return 0;
 }
 
@@ -2715,7 +3059,7 @@ int run_sensor_pipeline(void) {
 
 int run_low_speed_pipeline(void) {
     printf("\n========== FLOW D low_speed_pipeline 低速上赛道流程 ==========" "\n");
-    printf("[安全] 会让小车低速循迹。建议先跑 visual_pipeline 和 airborne_pipeline，通过后再执行。\n");
+    printf("[安全] 会让小车低速循迹。建议先跑 visual_pipeline，并确认T01/T05基础正常后再执行。\n");
     int ret = 0;
     ret = run_flow_step("T02 camera_alignment_repeatability", [](){ return test_02_camera_center_angle_static(); });
     if (ret != 0) return 20 + ret;
@@ -2748,7 +3092,7 @@ int run_element_pipeline(void) {
 
 // =============================================================================
 // 对外函数：你只需要在 main.cpp 里选择性调用这些函数即可。
-// 建议顺序：12(参数地图) -> 00 -> 01(架空) -> 02 -> 03 -> 04 -> 05(架空) -> 10 -> 11 -> 06 -> 07 -> 08 -> 09
+// 建议顺序：12(参数地图) -> 00 -> 01(架空方向) -> 02 -> 03 -> 04 -> 05(实地速度) -> 10 -> 11 -> 06 -> 07 -> 08 -> 09
 // =============================================================================
 
 int lq_param_test_00_precheck_config(void) { return param_step_demo::run_with_log("T00_precheck_config", [](){ return param_step_demo::test_00_precheck_config(); }); }
@@ -2757,7 +3101,7 @@ int lq_param_test_02_camera_center_angle_static(void) { return param_step_demo::
 int lq_param_test_03_exposure_otsu_quality(void) { return param_step_demo::run_with_log("T03_exposure_otsu_quality", [](){ return param_step_demo::test_03_exposure_otsu_quality(); }); }
 int lq_param_test_03_exposure_hsv_quality(void) { return lq_param_test_03_exposure_otsu_quality(); }
 int lq_param_test_04_roi_scan_straight(void) { return param_step_demo::run_with_log("T04_roi_scan_straight", [](){ return param_step_demo::test_04_roi_scan_straight(); }); }
-int lq_param_test_05_speed_loop_airborne(void) { return param_step_demo::run_with_log("T05_speed_loop_airborne", [](){ return param_step_demo::test_05_speed_loop_airborne(); }); }
+int lq_param_test_05_speed_loop_airborne(void) { return param_step_demo::run_with_log("T05_actual_speed_loop_straight", [](){ return param_step_demo::test_05_speed_loop_airborne(); }); }
 int lq_param_test_06_low_speed_visual_gyro_closed_loop(void) { return param_step_demo::run_with_log("T06_low_speed_visual_gyro", [](){ return param_step_demo::test_06_low_speed_visual_gyro_closed_loop(); }); }
 int lq_param_test_07_speed_up_regression(void) { return param_step_demo::run_with_log("T07_speed_up_regression", [](){ return param_step_demo::test_07_speed_up_regression(); }); }
 int lq_param_test_08_element_debug(void) { return param_step_demo::run_with_log("T08_element_debug", [](){ return param_step_demo::test_08_element_debug(); }); }
@@ -2767,8 +3111,9 @@ int lq_param_test_10_gyro_static_noise(void) { return param_step_demo::run_with_
 int lq_param_test_11_gyro_loop_step_response(void) { return param_step_demo::run_with_log("T11_gyro_loop_step_response", [](){ return param_step_demo::test_11_gyro_loop_step_response(); }); }
 int lq_param_test_12_parameter_debug_plan(void) { return param_step_demo::run_with_log("T12_parameter_debug_plan", [](){ return param_step_demo::test_12_parameter_debug_plan(); }); }
 int lq_param_test_13_pose_reference_push(void) { return param_step_demo::run_with_log("T13_pose_reference_push", [](){ return param_step_demo::test_13_pose_reference_push(); }); }
+int lq_param_test_14_push_line_patrol_tft(void) { return param_step_demo::run_with_log("T14_push_line_patrol_tft", [](){ return param_step_demo::test_08p_push_line_patrol_tft(); }); }
 int lq_param_flow_visual(void) { return param_step_demo::run_with_log("FLOW_A_visual_pipeline", [](){ return param_step_demo::run_visual_pipeline(); }); }
-int lq_param_flow_airborne(void) { return param_step_demo::run_with_log("FLOW_B_airborne_pipeline", [](){ return param_step_demo::run_airborne_pipeline(); }); }
+int lq_param_flow_airborne(void) { return param_step_demo::run_with_log("FLOW_B_motor_speed_pipeline", [](){ return param_step_demo::run_airborne_pipeline(); }); }
 int lq_param_flow_sensor(void) { return param_step_demo::run_with_log("FLOW_C_sensor_pipeline", [](){ return param_step_demo::run_sensor_pipeline(); }); }
 int lq_param_flow_low_speed(void) { return param_step_demo::run_with_log("FLOW_D_low_speed_pipeline", [](){ return param_step_demo::run_low_speed_pipeline(); }); }
 int lq_param_flow_element(void) { return param_step_demo::run_with_log("FLOW_E_element_pipeline", [](){ return param_step_demo::run_element_pipeline(); }); }
@@ -2789,7 +3134,7 @@ void lq_parameter_step_tuning_demo(void) {
     printf("[推荐流程]\n");
     printf("  lq_param_test_12_parameter_debug_plan(); // 不跑车：打印每个参数该看哪个测试、怎么改\n");
     printf("  lq_param_flow_visual();        // 不跑电机：配置、摄像头重复性、二值、ROI/扫线\n");
-    printf("  lq_param_flow_airborne();      // 必须架空：电机/编码器方向、速度环基础\n");
+    printf("  lq_param_flow_airborne();      // T01架空确认方向；T05落地直线测速度环基础\n");
     printf("  lq_param_flow_sensor();        // 不跑车：二值质量 + MPU6050静止噪声\n");
     printf("  lq_param_flow_low_speed();     // 上赛道低速：视觉 + 陀螺仪 + 轮速闭环\n\n");
     printf("  lq_param_flow_element();       // 上赛道低速：开启元素/特殊赛道判断与处理，T08/T08H会同步刷新TFT18补线画面\n\n");
@@ -2799,7 +3144,7 @@ void lq_parameter_step_tuning_demo(void) {
     printf("  T02: 静态看摄像头对线重复性和俯仰角，不要求手摆像素级居中；中线只看3次重复日志后的趋势。\n");
     printf("  T03: 只看曝光/二值化/ROI基础质量，white、dDet、lost不过时不要调PID。\n");
     printf("  T04: 只看前瞻、扫线和直道判断，手推普通弯观察jump/edge_bad/straight_rate。\n");
-    printf("  T05: 架空测速度环阶跃，只调速度环P/I/D、PWM限幅、左右机械一致性。\n");
+    printf("  T05: 落地直线测实际速度环，只调速度环P/I/D、PWM限幅、左右机械一致性。\n");
     printf("  T10: 静止测IMU噪声，只调gyro死区/滤波/排查I2C供电，不用PID掩盖尖峰。\n");
     printf("  T11: 低速直接给角速度阶跃，只调角速度环/差速输出/正负方向补偿，判断是不是内环跟不上。\n");
     printf("  T12: 不跑车，打印所有关键参数的阶段归属、观察指标、调整方向和禁忌。\n");
@@ -2815,7 +3160,7 @@ void lq_parameter_step_tuning_demo(void) {
     printf("  lq_param_test_02_camera_center_angle_static();   // 实际为对线重复性/角度，不做像素级摆正判罚\n");
     printf("  lq_param_test_03_exposure_otsu_quality();        // 当前按kImageAlgorithm输出二值质量\n");
     printf("  lq_param_test_04_roi_scan_straight();\n");
-    printf("  lq_param_test_05_speed_loop_airborne();          // 架空\n");
+    printf("  lq_param_test_05_speed_loop_airborne();          // 实地直线速度环\n");
     printf("  lq_param_test_06_low_speed_visual_gyro_closed_loop();\n");
     printf("  lq_param_test_07_speed_up_regression();\n");
     printf("  lq_param_test_08_element_debug();              // 自动低速元素调试 + TFT18实时补线\n");
@@ -2827,7 +3172,7 @@ void lq_parameter_step_tuning_demo(void) {
     printf("  lq_param_test_13_pose_reference_push();           // 不跑电机，手推正常路径视觉/姿态基准\n");
     printf("\n[返回码]\n");
     printf("  单项测试返回值见各自日志；流程返回 20/30/40/50/60/100/110 + 子错误码，表示停在哪个阶段。\n");
-    printf("  图像不过不要调PID；架空不过不要上赛道；IMU静态不过不要调角速度环。\n\n");
+    printf("  图像不过不要调PID；T01方向不过不要跑T05/T06；IMU静态不过不要调角速度环。\n\n");
     printf("示例：int ret = lq_param_flow_visual(); printf(\"ret=%d\\n\", ret); return 0;\n");
     param_step_demo::print_config_snapshot();
 }
@@ -2847,7 +3192,7 @@ void lq_parameter_step_interactive_demo(void)
     printf(" 2  — T02 摄像头对线重复性/角度\n");
     printf(" 3  — T03 曝光/二值化质量检测\n");
     printf(" 4  — T04 ROI/前瞻/扫线参数检测\n");
-    printf(" 5  — T05 速度环架空阶跃测试\n");
+    printf(" 5  — T05 实地直线速度环测试 (落地/终端调参)\n");
     printf(" 6  — T06 低速视觉+陀螺仪闭环循迹\n");
     printf(" 7  — T07 提速回归测试\n");
     printf(" 8  — T08 元素调试 (低速+TFT18)\n");
@@ -2856,6 +3201,7 @@ void lq_parameter_step_interactive_demo(void)
     printf("11  — T11 角速度环阶跃响应测试\n");
     printf("12  — T12 参数调试方案 (不跑车)\n");
     printf("13  — T13 手推视觉/姿态基准采集\n");
+    printf("14  — T14 手推补线TFT观察 (FPS+二值图+边线+中线)\n");
     printf("------------------------------------------------------------\n");
 
     std::string input_buf;
@@ -2924,7 +3270,7 @@ void lq_parameter_step_interactive_demo(void)
                     result = lq_param_test_04_roi_scan_straight();
                     break;
                 case 5:
-                    printf("\n>>> 运行 T05 速度环架空阶跃测试...\n");
+                    printf("\n>>> 运行 T05 实地直线速度环测试...\n");
                     result = lq_param_test_05_speed_loop_airborne();
                     break;
                 case 6:
@@ -2958,6 +3304,10 @@ void lq_parameter_step_interactive_demo(void)
                 case 13:
                     printf("\n>>> 运行 T13 手推视觉/姿态基准采集...\n");
                     result = lq_param_test_13_pose_reference_push();
+                    break;
+                case 14:
+                    printf("\n>>> 运行 T14 手推补线TFT观察 (FPS+补线)...\n");
+                    result = lq_param_test_14_push_line_patrol_tft();
                     break;
                 default:
                     printf(">>> 未知测试编号: %d\n", test_num);
