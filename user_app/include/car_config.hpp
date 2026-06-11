@@ -133,13 +133,73 @@ constexpr float kMpu6050GyroScale = 16.4f;       // 陀螺仪量程换算，当�
 constexpr int kMpu6050GyroBiasSamples = 200;     // 陀螺仪零偏采样次数，调大零偏更稳但启动更慢；零偏波动大可加到 300-500。
 constexpr int kMpu6050BiasSampleDelayUs = 10000; // 零偏采样间隔，10000us 即 10ms；采样太快噪声相关性高，建议保持 5-10ms。
 
-// 摄像头与二值化预处理参数
-constexpr int kCameraWidth = 160;                // 摄像头采集宽度，调大图像更细但 CPU 压力更高；循迹优先保持 160。
-constexpr int kCameraHeight = 120;               // 摄像头采集高度，调大能看更远但处理更慢；当前只取下半部分，通常保持 120。
+// =====================================================================
+// 双路摄像头参数：320x240 用于 NCNN 推理，内部下采样 160x120 用于循迹
+// =====================================================================
+constexpr int kCameraHiresWidth = 320;           // 摄像头高分辨率采集宽度，用于 NCNN 模型推理输入。
+constexpr int kCameraHiresHeight = 240;          // 摄像头高分辨率采集高度。
+constexpr int kCameraWidth = 160;                // 循迹下采样宽度，保持与既有算法兼容；修改此值需同步调整 ROI 和采样步长。
+constexpr int kCameraHeight = 120;               // 循迹下采样高度。
 constexpr int kCameraFps = 180;                  // 摄像头支持 180fps；切换到高速模式以降低延迟、提升实时性。
 constexpr lq_camera_format_t kCameraFormat = LQ_CAMERA_0CPU_MJPG; // 摄像头格式，低 CPU 占用模式适合主控；若画面异常再尝试 HIGH_MJPG。
 constexpr const char *kCameraDevicePath = LQ_CAMERA_PATH; // 摄像头设备节点，默认 /dev/video0；换摄像头编号时改这里。
 constexpr int kCameraManualExposure = 55;       // T03白占比0.563偏高，先降到历史安全甜点55，优先压过曝/反光导致的动态丢边。
+
+// =====================================================================
+// 红色标记检测参数（12x5cm 红色标记锚点，用于定位上方 12x12cm 目标区域）
+// =====================================================================
+constexpr int kRedMarkerHsvLowH1 = 0;           // 红色 HSV 主区间 H 下限。
+constexpr int kRedMarkerHsvLowS1 = 120;         // 红色 HSV 主区间 S 下限。
+constexpr int kRedMarkerHsvLowV1 = 80;          // 红色 HSV 主区间 V 下限。
+constexpr int kRedMarkerHsvHighH1 = 8;          // 红色 HSV 主区间 H 上限。
+constexpr int kRedMarkerHsvHighS1 = 255;        // 红色 HSV 主区间 S 上限。
+constexpr int kRedMarkerHsvHighV1 = 255;        // 红色 HSV 主区间 V 上限。
+constexpr int kRedMarkerHsvLowH2 = 172;         // 红色 HSV 副区间 H 下限（红色在 HSV 空间跨 0 度边界）。
+constexpr int kRedMarkerHsvLowS2 = 120;         // 红色 HSV 副区间 S 下限。
+constexpr int kRedMarkerHsvLowV2 = 80;          // 红色 HSV 副区间 V 下限。
+constexpr int kRedMarkerHsvHighH2 = 180;        // 红色 HSV 副区间 H 上限。
+constexpr int kRedMarkerHsvHighS2 = 255;        // 红色 HSV 副区间 S 上限。
+constexpr int kRedMarkerHsvHighV2 = 255;        // 红色 HSV 副区间 V 上限。
+// 底部红色横条回退检测（放宽阈值）
+constexpr int kRedBandHsvLowH1 = 0;             // 红色横条回退 H 下限。
+constexpr int kRedBandHsvLowS1 = 60;            // 红色横条回退 S 下限（放宽）。
+constexpr int kRedBandHsvLowV1 = 40;            // 红色横条回退 V 下限（放宽）。
+constexpr int kRedBandHsvHighH1 = 20;           // 红色横条回退 H 上限（放宽）。
+constexpr int kRedBandHsvHighS1 = 255;          // 红色横条回退 S 上限。
+constexpr int kRedBandHsvHighV1 = 255;          // 红色横条回退 V 上限。
+constexpr int kRedBandHsvLowH2 = 165;           // 红色横条回退副区间 H 下限。
+constexpr int kRedBandHsvLowS2 = 60;            // 红色横条回退副区间 S 下限。
+constexpr int kRedBandHsvLowV2 = 40;            // 红色横条回退副区间 V 下限。
+constexpr int kRedBandHsvHighH2 = 180;          // 红色横条回退副区间 H 上限。
+constexpr int kRedBandHsvHighS2 = 255;          // 红色横条回退副区间 S 上限。
+constexpr int kRedBandHsvHighV2 = 255;          // 红色横条回退副区间 V 上限。
+constexpr float kRedMinArea = 20.0f;            // 红色标记最小像素面积。
+constexpr float kRedAspectLow = 1.8f;           // 红色标记宽高比下限。
+constexpr float kRedAspectHigh = 4.5f;          // 红色标记宽高比上限。
+constexpr float kRedAreaRatioLow = 0.001f;      // 红色面积占全图比例下限。
+constexpr float kRedAreaRatioHigh = 0.15f;      // 红色面积占全图比例上限。
+constexpr float kRedFillRatioMin = 0.55f;       // 红色轮廓填充率下限。
+constexpr float kRedCenterYMinRatio = 0.30f;    // 红色标记中心 Y 占比下限（忽略顶部红色物体）。
+constexpr int kRedMorphCloseIter = 2;           // 红色掩膜形态学闭合迭代次数。
+
+// =====================================================================
+// NCNN 推理参数（走马观碑组：识别 12x12cm 目标区域内的文字/符号）
+// 模型: TinyClassifier (width_mult=0.6), 48×48, 三分类
+// 训练归一化: mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225] (ImageNet)
+// 对应 NCNN 参数: mean_vals = mean×255, norm_vals = 1/(std×255)
+// =====================================================================
+constexpr int kNcnnCropSide = 48;               // 从红色标记上方裁剪的正方形边长（像素）。
+constexpr int kNcnnInputWidth = 48;             // NCNN 模型输入宽度（与训练时 --img-width 一致）。
+constexpr int kNcnnInputHeight = 48;            // NCNN 模型输入高度（与训练时 --img-height 一致）。
+constexpr int kNcnnInferInterval = 10;          // 每 N 帧主循环执行一次 NCNN 推理（降低 CPU 负载）。
+constexpr float kNcnnConfidenceThreshold = 0.6f; // NCNN 推理置信度阈值，低于此值的结果视为无效。
+constexpr const char *kNcnnModelParam = "tiny_classifier_fp32.ncnn.param";  // run_all.ps1 产物。
+constexpr const char *kNcnnModelBin = "tiny_classifier_fp32.ncnn.bin";      // run_all.ps1 产物。
+constexpr int kNcnnObjectBottomGap = 5;         // ROI 底边与红色标记顶边的间隔（与 --object-bottom-gap 5 一致）。
+// 标签列表（与 ImageFolder 子目录名一致，按字母排序）
+constexpr const char *kNcnnLabel0 = "supplies";
+constexpr const char *kNcnnLabel1 = "vehicles";
+constexpr const char *kNcnnLabel2 = "weapons";
 constexpr int kCameraRoiX = 0;                   // ROI 左上角 X，通常保持 0；摄像头画面横向偏移明显时先机械校正，再微调。
 constexpr int kCameraRoiY = 58;                  // T06入弯后OFF/单侧丢边高，ROI略前移2行多看远端，避免动态闭环看太近。
 constexpr int kCameraRoiWidth = 160;             // ROI 宽度，应与采集宽度和压缩逻辑匹配；非必要不要改。
@@ -204,13 +264,17 @@ constexpr int kStraightLeftLineMax = 3;          // 直道允许的左丢边数�
 constexpr int kStraightRightLineMax = 3;         // 直道允许的右丢边数，调大更宽松；右边界不稳定时同样先处理图像质量。
 constexpr int kSingleSideLossThreshold = 42;      // T06单侧丢边经常49-52且触发img_warn，先提高门槛减少普通弯误触发单边追踪。
 
-// 大弯道中线修正：当一侧边线连续丢失时，不再使用过期边界做左右平均，改用可靠单侧边界+赛道半宽重构中线。
-constexpr bool kCurveCenterCompEnable = false; // 诊断：U弯出口中线跳变到det=1，关掉单边补偿验证是否image.cpp补偿误判。
-constexpr int kCurveCenterLossStart = 6;          // 单侧丢线达到该值后启用大弯道单边重构；过小会误伤普通小弯，过大则大弯介入偏晚。
-constexpr int kCurveCenterOppositeLossMax = 10;   // 对侧也严重丢线时不做单边重构，避免坏图像阶段用错误边界强行补线。
-constexpr int kCurveCenterWidthTolerance = 16;    // 当前宽度偏离期望赛道宽度超过该值时，即使标记为T也按不可靠边界处理。
+// 稳定中心线重构：按边界可信度做补线，避免单侧丢线/宽度异常时中线乱飘。
+constexpr bool kCurveCenterCompEnable = true;     // 开启轻量级可信度补线；若T14显示补线方向错误，可临时置false回退到原始平均中线。
+constexpr int kCurveCenterLossStart = 4;          // 单侧丢线达到该值后提高单边重构权重；过小会误伤普通小弯，过大则大弯介入偏晚。
+constexpr int kCurveCenterOppositeLossMax = 12;   // 对侧也严重丢线时少信单侧边界，改走本帧行间预测，避免双边弱观测乱补。
+constexpr int kCurveCenterWidthTolerance = 16;    // 宽度偏离期望赛道宽度超过该值时，即使标记为T也按不可靠边界处理。
 constexpr int kCurveCenterSingleSideBias = 1;     // 单边重构时向弯内轻微偏移，防止大弯中线贴外侧；先保守取1。
-constexpr int kCurveCenterMaxRowStep = 6;         // TFT显示/控制中线相邻行最大跳变，抑制大弯远端中线突然冲出边界。
+constexpr int kCurveCenterMaxRowStep = 5;         // TFT显示/控制中线相邻行最大跳变，抑制大弯远端中线突然冲出边界。
+constexpr int kCurveCenterFrameMaxStep = 4;       // 同一行跨帧最大接纳步长，吸收抖动但允许真实弯道连续移动。
+constexpr int kCurveCenterBadFrameMaxStep = 1;    // 双边都弱或宽度明显异常时跨帧更保守，避免坏图像把控制目标带飞。
+constexpr int kCurveCenterMinValidWidth = 10;     // 小于该宽度视为不可用，防止边界夹到一起后仍参与平均。
+constexpr int kCurveCenterMaxValidWidth = 72;     // 大于该宽度视为不可用，防止扫到画面边缘造成中线跳边。
 }
 
 #endif

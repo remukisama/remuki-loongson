@@ -5,10 +5,12 @@
 #include <unistd.h>
 #include "lq_camera_ex.hpp"
 
-// 创建一个增强摄像头智能指针对象
+// 增强摄像头智能指针对象
 std::unique_ptr<lq_camera_ex> cam_ex;
-// 获取视频流
+// 循迹用下采样帧（160x120）
 cv::Mat frame;
+// 高分辨率原始帧（320x240），供 NCNN 推理等下游使用
+static cv::Mat frame_hires;
 
 char img[60][80];
 char img3[60][80];  //显示图像的数组
@@ -19,10 +21,10 @@ char img5[120][160];
 //摄像头初始化，成功返回true，失败返回false；
 bool image_cv_Init(void)
 {
-    // 摄像头格式、分辨率、帧率和设备路径统一在 car_config.hpp 中配置
+    // 使用高分辨率采集（320x240），内部下采样到 160x120 供既有循迹算法
     cam_ex = std::make_unique<lq_camera_ex>(
-        car_config::kCameraWidth,
-        car_config::kCameraHeight,
+        car_config::kCameraHiresWidth,
+        car_config::kCameraHiresHeight,
         car_config::kCameraFps,
         car_config::kCameraFormat,
         car_config::kCameraDevicePath);
@@ -51,7 +53,9 @@ bool image_cv_Init(void)
     int frame_height = cam_ex->get_camera_height();
     double frame_fps = (double)cam_ex->get_camera_fps();
     
-    printf("frame:%d*%d, fps:%3f\n", frame_width, frame_height, frame_fps);
+    printf("[CAM] hires:%d*%d, patrol:%d*%d, fps:%3f\n",
+        frame_width, frame_height,
+        car_config::kCameraWidth, car_config::kCameraHeight, frame_fps);
     sleep(1);
     return true;
 }
@@ -61,21 +65,28 @@ bool image_cv_zip(void)
 {
     if (!cam_ex) return false;
 
-    // 读取摄像头一帧原始图像
-    frame = cam_ex->get_frame_raw();
-    if (frame.empty())
+    // 读取摄像头一帧原始图像（320x240）
+    cv::Mat raw = cam_ex->get_frame_raw();
+    if (raw.empty())
     {
         std::cerr << "Error read frame" << std::endl;
         return false;
     }
 
-    // ================= 核心优化点 1：解决倒像问题 =================
-    // 将图像翻转180度（上下颠倒+左右镜像）保证透视关系正常
-    cv::flip(frame, frame, -1);
+    // 翻转 180°（上下颠倒+左右镜像）保证透视关系正常
+    cv::flip(raw, raw, -1);
 
-    // ================= 核心优化点 2：在处理前先裁切感兴趣区域(ROI) =================
-    // 只截取配置中的感兴趣区域，默认是下半部分图像
-    // 处理的数据量直接减半，极大降低嵌入式 CPU 负载
+    // ---- 保存高分辨率帧供 NCNN 推理等下游使用 ----
+    // TODO: 此处不执行任何操作，仅暴露高分辨率帧
+    // 将高分辨率帧克隆到全局变量
+    frame_hires = raw.clone();
+
+    // ---- 下采样到 160x120 供循迹算法 ----
+    cv::resize(raw, frame, cv::Size(car_config::kCameraWidth, car_config::kCameraHeight));
+
+    // ---- 以下为既有循迹预处理管线（160x120） ----
+
+    // ROI 裁切：只截取配置中的感兴趣区域，默认是下半部分图像
     cv::Mat roi_frame = frame(cv::Rect(
         car_config::kCameraRoiX,
         car_config::kCameraRoiY,
@@ -127,8 +138,7 @@ bool image_cv_zip(void)
         cv::morphologyEx(binary, binary, cv::MORPH_CLOSE, kernel);
     }
 
-    // ================= 核心优化点 3：指针快速遍历 =================
-    // 由于 roi_frame 已经是 160x60，所以行数从 0~59
+    // 指针快速遍历：roi_frame 已经是 160x60，行数 0~59
     for(int i = 0; i < car_config::kCameraRoiHeight; i++)
     {
         // 获取第 i 行首地址，跳过 OpenCV at() 安全检查，遍历速度极快
@@ -144,4 +154,9 @@ bool image_cv_zip(void)
     }
     
     return true;
+}
+
+const cv::Mat &image_cv_get_hires_frame()
+{
+    return frame_hires;
 }

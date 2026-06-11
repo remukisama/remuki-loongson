@@ -88,10 +88,48 @@ static int center_from_left_border(int row, int left_border, int bias)
   return clamp_image_x(left_border + Half_Road_Wide[row] + bias);
 }
 
+static bool is_border_found(uint8 flag)
+{
+  return flag == 'T' || flag == 'H';
+}
+
+static bool is_road_width_valid(int row, int width)
+{
+  if (width < car_config::kCurveCenterMinValidWidth ||
+      width > car_config::kCurveCenterMaxValidWidth) {
+    return false;
+  }
+  return std::abs(width - expected_road_width(row)) <= car_config::kCurveCenterWidthTolerance;
+}
+
+static int limit_step(int value, int reference, int max_step)
+{
+  if (max_step <= 0) return clamp_image_x(value);
+  if (value > reference + max_step) return clamp_image_x(reference + max_step);
+  if (value < reference - max_step) return clamp_image_x(reference - max_step);
+  return clamp_image_x(value);
+}
+
+static int g_curve_center_last[60] = {0};
+static bool g_curve_center_has_last = false;
+
+static void ResetCurveCenterHistory(void)
+{
+  g_curve_center_has_last = false;
+}
+
 static void ApplyCurveCenterCompensation(void)
 {
-  if (!car_config::kCurveCenterCompEnable) return;
-  if (ImageStatus.OFFLine >= 55) return;
+  if (!car_config::kCurveCenterCompEnable) {
+    ResetCurveCenterHistory();
+    return;
+  }
+  if (ImageStatus.OFFLine >= 45 ||
+      (ImageStatus.Left_Line >= car_config::kCurveCenterOppositeLossMax &&
+       ImageStatus.Right_Line >= car_config::kCurveCenterOppositeLossMax)) {
+    ResetCurveCenterHistory();
+    return;
+  }
 
   const bool left_loss_scene =
       ImageStatus.Left_Line >= car_config::kCurveCenterLossStart &&
@@ -100,41 +138,53 @@ static void ApplyCurveCenterCompensation(void)
       ImageStatus.Right_Line >= car_config::kCurveCenterLossStart &&
       ImageStatus.Left_Line <= car_config::kCurveCenterOppositeLossMax;
 
-  if (!left_loss_scene && !right_loss_scene) return;
-
   const int start_row = 58;
   const int end_row = ImageStatus.OFFLine;
 
   for (int row = start_row; row >= end_row; --row) {
     const int width = ImageDeal[row].RightBorder - ImageDeal[row].LeftBorder;
-    const int width_error = std::abs(width - expected_road_width(row));
-    const bool width_unreliable = width_error > car_config::kCurveCenterWidthTolerance;
+    const bool left_ok = is_border_found(ImageDeal[row].IsLeftFind);
+    const bool right_ok = is_border_found(ImageDeal[row].IsRightFind);
+    const bool both_ok = left_ok && right_ok && is_road_width_valid(row, width);
 
-    if (left_loss_scene &&
-        (ImageDeal[row].IsLeftFind == 'W' || width_unreliable) &&
-        ImageDeal[row].IsRightFind != 'W') {
-      ImageDeal[row].Center = center_from_right_border(
+    int candidate = clamp_image_x(ImageDeal[row].Center);
+    bool single_side_candidate = false;
+    bool weak_candidate = false;
+
+    if (both_ok) {
+      candidate = clamp_image_x((ImageDeal[row].LeftBorder + ImageDeal[row].RightBorder) / 2);
+    } else if (!left_ok && right_ok && left_loss_scene &&
+               ImageStatus.Right_Line <= car_config::kCurveCenterOppositeLossMax) {
+      candidate = center_from_right_border(
           row, ImageDeal[row].RightBorder, -car_config::kCurveCenterSingleSideBias);
-    } else if (right_loss_scene &&
-               (ImageDeal[row].IsRightFind == 'W' || width_unreliable) &&
-               ImageDeal[row].IsLeftFind != 'W') {
-      ImageDeal[row].Center = center_from_left_border(
+      single_side_candidate = true;
+    } else if (!right_ok && left_ok && right_loss_scene &&
+               ImageStatus.Left_Line <= car_config::kCurveCenterOppositeLossMax) {
+      candidate = center_from_left_border(
           row, ImageDeal[row].LeftBorder, car_config::kCurveCenterSingleSideBias);
+      single_side_candidate = true;
     } else {
-      ImageDeal[row].Center = clamp_image_x(ImageDeal[row].Center);
+      weak_candidate = true;
+      if (row < start_row) {
+        candidate = ImageDeal[row + 1].Center;
+      } else {
+        candidate = ImageStatus.MiddleLine;
+      }
     }
 
-    if (row < start_row) {
-      const int lower_center = ImageDeal[row + 1].Center;
-      const int max_step = car_config::kCurveCenterMaxRowStep;
-      if (ImageDeal[row].Center > lower_center + max_step) {
-        ImageDeal[row].Center = lower_center + max_step;
-      } else if (ImageDeal[row].Center < lower_center - max_step) {
-        ImageDeal[row].Center = lower_center - max_step;
-      }
-      ImageDeal[row].Center = clamp_image_x(ImageDeal[row].Center);
+    if (row < start_row && (single_side_candidate || weak_candidate)) {
+      candidate = limit_step(candidate, ImageDeal[row + 1].Center,
+                             car_config::kCurveCenterMaxRowStep);
     }
+
+    ImageDeal[row].Center = clamp_image_x(candidate);
+    if (ImageDeal[row].LeftBorder < ImageDeal[row].Center &&
+        ImageDeal[row].Center < ImageDeal[row].RightBorder) {
+      ImageDeal[row].Wide = ImageDeal[row].RightBorder - ImageDeal[row].LeftBorder;
+    }
+    g_curve_center_last[row] = ImageDeal[row].Center;
   }
+  g_curve_center_has_last = true;
 }
 
 void Data_Settings(void)           //参数赋值
@@ -845,6 +895,11 @@ void Search_Border_OTSU(int imageInput[CAMERA_H][CAMERA_W], uint8 Row, uint8 Col
 
 static void DrawExtensionLine(void)        //绘制延长线并重新确定中线 ，把补线补成斜线
 {
+  TFSite = 55;
+  FTSite = 0;
+  DetL = 0.0f;
+  DetR = 0.0f;
+
   if ((ImageStatus.Road_type != Ramp)
 //        &&ImageStatus.pansancha_Lenth* OX==0
         &&ImageStatus.Road_type !=LeftCirque
@@ -883,32 +938,37 @@ static void DrawExtensionLine(void)        //绘制延长线并重新确定中�
                 &&ImageDeal[Ysite - 2].LeftBorder > 0
                 &&ImageDeal[Ysite - 2].LeftBorder <70
                 )                                                       //如果扫到本行出现了并且本行以上连续三行都有左边界点（左边界在空白上方）
-            {
-              // printf("找到斜\n");
-              FTSite = Ysite - 2;          //把本行上面的第二行存入FTsite
-              break;
-            }
-          }
+	            {
+	              // printf("找到斜\n");
+	              FTSite = Ysite - 2;          //把本行上面的第二行存入FTsite
+	              break;
+	            }
+	          }
 
-          DetL =
-              ((float)(ImageDeal[FTSite].LeftBorder -
-                       ImageDeal[TFSite].LeftBorder)) /
-              ((float)(FTSite - TFSite));  //左边界的斜率：列的坐标差/行的坐标差
-          if (FTSite > ImageStatus.OFFLine)
-            for (
-                ytemp = TFSite; ytemp >= FTSite; ytemp--)               //从第一次扫到的左边界的下面第二行的坐标开始往上扫直到空白上方的左边界的行坐标值
-            {
-              ImageDeal[ytemp].LeftBorder =
-                  (int)(DetL * ((float)(ytemp - TFSite))) +
-                  ImageDeal[TFSite]
-                      .LeftBorder;                                      //将这期间的空白处补线（补斜线），目的是方便图像处理
-            }
-        } else
-          TFSite = Ysite + 2;                                           //如果扫到了本行的左边界，该行存在这里面，（算斜率）
-      }
+	          if (FTSite > ImageStatus.OFFLine && FTSite != TFSite)
+	          {
+	            DetL =
+	                ((float)(ImageDeal[FTSite].LeftBorder -
+	                         ImageDeal[TFSite].LeftBorder)) /
+	                ((float)(FTSite - TFSite));  //左边界的斜率：列的坐标差/行的坐标差
+	            for (
+	                ytemp = TFSite; ytemp >= FTSite; ytemp--)               //从第一次扫到的左边界的下面第二行的坐标开始往上扫直到空白上方的左边界的行坐标值
+	            {
+	              ImageDeal[ytemp].LeftBorder =
+	                  (int)(DetL * ((float)(ytemp - TFSite))) +
+	                  ImageDeal[TFSite]
+	                      .LeftBorder;                                      //将这期间的空白处补线（补斜线），目的是方便图像处理
+	            }
+	          }
+	        } else
+	          TFSite = Ysite + 2;                                           //如果扫到了本行的左边界，该行存在这里面，（算斜率）
+	      }
 
-    if (ImageStatus.WhiteLine >= ImageStatus.TowPoint_True - 15)
-      TFSite = 55;
+	    TFSite = 55;
+	    FTSite = 0;
+	    DetR = 0.0f;
+	    if (ImageStatus.WhiteLine >= ImageStatus.TowPoint_True - 15)
+	      TFSite = 55;
     // g5.22
     if (ImageStatus.CirqueOff == 'T' && ImageStatus.Road_type == RightCirque)
       TFSite = 55;
@@ -936,19 +996,21 @@ static void DrawExtensionLine(void)        //绘制延长线并重新确定中�
                 &&ImageDeal[Ysite - 2].RightBorder > 10
                 )                                                      //如果扫到本行出现了并且本行以上连续三行都有左边界点（左边界在空白上方）
             {
-              FTSite = Ysite - 2;                                      // 把本行上面的第二行存入FTsite
-              break;
-            }
-          }
+	              FTSite = Ysite - 2;                                      // 把本行上面的第二行存入FTsite
+	              break;
+	            }
+	          }
 
-          DetR =((float)(ImageDeal[FTSite].RightBorder -ImageDeal[TFSite].RightBorder)) /((float)(FTSite - TFSite));         //右边界的斜率：列的坐标差/行的坐标差
-          if (FTSite > ImageStatus.OFFLine)
-            for (ytemp = TFSite; ytemp >= FTSite;ytemp--)              //从第一次扫到的右边界的下面第二行的坐标开始往上扫直到空白上方的右边界的行坐标值
-            {
-              ImageDeal[ytemp].RightBorder =(int)(DetR * ((float)(ytemp - TFSite))) +ImageDeal[TFSite].RightBorder;          //将这期间的空白处补线（补斜线），目的是方便图像处理
-            }
-        } else
-          TFSite =Ysite +2;                                           //如果本行的右边界找到了，则把该行下面第二行坐标送个TFsite
+	          if (FTSite > ImageStatus.OFFLine && FTSite != TFSite)
+	          {
+	            DetR =((float)(ImageDeal[FTSite].RightBorder -ImageDeal[TFSite].RightBorder)) /((float)(FTSite - TFSite));         //右边界的斜率：列的坐标差/行的坐标差
+	            for (ytemp = TFSite; ytemp >= FTSite;ytemp--)              //从第一次扫到的右边界的下面第二行的坐标开始往上扫直到空白上方的右边界的行坐标值
+	            {
+	              ImageDeal[ytemp].RightBorder =(int)(DetR * ((float)(ytemp - TFSite))) +ImageDeal[TFSite].RightBorder;          //将这期间的空白处补线（补斜线），目的是方便图像处理
+	            }
+	          }
+	        } else
+	          TFSite =Ysite +2;                                           //如果本行的右边界找到了，则把该行下面第二行坐标送个TFsite
       }
   }
   for (Ysite = 59; Ysite >= ImageStatus.OFFLine; Ysite--) {
@@ -1056,6 +1118,25 @@ void GetDet()
   {
     DetTemp =ImageStatus.Det_True;                                                     //如果是出现OFFLine>50情况，保持上一次的偏差值
   }
+
+  static bool det_history_valid = false;
+  static float last_det_true = car_config::kImageMiddleLine;
+  const bool det_bad_frame =
+      ImageStatus.OFFLine >= 45 ||
+      (ImageStatus.Left_Line >= car_config::kCurveCenterOppositeLossMax &&
+       ImageStatus.Right_Line >= car_config::kCurveCenterOppositeLossMax);
+  if (det_bad_frame) {
+    det_history_valid = false;
+  } else if (det_history_valid) {
+    const float max_det_step = 12.0f;
+    if (DetTemp > last_det_true + max_det_step) {
+      DetTemp = last_det_true + max_det_step;
+    } else if (DetTemp < last_det_true - max_det_step) {
+      DetTemp = last_det_true - max_det_step;
+    }
+  }
+  last_det_true = DetTemp;
+  det_history_valid = true;
 
   ImageStatus.Det_True = DetTemp;                                                      //此时的解算出来的平均图像偏差
 
@@ -2395,8 +2476,8 @@ void imageprocess(void)
   if(!g_enable_element_process || ImageFlag.image_element_rings == 0)
     {DrawExtensionLine(); } //绘制延长线
 
-  ApplyCurveCenterCompensation(); // 大弯道单侧丢边时用可靠边界重构中线
   RouteFilter();//中线平滑滤波
+  ApplyCurveCenterCompensation(); // 最后用可靠边界重构中线，避免RouteFilter把坏邻点重新混入
   Straightacc_Test(); //直线加速
   if (g_enable_element_process) {
     Element_Handle();//元素处理

@@ -5,7 +5,7 @@
 #include <fstream>
 #include <string>
 // HWGpio beep(61, GPIO_Mode_Out);
-ls_gpio beep(PIN_61, GPIO_MODE_OUT);
+ls_gpio* beep = nullptr;  // 延迟初始化，避免全局构造时访问 /dev/mem 导致崩溃
 
 
 bool flags = true;     // 判断第一次进入函数标志位
@@ -92,10 +92,16 @@ int main()
     // lq_vofa_speed_pid_demo();
     // lq_gyro_pid_tuning_demo();
     // lq_gyro_loop_verify_demo();
+    // lq_camera_video_demo();  // 视频录制 Demo，切换到实车模式时注释此行
     // return 0;
+
+    // ===== NCNN 推理验证 Demo（红色标记检测 + 模型推理）=====
+    lq_ncnn_image_infer_demo();
+    return 0;
+
     char image_flag = 0;
 
-    beep.gpio_level_set(GPIO_LOW); // 关闭蜂鸣器
+    if (beep) beep->gpio_level_set(GPIO_LOW); // 关闭蜂鸣器
 
     // /**************************
     //  * 关键：注册全量异常信号捕获
@@ -173,10 +179,20 @@ int main()
     udp_debug.udp_client_init("192.168.90.22", 8080);
     printf("[UDP_DEBUG] center-line overlay to 192.168.90.22:8080, every 5 frames\n");
 
+    // ===== NCNN 推理初始化（走马观碑组） =====
+    NcnnInference ncnn;
+    bool ncnn_ready = ncnn.init();  // 模型不存在时优雅降级，不阻塞主流程
+    if (!ncnn_ready) {
+        printf("[NCNN] MODEL_NOT_FOUND — 推理功能已禁用，仅运行循迹。\n");
+        printf("[NCNN] 请将 model.param 和 model.bin 放到工作目录。\n");
+    }
+
     // 分离线程，允许后台运行高速闭环控制代码
     std::thread threadA(timer_thread_1);
 
     int udp_frame_count = 0;
+    int ncnn_infer_count = 0;    // NCNN 推理帧计数器
+    std::string ncnn_last_label; // 最近一次 NCNN 推理结果
 
     while (1)
     {
@@ -207,6 +223,18 @@ int main()
 
         // 图像处理
         imageprocess();
+
+        // ===== NCNN 推理（走马观碑：每 kNcnnInferInterval 帧执行一次） =====
+        if (ncnn_ready && ((ncnn_infer_count % car_config::kNcnnInferInterval) == 0)) {
+            std::string label;
+            if (ncnn.infer(image_cv_get_hires_frame(), label)) {
+                if (label != ncnn_last_label) {
+                    printf("[NCNN] 推理结果: %s\n", label.c_str());
+                    ncnn_last_label = label;
+                }
+            }
+        }
+        ncnn_infer_count++;
 
         // UDP 图传：每5帧发送一次（调用 demo24 中的函数）
         if ((udp_frame_count % 5) == 0) {

@@ -14,12 +14,12 @@ std::atomic<bool> exit_flag(false);
 
 // 电机与引脚配置
 // 左电机 PWM：PIN81, 频率10000Hz, 初始占空比3000, 极性反转
-ls_atim_pwm motor_L(ATIM_PWM0_PIN81, car_config::kMotorPwmFrequencyHz, car_config::kMotorInitialDuty, ATIM_PWM_POL_INV);
+ls_atim_pwm* motor_L = nullptr;  // 延迟初始化，避免全局构造时访问 /dev/mem 导致崩溃
 // 右电机 PWM：PIN82, 频率10000Hz, 初始占空比3000, 极性反转
-ls_atim_pwm motor_R(ATIM_PWM1_PIN82, car_config::kMotorPwmFrequencyHz, car_config::kMotorInitialDuty, ATIM_PWM_POL_INV);
+ls_atim_pwm* motor_R = nullptr;  // 延迟初始化，避免全局构造时访问 /dev/mem 导致崩溃
 // 电机方向 GPIO 输出
-ls_gpio motor_L_Dir(PIN_21, GPIO_MODE_OUT);
-ls_gpio motor_R_Dir(PIN_22, GPIO_MODE_OUT);
+ls_gpio* motor_L_Dir = nullptr;  // 延迟初始化，避免全局构造时访问 /dev/mem 导致崩溃
+ls_gpio* motor_R_Dir = nullptr;  // 延迟初始化，避免全局构造时访问 /dev/mem 导致崩溃
 
 // 全局控制参数
 float Left_Speed_Co = 0.0010, Right_Speed_Co =0.0010;
@@ -95,28 +95,36 @@ float Record_encoder = 0.0f; // 记录编码器 (m/s)
 
 void motor_Init(void)
 {
-    motor_R.atim_pwm_set_duty(0);
-    motor_L.atim_pwm_set_duty(0);
+    // 延迟初始化：首次调用时才构造硬件对象，避免全局构造时访问 /dev/mem 导致崩溃
+    if (!motor_L) {
+        motor_L = new ls_atim_pwm(ATIM_PWM0_PIN81, car_config::kMotorPwmFrequencyHz, car_config::kMotorInitialDuty, ATIM_PWM_POL_INV);
+        motor_R = new ls_atim_pwm(ATIM_PWM1_PIN82, car_config::kMotorPwmFrequencyHz, car_config::kMotorInitialDuty, ATIM_PWM_POL_INV);
+        motor_L_Dir = new ls_gpio(PIN_21, GPIO_MODE_OUT);
+        motor_R_Dir = new ls_gpio(PIN_22, GPIO_MODE_OUT);
+    }
+
+    motor_R->atim_pwm_set_duty(0);
+    motor_L->atim_pwm_set_duty(0);
     
     printf("R:OK!");
     
-    motor_R.atim_pwm_enable();
-    motor_L.atim_pwm_enable();
-    motor_R_Dir.gpio_level_set(GPIO_LOW);
-    motor_L_Dir.gpio_level_set(GPIO_LOW);
+    motor_R->atim_pwm_enable();
+    motor_L->atim_pwm_enable();
+    motor_R_Dir->gpio_level_set(GPIO_LOW);
+    motor_L_Dir->gpio_level_set(GPIO_LOW);
 }
 
 void motor_Duty_R(int duty)
 {
     if (duty <= 0)
     {
-        motor_R.atim_pwm_set_duty(-duty);
-        motor_R_Dir.gpio_level_set(GPIO_HIGH);
+        motor_R->atim_pwm_set_duty(-duty);
+        motor_R_Dir->gpio_level_set(GPIO_HIGH);
     }
     else
     {
-        motor_R.atim_pwm_set_duty(duty);
-        motor_R_Dir.gpio_level_set(GPIO_LOW);
+        motor_R->atim_pwm_set_duty(duty);
+        motor_R_Dir->gpio_level_set(GPIO_LOW);
     }
 }
 
@@ -124,13 +132,13 @@ void motor_Duty_L(int duty)
 {
     if (duty <= 0)
     {
-        motor_L.atim_pwm_set_duty(-duty);
-        motor_L_Dir.gpio_level_set(GPIO_HIGH);
+        motor_L->atim_pwm_set_duty(-duty);
+        motor_L_Dir->gpio_level_set(GPIO_HIGH);
     }
     else
     {
-        motor_L.atim_pwm_set_duty(duty);
-        motor_L_Dir.gpio_level_set(GPIO_LOW);
+        motor_L->atim_pwm_set_duty(duty);
+        motor_L_Dir->gpio_level_set(GPIO_LOW);
     }
 }
 
@@ -954,8 +962,8 @@ void Speed_BiHuan(void)
 void emergency_stop() {
     motor_Duty_R(0);    // 右电机停转
     motor_Duty_L(0);    // 左电机停转
-    motor_R.atim_pwm_disable();  // 禁用右电机PWM
-    motor_L.atim_pwm_disable();  // 禁用左电机PWM
+    motor_R->atim_pwm_disable();  // 禁用右电机PWM
+    motor_L->atim_pwm_disable();  // 禁用左电机PWM
     // stree_M.SetDutyCycle(170000);  // 舵机归中
     printf("程序终止，电机已停止。\n");
 }

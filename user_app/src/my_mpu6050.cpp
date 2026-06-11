@@ -5,17 +5,21 @@
 #include <unistd.h>
 
 MyMpu6050::MyMpu6050() {
-    mpu = new lq_i2c_mpu6050(MPU6050_DEV_NAME);
+    mpu = nullptr;  // 延迟到 init() 再创建，避免全局构造时打开不存在的 I2C 设备导致崩溃
     gyro_z_bias_raw = 0.0f;
 }
 
 MyMpu6050::~MyMpu6050() {
     if (mpu) {
         delete mpu;
+        mpu = nullptr;
     }
 }
 
 bool MyMpu6050::init() {
+    if (!mpu) {
+        mpu = new lq_i2c_mpu6050(MPU6050_DEV_NAME);
+    }
     uint8_t id = mpu->get_mpu6050_id();
     // MPU6050 默认 Device ID 是 0x68
     if (id == 0x68) {
@@ -42,6 +46,8 @@ bool MyMpu6050::init() {
 }
 
 bool MyMpu6050::read_processed_data(Mpu6050Data& data) {
+    if (!mpu) return false;
+
     int16_t ax, ay, az, gx, gy, gz;
 
     // 1. 读取 MPU6050 原始 int16_t 数据

@@ -3,8 +3,8 @@
 #include <iostream>
 
 
-ls_gpio KO_O(PIN_44, GPIO_MODE_IN);
-ls_gpio KO_1(PIN_45, GPIO_MODE_IN);
+ls_gpio* KO_O = nullptr;  // 延迟初始化，避免全局构造时访问 /dev/mem 导致崩溃
+ls_gpio* KO_1 = nullptr;  // 延迟初始化，避免全局构造时访问 /dev/mem 导致崩溃
 
 /******************************/
 char KO_O_flag,KO_1_flag;
@@ -53,8 +53,8 @@ void Key_Get(void)
     KO_O_ZT_last=KO_O_ZT;
     KO_1_ZT_last=KO_1_ZT;
 
-    KO_O_ZT=KO_O.gpio_level_get();
-    KO_1_ZT=KO_1.gpio_level_get();
+    KO_O_ZT = KO_O->gpio_level_get();
+    KO_1_ZT = KO_1->gpio_level_get();
 
     
     if(KO_O_ZT && KO_O_ZT_last==0)  KO_O_flag=1;

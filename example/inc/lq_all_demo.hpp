@@ -27,6 +27,9 @@ void lq_car_steer_debug_demo(void); // 30. 查偏向不出弯原因调试连线
 void lq_pos_pid_tuning_demo(void);  // 31. 联合调参位置环和角速度环
 void lq_gyro_loop_verify_demo(void); // 29. 角速度环输出差速验证Demo
 void lq_camera_capture_demo(void); // 摄像头拍照测试
+void lq_camera_video_demo(void);   // 摄像头视频录制测试
+void lq_ncnn_infer_demo(void);     // NCNN推理验证Demo（红色标记检测+模型推理）
+void lq_ncnn_image_infer_demo(void); // NCNN单图推理测试（读取test.jpg）
 void lq_parameter_step_tuning_demo(void); // 33. PARAMETER_TUNING_METHODS.md 一体化分步调参Demo
 void lq_parameter_step_interactive_demo(void); // 33. 交互式分步调试入口（输入编号运行对应测试）
 int lq_left_ring_exit_recommend_demo(void); // 34. 左环岛出环防兜圈专项Demo

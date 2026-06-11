@@ -1,4 +1,5 @@
 # Build outputs
+build*/
 main/build*/
 main/.cache/
 driver/**/build/
@@ -33,3 +34,8 @@ Thumbs.db
 # MATLAB autotune runtime files
 lq_autotune_stage.txt
 *.autotune_bak
+
+# IDE and tool directories
+.codegraph/
+.reasonix/
+.vscode/
