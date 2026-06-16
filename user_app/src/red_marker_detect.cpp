@@ -61,6 +61,7 @@ static RedMarker find_bottom_red_band_marker(const cv::Mat &bgr, float min_red_a
     cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernel, cv::Point(-1,-1), 1);
 
     int h = mask.rows, w = mask.cols;
+    const float required_area = std::max(min_red_area, (float)(h * w) * kRedAreaRatioLow);
     int min_run   = std::max(12, (int)std::round(w * 0.06));
     int min_y     = (int)std::round(h * 0.55);
 
@@ -118,7 +119,7 @@ static RedMarker find_bottom_red_band_marker(const cv::Mat &bgr, float min_red_a
     int band_w = x1 - x0 + 1;
     int band_h = y1 - y0 + 1;
     float area = (float)(band_w * band_h);
-    if (area < min_red_area) return {};
+    if (area < required_area) return {};
 
     float aspect_ratio = (float)band_w / std::max(1.0f, (float)band_h);
     if (aspect_ratio < kRedAspectLow || aspect_ratio > kRedAspectHigh) return {};

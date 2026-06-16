@@ -1,0 +1,21 @@
+开源库地址：https://gitee.com/lq-tech/Loongson_2k300_301_Library
+
+NCNN模型推理资料链接: https://pan.baidu.com/s/1Yz7P73Ag9T31zfgbtxE6cA 提取码: tihd
+
+龙邱UDP_串口调试助手_LoongLiteTool（推荐龙芯图传调试使用 ）
+链接: https://pan.baidu.com/s/1U47VfqdUgdESQEtqcL7plg 提取码: lqkj
+
+久久派升级资料
+链接: https://pan.baidu.com/s/1rmMKmugk7zG4tMu-zrTjKA?pwd=kbm2 提取码: kbm2
+
+龙芯 2k301 板卡系统恢复资料
+链接: https://pan.baidu.com/s/1qrdpp2M4RvcMFNsJYyTi7w 提取码: sq1e
+
+虚拟机
+链接: https://pan.baidu.com/s/1Dj8XznNY9I9UAIukW3UugQ?pwd=h9pu 提取码: h9pu
+
+第21届全国大学生智能车竞赛---走马观碑组技术手册
+https://blog.csdn.net/longqiu_LQ/article/details/156275409
+
+第21届智能汽车竞赛龙芯免费芯片申请函模板
+https://pan.baidu.com/s/5L6d9CGmWGV-93EjFTYcudQ

@@ -6,6 +6,7 @@
 
 #include "car_config.hpp"
 #include "encoder.hpp"
+#include "gpio_protect_heartbeat.hpp"
 #include "image.hpp"
 #include "image_cv.hpp"
 #include "key.hpp"

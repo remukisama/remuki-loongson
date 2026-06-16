@@ -439,9 +439,14 @@ void speed_dif_cascade()
         (std::fabs(raw_steer_error) > car_config::kExtremeTurnRawThreshold) ||
         (std::fabs(steer_error) > car_config::kExtremeTurnFiltThreshold);
     const int single_side_loss = std::max(ImageStatus.Left_Line, ImageStatus.Right_Line);
+    const int side_loss_delta =
+        static_cast<int>(ImageStatus.Left_Line) -
+        static_cast<int>(ImageStatus.Right_Line);
     static int u_turn_hold_frames = 0;
+    static int u_turn_forced_dir = 0; // +1: left U-turn, -1: right U-turn.
     if (full_loss_non_ring || ring_just_finished) {
         u_turn_hold_frames = 0;
+        u_turn_forced_dir = 0;
     }
     const bool u_turn_raw_filt_conflict =
         (std::fabs(control_raw_steer_error) >=
@@ -449,7 +454,7 @@ void speed_dif_cascade()
         (std::fabs(steer_error) >=
              car_config::kUTurnRawFiltConflictFiltThreshold) &&
         (control_raw_steer_error * steer_error < 0.0f);
-    if (u_turn_raw_filt_conflict) {
+    if (u_turn_raw_filt_conflict && u_turn_forced_dir == 0) {
         u_turn_hold_frames = 0;
     }
     bool u_turn_prepare =
@@ -459,10 +464,28 @@ void speed_dif_cascade()
         single_side_loss >= car_config::kUTurnSingleSideLossThreshold &&
         (std::fabs(raw_steer_error) >= car_config::kUTurnRawThreshold ||
          std::fabs(steer_error) >= car_config::kUTurnRawThreshold);
-    if (u_turn_prepare) {
+    const bool u_turn_exit_centered =
+        !u_turn_prepare &&
+        u_turn_forced_dir != 0 &&
+        single_side_loss <= car_config::kUTurnReleaseSingleSideLossMax &&
+        std::fabs(control_raw_steer_error) <= car_config::kUTurnReleaseRawThreshold &&
+        std::fabs(steer_error) <= car_config::kUTurnReleaseFiltThreshold;
+    if (u_turn_exit_centered) {
+        u_turn_hold_frames = 0;
+        u_turn_forced_dir = 0;
+    } else if (u_turn_prepare) {
         u_turn_hold_frames = car_config::kUTurnHoldFrames;
+        if (side_loss_delta >= car_config::kUTurnSideLossDominance) {
+            u_turn_forced_dir = 1;
+        } else if (side_loss_delta <= -car_config::kUTurnSideLossDominance) {
+            u_turn_forced_dir = -1;
+        } else if (u_turn_forced_dir == 0 && std::fabs(control_raw_steer_error) > 0.1f) {
+            u_turn_forced_dir = (control_raw_steer_error > 0.0f) ? 1 : -1;
+        }
     } else if (u_turn_hold_frames > 0) {
         --u_turn_hold_frames;
+    } else {
+        u_turn_forced_dir = 0;
     }
     bool u_turn_risk = u_turn_prepare || (u_turn_hold_frames > 0);
     bool curve_entry_brake_prepare =
@@ -522,17 +545,47 @@ void speed_dif_cascade()
         static int opposing_gyro_recovery_frames = 0;
         dbg_imu_ok = 1;
         dbg_real_gyro_z = imu_data.gyro_z;
-        
+        const float filtered_gyro_before_update = cascade_ctrl.last_filtered_gyro_z();
+	        
         if (abs(steer_error) < DEAD_BAND) {
-            // 死区内直行时也要把旧方向的角速度目标收回，否则 S 弯换向会慢半拍。
-            delta_target = -last_target_gyro_z;
-            if (delta_target > car_config::kTargetGyroDeadbandReturnDeltaDps) {
-                delta_target = car_config::kTargetGyroDeadbandReturnDeltaDps;
+            const bool straight_gyro_damping =
+                !ring_now &&
+                ImageFlag.image_element_rings == 0 &&
+                (ImageStatus.Road_type == Normol ||
+                 ImageStatus.Road_type == Straight ||
+                 ImageStatus.Road_type == Cross) &&
+                std::fabs(control_raw_steer_error) <= car_config::kSteerDeadBandStraight &&
+                std::fabs(steer_error) <= car_config::kSteerDeadBandStraight &&
+                std::fabs(filtered_gyro_before_update) >=
+                    car_config::kStraightGyroDampingThresholdDps;
+            if (straight_gyro_damping) {
+                target_gyro_z =
+                    -filtered_gyro_before_update * car_config::kStraightGyroDampingGain;
+                if (target_gyro_z > car_config::kStraightGyroDampingLimitDps) {
+                    target_gyro_z = car_config::kStraightGyroDampingLimitDps;
+                }
+                if (target_gyro_z < -car_config::kStraightGyroDampingLimitDps) {
+                    target_gyro_z = -car_config::kStraightGyroDampingLimitDps;
+                }
+                delta_target = target_gyro_z - last_target_gyro_z;
+                if (delta_target > car_config::kStraightGyroDampingMaxDeltaDps) {
+                    delta_target = car_config::kStraightGyroDampingMaxDeltaDps;
+                }
+                if (delta_target < -car_config::kStraightGyroDampingMaxDeltaDps) {
+                    delta_target = -car_config::kStraightGyroDampingMaxDeltaDps;
+                }
+                target_gyro_z = last_target_gyro_z + delta_target;
+            } else {
+                // 死区内直行时也要把旧方向的角速度目标收回，否则 S 弯换向会慢半拍。
+                delta_target = -last_target_gyro_z;
+                if (delta_target > car_config::kTargetGyroDeadbandReturnDeltaDps) {
+                    delta_target = car_config::kTargetGyroDeadbandReturnDeltaDps;
+                }
+                if (delta_target < -car_config::kTargetGyroDeadbandReturnDeltaDps) {
+                    delta_target = -car_config::kTargetGyroDeadbandReturnDeltaDps;
+                }
+                target_gyro_z = last_target_gyro_z + delta_target;
             }
-            if (delta_target < -car_config::kTargetGyroDeadbandReturnDeltaDps) {
-                delta_target = -car_config::kTargetGyroDeadbandReturnDeltaDps;
-            }
-            target_gyro_z = last_target_gyro_z + delta_target;
             if (std::fabs(target_gyro_z) < car_config::kGyroDeadBandDps) {
                 target_gyro_z = 0.0f;
                 delta_target = -last_target_gyro_z;
@@ -580,7 +633,17 @@ void speed_dif_cascade()
                 visual_pd_out = std::copysign(car_config::kUTurnGyroLimitDps,
                                               visual_pd_out);
             }
-            if (u_turn_risk &&
+            if (u_turn_risk && u_turn_forced_dir != 0) {
+                float forced_abs = std::fabs(visual_pd_out);
+                if (forced_abs < car_config::kUTurnForcedGyroDps) {
+                    forced_abs = car_config::kUTurnForcedGyroDps;
+                }
+                if (forced_abs > car_config::kUTurnGyroLimitDps) {
+                    forced_abs = car_config::kUTurnGyroLimitDps;
+                }
+                visual_pd_out = std::copysign(forced_abs,
+                                              static_cast<float>(u_turn_forced_dir));
+            } else if (u_turn_risk &&
                 !u_turn_raw_filt_conflict &&
                 std::fabs(visual_pd_out) < car_config::kUTurnForcedGyroDps) {
                 const float u_turn_sign_source =
@@ -627,7 +690,6 @@ void speed_dif_cascade()
             if (delta_target > max_delta_target) delta_target = max_delta_target;
             if (delta_target < -max_delta_target) delta_target = -max_delta_target;
             target_gyro_z = last_target_gyro_z + delta_target;
-            const float filtered_gyro_before_update = cascade_ctrl.last_filtered_gyro_z();
             bool opposing_gyro_limited = false;
             if (s_curve_active &&
                 target_gyro_z * filtered_gyro_before_update < 0.0f &&
@@ -824,7 +886,7 @@ void speed_dif_cascade()
         debug_print_count++;
         if (debug_print_count >= car_config::kSteerDebugPrintDivider) {
             debug_print_count = 0;
-            printf("[steer] det:%d mid:%d raw:%.1f filt:%.1f dE:%.1f pd:%.1f tgt:%.1f cmd:%.1f gz:%.1f gf:%.1f ge:%.1f dT:%.1f d0:%.1f diff:%.1f cap:%d max:%.1f goal:%.1f L:%.1f R:%.1f encL:%.1f encR:%.1f eL:%.1f eR:%.1f dt:%.3f imu:%d db:%d\n",
+            printf("[steer] det:%d mid:%d raw:%.1f filt:%.1f dE:%.1f pd:%.1f tgt:%.1f cmd:%.1f gz:%.1f gf:%.1f ge:%.1f dT:%.1f d0:%.1f diff:%.1f cap:%d max:%.1f goal:%.1f L:%.1f R:%.1f encL:%.1f encR:%.1f eL:%.1f eR:%.1f dt:%.3f imu:%d db:%d off:%d ll:%d rl:%d ut:%d ud:%d\n",
                    ImageStatus.Det_True,
                    ImageStatus.MiddleLine,
                    raw_steer_error,
@@ -850,7 +912,12 @@ void speed_dif_cascade()
                    dbg_speed_err_r,
                    dbg_dt,
                    dbg_imu_ok,
-                   dbg_deadband_active);
+                   dbg_deadband_active,
+                   ImageStatus.OFFLine,
+                   ImageStatus.Left_Line,
+                   ImageStatus.Right_Line,
+                   u_turn_risk ? 1 : 0,
+                   u_turn_forced_dir);
         }
     }
 }
@@ -927,8 +994,78 @@ void Speed_BiHuan(void)
     Car_distance();         // 编码器记录路程
     Car_Speed_Contrl();     // 变速控制，更新基础速度Speed_Goal
 
+    static float ramped_speed_goal = 0.0f;
+    static auto last_speed_ramp_time = std::chrono::steady_clock::now();
+    auto speed_ramp_now = std::chrono::steady_clock::now();
+    std::chrono::duration<float> speed_ramp_elapsed = speed_ramp_now - last_speed_ramp_time;
+    float speed_ramp_dt = speed_ramp_elapsed.count();
+    last_speed_ramp_time = speed_ramp_now;
+    if (speed_ramp_dt <= 0.0001f || speed_ramp_dt > 0.05f) {
+        speed_ramp_dt = 0.005f;
+    }
+
+    const float desired_speed_goal = Speed_Goal;
+    if (desired_speed_goal <= 0.0f) {
+        ramped_speed_goal = 0.0f;
+        Speed_Goal = 0.0f;
+    } else {
+        const float speed_goal_delta = desired_speed_goal - ramped_speed_goal;
+        const float speed_goal_limit =
+            (speed_goal_delta > 0.0f) ?
+            car_config::kSpeedTargetAccelLimit :
+            car_config::kSpeedTargetDecelLimit;
+        const float speed_goal_max_step = speed_goal_limit * speed_ramp_dt;
+        if (speed_goal_delta > speed_goal_max_step) {
+            ramped_speed_goal += speed_goal_max_step;
+        } else if (speed_goal_delta < -speed_goal_max_step) {
+            ramped_speed_goal -= speed_goal_max_step;
+        } else {
+            ramped_speed_goal = desired_speed_goal;
+        }
+        if (ramped_speed_goal < 0.0f) ramped_speed_goal = 0.0f;
+        Speed_Goal = ramped_speed_goal;
+    }
+
     // 【替换为】：基于陀螺仪的角度/角速度/速度的三串级差速控制
     speed_dif_cascade();     
+
+    // 外环弯道/丢线保护可能在 speed_dif_cascade() 内把目标速度直接压低。
+    // 同步斜坡状态，避免保护解除时从旧的高速记忆值瞬间跳回去。
+    if (Speed_Goal < ramped_speed_goal) {
+        ramped_speed_goal = Speed_Goal;
+    }
+
+    const bool reverse_feedback_l =
+        (Speed_Goal_l > 0.20f) && (speed_encoder_L < -0.60f);
+    const bool reverse_feedback_r =
+        (Speed_Goal_r > 0.20f) && (speed_encoder_R < -0.60f);
+    if (reverse_feedback_l || reverse_feedback_r) {
+        static int speed_guard_warn_count = 0;
+        const float guard_goal_l = Speed_Goal_l;
+        const float guard_goal_r = Speed_Goal_r;
+        Speed_Goal = 0.0f;
+        Speed_Goal_l = 0.0f;
+        Speed_Goal_r = 0.0f;
+        ramped_speed_goal = 0.0f;
+        speed_out_l = 0.0f;
+        speed_out_r = 0.0f;
+        speed_last_erro_L = 0.0f;
+        speed_last_erro_R = 0.0f;
+        if (motor_L && motor_R) {
+            motor_Duty_L(0);
+            motor_Duty_R(0);
+        }
+        if (speed_guard_warn_count < 8) {
+            ++speed_guard_warn_count;
+            printf("[SPEED_GUARD] reverse encoder feedback, stop output. "
+                   "goalL:%.2f goalR:%.2f encL:%.2f encR:%.2f\n",
+                   guard_goal_l,
+                   guard_goal_r,
+                   speed_encoder_L,
+                   speed_encoder_R);
+        }
+        return;
+    }
 
     Speed_PID_L();           // 【最内环】：左右轮速度环PI闭环运算
     Speed_PID_R();           // 【最内环】：左右轮速度环PI闭环运算
@@ -960,10 +1097,32 @@ void Speed_BiHuan(void)
 
 // 电机紧急停止函数
 void emergency_stop() {
-    motor_Duty_R(0);    // 右电机停转
-    motor_Duty_L(0);    // 左电机停转
-    motor_R->atim_pwm_disable();  // 禁用右电机PWM
-    motor_L->atim_pwm_disable();  // 禁用左电机PWM
+    Speed_Goal = 0.0f;
+    Speed_Goal_l = 0.0f;
+    Speed_Goal_r = 0.0f;
+    speed_out_r = 0.0f;
+    speed_out_l = 0.0f;
+    speed_last_erro_R = 0.0f;
+    speed_last_erro_L = 0.0f;
+
+    if (motor_R && motor_L) {
+        motor_Duty_R(0);    // 右电机停转
+        motor_Duty_L(0);    // 左电机停转
+    }
+    if (motor_R_Dir) motor_R_Dir->gpio_level_set(GPIO_LOW);
+    if (motor_L_Dir) motor_L_Dir->gpio_level_set(GPIO_LOW);
+
+    if (motor_R && motor_L) {
+        if (car_config::kMotorStopKeepPwmEnabled) {
+            motor_R->atim_pwm_enable();
+            motor_L->atim_pwm_enable();
+            motor_R->atim_pwm_set_duty(0);
+            motor_L->atim_pwm_set_duty(0);
+        } else {
+            motor_R->atim_pwm_disable();
+            motor_L->atim_pwm_disable();
+        }
+    }
     // stree_M.SetDutyCycle(170000);  // 舵机归中
     printf("程序终止，电机已停止。\n");
 }
@@ -972,5 +1131,6 @@ void emergency_stop() {
 void signal_handler(int signum) {
     exit_flag = true;    // 触发子线程退出
     emergency_stop();    // 立即停止电机
+    gpio_protect_heartbeat_deinit();
     exit(signum);        // 终止进程
 }

@@ -44,19 +44,25 @@ static struct i2c_driver i2c_drv = {
  ********************************************************************************/
 int device_init(struct ls_i2c_dev *dev)
 {
+    int id;
+
     // 参数校验
     if (dev == NULL) {
         pr_err("%s: device_init dev is null\n", DEVICE_NAME);
-        return -1;
+        return -EINVAL;
     }
     // 获取陀螺仪 ID
-    if (lq_i2c_mpu6050_get_id(dev) == MPU6050_DEV_ADDR) {
-        // 初始化MPU6050设备
-        if (lq_i2c_mpu6050_init(dev) != 0) {
-            return -1;
-        }
-        printk("%s: init success, addr=0x%x\n", DEVICE_NAME, MPU6050_DEV_ADDR);
+    id = lq_i2c_mpu6050_get_id(dev);
+    if (id != MPU6050_DEV_ADDR) {
+        pr_err("%s: device id mismatch, read=0x%02x, expected=0x%02x\n",
+               DEVICE_NAME, id, MPU6050_DEV_ADDR);
+        return -ENODEV;
     }
+    // 初始化MPU6050设备
+    if (lq_i2c_mpu6050_init(dev) != 0) {
+        return -EIO;
+    }
+    printk("%s: init success, addr=0x%x\n", DEVICE_NAME, MPU6050_DEV_ADDR);
     return 0;
 }
 
@@ -341,8 +347,7 @@ int i2c_remove(struct i2c_client *c)
 static int __init i2c_drv_init(void)
 {
     // IIC 设备驱动注册入口函数
-    i2c_add_driver(&i2c_drv);
-    return 0;
+    return i2c_add_driver(&i2c_drv);
 }
 
 /********************************************************************************

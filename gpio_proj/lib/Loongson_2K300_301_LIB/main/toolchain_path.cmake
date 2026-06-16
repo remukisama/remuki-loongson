@@ -1,0 +1,1 @@
+    set(CMAKE_TOOLCHAIN_PATH "/home/linux/LQ_Project/Loongson_2k300_301_Library_gitee/Loongson_2K300_301_LIB/tools/loongson-gnu-toolchain-8.3-x86_64-loongarch64-linux-gnu-rc1.6" CACHE PATH "Loongson toolchain path" FORCE)

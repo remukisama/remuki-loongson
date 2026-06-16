@@ -1116,7 +1116,14 @@ void GetDet()
   } 
   else
   {
-    DetTemp =ImageStatus.Det_True;                                                     //如果是出现OFFLine>50情况，保持上一次的偏差值
+    if (ImageStatus.OFFLine >= car_config::kBadVisionCenterHoldOfflineThreshold) {
+      DetTemp = car_config::kImageMiddleLine;
+      if (!g_enable_element_process && ImageFlag.image_element_rings == 0) {
+        ImageStatus.Road_type = Cross;
+      }
+    } else {
+      DetTemp = ImageStatus.Det_True;                                                   // 可视距离很短但未全丢时，暂时保持上一帧偏差
+    }
   }
 
   static bool det_history_valid = false;
@@ -1127,16 +1134,18 @@ void GetDet()
        ImageStatus.Right_Line >= car_config::kCurveCenterOppositeLossMax);
   if (det_bad_frame) {
     det_history_valid = false;
-  } else if (det_history_valid) {
-    const float max_det_step = 12.0f;
-    if (DetTemp > last_det_true + max_det_step) {
-      DetTemp = last_det_true + max_det_step;
-    } else if (DetTemp < last_det_true - max_det_step) {
-      DetTemp = last_det_true - max_det_step;
+  } else {
+    if (det_history_valid) {
+      const float max_det_step = 12.0f;
+      if (DetTemp > last_det_true + max_det_step) {
+        DetTemp = last_det_true + max_det_step;
+      } else if (DetTemp < last_det_true - max_det_step) {
+        DetTemp = last_det_true - max_det_step;
+      }
     }
+    last_det_true = DetTemp;
+    det_history_valid = true;
   }
-  last_det_true = DetTemp;
-  det_history_valid = true;
 
   ImageStatus.Det_True = DetTemp;                                                      //此时的解算出来的平均图像偏差
 

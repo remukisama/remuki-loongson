@@ -6,10 +6,12 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <numeric>
 #include <string>
 #include <thread>
@@ -1127,6 +1129,75 @@ static void show_element_tft_frame(const char *tag,
     lq_tft18_drv_road_color(kElementDebugTftX, kElementDebugTftY, tft_frame);
 }
 
+class AsyncTftFrameWorker {
+public:
+    explicit AsyncTftFrameWorker(const char *tag) : tag_(tag ? tag : "TFT") {}
+    ~AsyncTftFrameWorker() { stop(); }
+
+    bool start() {
+        if (running_) return true;
+        if (!init_element_tft_once(tag_)) return false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = false;
+            has_frame_ = false;
+            latest_frame_.release();
+        }
+        worker_ = std::thread(&AsyncTftFrameWorker::loop, this);
+        running_ = true;
+        printf("[%s_TFT] async worker started: latest-frame mode, vision loop will not wait for TFT flush.\n", tag_);
+        return true;
+    }
+
+    void submit(const cv::Mat &frame) {
+        if (!running_ || frame.empty()) return;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            latest_frame_ = frame.clone();
+            has_frame_ = true;
+        }
+        cv_.notify_one();
+    }
+
+    void stop() {
+        if (!running_) return;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        cv_.notify_one();
+        if (worker_.joinable()) worker_.join();
+        running_ = false;
+        printf("[%s_TFT] async worker stopped.\n", tag_);
+    }
+
+private:
+    void loop() {
+        while (true) {
+            cv::Mat frame;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [this]() { return stop_ || has_frame_; });
+                if (stop_ && !has_frame_) break;
+                frame = latest_frame_;
+                has_frame_ = false;
+            }
+            if (!frame.empty()) {
+                lq_tft18_drv_road_color(kElementDebugTftX, kElementDebugTftY, frame);
+            }
+        }
+    }
+
+    const char *tag_;
+    std::thread worker_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    cv::Mat latest_frame_;
+    bool has_frame_ = false;
+    bool stop_ = false;
+    bool running_ = false;
+};
+
 // -----------------------------------------------------------------------------
 // Step 0: 调参前准备，打印配置快照，不动电机。
 // -----------------------------------------------------------------------------
@@ -2241,7 +2312,11 @@ int test_08p_push_line_patrol_tft(int seconds = 120) {
     printf("[运行] 手推模式：电机强制关闭。TFT18 实时显示补线画面+FPS。seconds=%d\n", seconds);
     printf("[观察] 直道：左右边界平行、中线居中；弯道：补线边界连续、无大片OFF；FPS>=140 则正常。\n");
 
-    init_element_tft_once("T08P");
+    AsyncTftFrameWorker tft_worker("T08P");
+    const bool tft_ready = tft_worker.start();
+    if (!tft_ready) {
+        printf("[T08P_TFT] disabled or init failed; continuing vision test without TFT refresh.\n");
+    }
     if (!ensure_camera_ready()) return -1;
     init_control_for_motor_tests();
     g_enable_element_process = false;
@@ -2284,9 +2359,10 @@ int test_08p_push_line_patrol_tft(int seconds = 120) {
 
         if (std::chrono::duration_cast<std::chrono::seconds>(now - start).count() >= seconds) break;
 
-        // 每帧都刷新 TFT
-        cv::Mat tft_frame = make_push_tft_frame(fps, frame_count);
-        lq_tft18_drv_road_color(kElementDebugTftX, kElementDebugTftY, tft_frame);
+        if (tft_ready) {
+            cv::Mat tft_frame = make_push_tft_frame(fps, frame_count);
+            tft_worker.submit(tft_frame);
+        }
 
         samples++;
         bool severe_img_bad = (ImageStatus.OFFLine > 18 ||
@@ -2297,6 +2373,7 @@ int test_08p_push_line_patrol_tft(int seconds = 120) {
         usleep(2 * 1000);
     }
 
+    tft_worker.stop();
     safe_stop_and_print("T08P");
     exit_flag = false;
 

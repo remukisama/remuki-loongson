@@ -73,6 +73,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 # 连接库
 target_link_libraries(${PROJECT_NAME} PUBLIC
     pthread
+    rt
     lqncnn
     lq_camera_ex
     ${NCNN_LDFLAGS}

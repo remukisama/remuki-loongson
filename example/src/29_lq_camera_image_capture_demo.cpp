@@ -8,7 +8,7 @@ void lq_camera_capture_demo(void)
     std::cout << "====== 龙芯2K0300/2K301 摄像头基础拍照测试 ======" << std::endl;
 
     // 使用了 LQ_CAMERA_0CPU_MJPG 降低CPU占用
-    lq_camera_ex camera(160, 120, 180, LQ_CAMERA_0CPU_MJPG);
+    lq_camera_ex camera(320, 240, 180, LQ_CAMERA_0CPU_MJPG);
 
     std::cout << "正在启动摄像头采集..." << std::endl;
     if (camera.start_collect() != 0)
@@ -57,7 +57,7 @@ void lq_camera_capture_demo(void)
             // 如果摄像头物理安放是倒置的，使用 cv::flip 旋转 180 度 (上下和左右都翻转)
             cv::flip(frame, frame, -1);
 
-            std::string filename = "test_image_" + std::to_string(img_index++) + "_160x120.jpg";
+            std::string filename = "test_image_" + std::to_string(img_index++) + "_320x240.jpg";
             // 写入本地保存为jpg格式
             if (cv::imwrite(filename, frame))
             {

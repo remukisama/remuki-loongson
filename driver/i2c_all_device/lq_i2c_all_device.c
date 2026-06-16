@@ -3,6 +3,11 @@
 #include <linux/i2c.h>
 #include <linux/string.h>
 #include <linux/errno.h>
+#include <linux/delay.h>
+#include <linux/err.h>
+
+#define I2C_PROBE_RETRIES          5
+#define I2C_PROBE_RETRY_DELAY_MS   100
 
 // 定义设备信息结构体
 struct i2c_dev_info {
@@ -23,14 +28,54 @@ static const struct i2c_dev_info I2C_DEVS[] = {
 static struct i2c_client *clients[8] = {NULL};
 static int client_count = 0;
 
+static struct i2c_client *lq_i2c_probe_device_with_retry(
+    struct i2c_adapter *adapter,
+    const struct i2c_dev_info *dev_info)
+{
+    struct i2c_board_info i2c_board_info;
+    struct i2c_client *client = NULL;
+    unsigned short addr_list[2];
+    int retry;
+
+    addr_list[0] = dev_info->addr;
+    addr_list[1] = I2C_CLIENT_END;
+
+    for (retry = 0; retry < I2C_PROBE_RETRIES; retry++) {
+        memset(&i2c_board_info, 0, sizeof(i2c_board_info));
+        strlcpy(i2c_board_info.type, dev_info->name, I2C_NAME_SIZE);
+
+        client = i2c_new_probed_device(adapter, &i2c_board_info, addr_list, NULL);
+        if (client && !IS_ERR(client))
+            return client;
+
+        if (IS_ERR(client)) {
+            printk(KERN_WARNING
+                   "LQ_I2C_ALL_DEV: probe device %s addr=0x%02x failed, ret=%ld, retry=%d/%d\n",
+                   dev_info->name, dev_info->addr, PTR_ERR(client),
+                   retry + 1, I2C_PROBE_RETRIES);
+            client = NULL;
+        } else {
+            printk(KERN_WARNING
+                   "LQ_I2C_ALL_DEV: probe device %s addr=0x%02x failed, retry=%d/%d\n",
+                   dev_info->name, dev_info->addr,
+                   retry + 1, I2C_PROBE_RETRIES);
+        }
+
+        if (retry + 1 < I2C_PROBE_RETRIES)
+            msleep(I2C_PROBE_RETRY_DELAY_MS);
+    }
+
+    return NULL;
+}
+
 /********************************************************************************
  * @brief   加载函数
  ********************************************************************************/
 static int __init dev_init(void)
 {
     struct i2c_adapter *adapter = NULL;
-    struct i2c_board_info i2c_board_info;
     int i = 0;
+    client_count = 0;
     // 获取I2C总线适配器（当前使用第1个I2C总线适配器）
     adapter = i2c_get_adapter(1);
     if (!adapter)
@@ -41,21 +86,8 @@ static int __init dev_init(void)
     printk("LQ_I2C_ALL_DEV init function, start probe multi devices\n");
     // 遍历所有设备名称
     while (I2C_DEVS[i].name != NULL && client_count < ARRAY_SIZE(clients)) {
-        unsigned short addr_list[2];    // 单个设备的地址列表
-        // 清空设备信息结构体
-        memset(&i2c_board_info, 0, sizeof(struct i2c_board_info));
-        // 设置当前设备名（匹配对应驱动端的name）
-        strlcpy(i2c_board_info.type, I2C_DEVS[i].name, I2C_NAME_SIZE);
-        // 构建单个设备的地址列表
-        addr_list[0] = I2C_DEVS[i].addr;
-        addr_list[1] = I2C_CLIENT_END;
-        // 探测并注册该设备名对应的I2C设备（遍历所有地址）
-        clients[client_count] = i2c_new_probed_device(
-            adapter,            // I2C总线适配器
-            &i2c_board_info,    // 设备信息
-            addr_list,          // 要探测的设备地址列表
-            NULL                // 自定义匹配函数(NULL表示默认规则)
-        );
+        // 探测并注册该设备名对应的I2C设备。部分板卡上I2C刚释放后首次探测会短暂失败，需重试。
+        clients[client_count] = lq_i2c_probe_device_with_retry(adapter, &I2C_DEVS[i]);
         // 检查注册结果
         if (clients[client_count]) {
             printk(KERN_INFO "LQ_I2C_ALL_DEV: register device %s success, addr=0x%02x!\n", I2C_DEVS[i].name, clients[client_count]->addr);

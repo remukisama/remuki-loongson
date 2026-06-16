@@ -1,0 +1,17 @@
+[Unit]
+Description=Screen Project — TFT18 display manager for Loongson 2K301
+After=gpio-manager.service
+Requires=gpio-manager.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'insmod INSTALL_DIR/driver/TFT18_dri.ko 2>/dev/null || true'
+ExecStartPre=/bin/sh -c 'insmod INSTALL_DIR/driver/TFT18_dev.ko 2>/dev/null || true'
+ExecStart=INSTALL_DIR/bin/screen_app
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

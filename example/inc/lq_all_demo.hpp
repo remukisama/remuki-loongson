@@ -30,6 +30,7 @@ void lq_camera_capture_demo(void); // 摄像头拍照测试
 void lq_camera_video_demo(void);   // 摄像头视频录制测试
 void lq_ncnn_infer_demo(void);     // NCNN推理验证Demo（红色标记检测+模型推理）
 void lq_ncnn_image_infer_demo(void); // NCNN单图推理测试（读取test.jpg）
+void lq_llm_pid_autotune_demo(void); // LLM自动PID调参Demo（配合llm-pid-tuner使用）
 void lq_parameter_step_tuning_demo(void); // 33. PARAMETER_TUNING_METHODS.md 一体化分步调参Demo
 void lq_parameter_step_interactive_demo(void); // 33. 交互式分步调试入口（输入编号运行对应测试）
 int lq_left_ring_exit_recommend_demo(void); // 34. 左环岛出环防兜圈专项Demo

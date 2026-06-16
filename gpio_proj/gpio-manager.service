@@ -1,0 +1,22 @@
+[Unit]
+Description=GPIO Watchdog Daemon — motor safety watchdog for Loongson 2K301
+After=network.target
+# 确保在小车工程之前启动
+Before=car-project.service
+
+[Service]
+Type=simple
+ExecStart=/root/gpio_manager
+# 实时调度，确保看门狗不被普通进程挤占
+# 50ms 超时窗口足够大，即使调度抖动也能正常检测
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=90
+# 崩溃后自动重启，保证看门狗始终在线
+Restart=always
+RestartSec=1
+# 标准输出/错误输出到 journal，方便调试
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

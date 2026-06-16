@@ -1,0 +1,17 @@
+[Unit]
+Description=GPIO Watchdog Daemon — motor safety watchdog for Loongson 2K301
+After=network.target
+Before=car-project.service
+
+[Service]
+Type=simple
+ExecStart=INSTALL_DIR/bin/gpio_manager
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=90
+Restart=always
+RestartSec=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

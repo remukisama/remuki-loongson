@@ -2,11 +2,14 @@
 #include <fstream>
 #include <thread>
 #include <atomic>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <opencv2/opencv.hpp>
-#include "lq_camera_ex.hpp"
 #include "lq_ncnn.hpp"
 #include "red_marker_detect.hpp"
+#include "ncnn_inference.hpp"
+#include "car_config.hpp"
+#include "lq_camera_ex.hpp"
 
 // ===================================================================
 //  调试可视化：在原图上叠加红色标记框 + ROI裁剪框
@@ -59,23 +62,32 @@ static bool load_ncnn_model(LQ_NCNN &ncnn)
 // ===================================================================
 void lq_ncnn_infer_demo(void)
 {
-    std::cout << "====== NCNN 推理验证 Demo (走马观碑) ======" << std::endl;
+    std::cout << "====== NCNN 实时推理测试（同实车推理逻辑）======" << std::endl;
 
-    // ---- 摄像头初始化（与实车完全一致）----
-    lq_camera_ex camera(320, 240, 180, LQ_CAMERA_0CPU_MJPG);
+    // ---- 摄像头只负责提供 320x240 BGR 原始帧，不走循迹二值化/扫线处理 ----
+    lq_camera_ex camera(
+        car_config::kCameraHiresWidth,
+        car_config::kCameraHiresHeight,
+        car_config::kCameraFps,
+        car_config::kCameraFormat,
+        car_config::kCameraDevicePath);
     if (camera.start_collect() != 0) {
         std::cerr << "摄像头启动失败！" << std::endl;
         return;
     }
-    if (!camera.set_exposure_manual(55))
+    if (!camera.set_exposure_manual(car_config::kCameraManualExposure))
         std::cerr << "警告: 手动曝光设置失败" << std::endl;
     usleep(500 * 1000);
     std::cout << "摄像头: " << camera.get_camera_width() << "x" << camera.get_camera_height()
-              << " @ " << camera.get_camera_fps() << "fps | 曝光: 55" << std::endl;
+              << " @ " << camera.get_camera_fps() << "fps | 曝光: "
+              << car_config::kCameraManualExposure << std::endl;
 
-    // ---- NCNN 模型 ----
-    LQ_NCNN ncnn;
-    if (!load_ncnn_model(ncnn)) { camera.stop_collect(); return; }
+    // ---- NCNN 推理封装：与实车主循环 NcnnInference::infer(...) 完全一致 ----
+    NcnnInference ncnn;
+    if (!ncnn.init()) {
+        camera.stop_collect();
+        return;
+    }
 
     // ---- 键盘线程 ----
     std::atomic<bool> exit_flag(false);
@@ -88,48 +100,69 @@ void lq_ncnn_infer_demo(void)
     });
 
     std::cout << "\n------------------------------------------" << std::endl;
-    std::cout << "  检测到红色标记后自动推理并打印结果。" << std::endl;
+    std::cout << "  只运行 NCNN 实时推理测试，不启动电机闭环。" << std::endl;
+    std::cout << "  摄像头取 320x240 原始帧；推理逻辑使用实车同一个 NcnnInference::infer。" << std::endl;
+    std::cout << "  未检测到可分类元素时不打印结果；检测到时打印分类与推理耗时。" << std::endl;
+    std::cout << "  推理成功帧会保存到 /home/root/ncnn_debug/，黄色框=红色色块，绿色框=ROI。" << std::endl;
     std::cout << "  输入 'q' 并回车退出。" << std::endl;
     std::cout << "------------------------------------------\n" << std::endl;
 
-    int frame_cnt  = 0, detect_cnt = 0, infer_cnt = 0;
-    std::string last_label;
+    const char *debug_dir = "/home/root/ncnn_debug";
+    mkdir(debug_dir, 0755);
+    int frame_cnt  = 0, infer_cnt = 0;
 
     while (!exit_flag.load()) {
         cv::Mat frame = camera.get_frame_raw();
-        if (frame.empty()) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); continue; }
+        if (frame.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
         cv::flip(frame, frame, -1);
         frame_cnt++;
 
-        // 红色标记检测（含底部横条回退）
-        RedMarker marker = find_red_marker(frame, 20.0f);
-        if (!marker) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); continue; }
-        detect_cnt++;
-
-        // 透视校正裁剪 48×48
-        RotatedRoi roi = extract_rotated_roi(frame, marker, 48, 1.0f, 5); // gap=5 与训练一致
-        if (!roi) continue;
-
-        // NCNN 推理
-        try {
-            std::string label = ncnn.Infer(roi.crop);
+        auto start = std::chrono::high_resolution_clock::now();
+        std::string label;
+        if (ncnn.infer(frame, label)) {
+            auto end = std::chrono::high_resolution_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(end - start).count();
+            RedMarker marker = find_red_marker(frame, car_config::kRedMinArea);
             infer_cnt++;
-            if (label != last_label) {
-                std::cout << "[NCNN] frame=" << frame_cnt
-                          << " det=" << detect_cnt
-                          << " infer=" << infer_cnt
-                          << " → " << label << std::endl;
-                last_label = label;
+            std::string raw_path;
+            std::string overlay_path;
+            std::cout << "[NCNN] 类型: " << label
+                      << " | 推理耗时: " << ms << " ms"
+                      << " | frame=" << frame_cnt
+                      << " | infer=" << infer_cnt;
+            if (marker.valid) {
+                RotatedRoi roi = extract_rotated_roi(frame, marker,
+                    car_config::kNcnnCropSide, 1.0f, car_config::kNcnnObjectBottomGap);
+                char raw_name[160];
+                char overlay_name[160];
+                snprintf(raw_name, sizeof(raw_name), "%s/infer_%04d_frame_%06d_raw.jpg",
+                    debug_dir, infer_cnt, frame_cnt);
+                snprintf(overlay_name, sizeof(overlay_name), "%s/infer_%04d_frame_%06d_overlay.jpg",
+                    debug_dir, infer_cnt, frame_cnt);
+                raw_path = raw_name;
+                overlay_path = overlay_name;
+                bool raw_saved = cv::imwrite(raw_path, frame);
+                bool overlay_saved = false;
+                if (roi) {
+                    cv::Mat debug = draw_debug_overlay(frame, marker, roi);
+                    overlay_saved = cv::imwrite(overlay_path, debug);
+                }
+                std::cout << " | red_box=(" << marker.box.x << "," << marker.box.y
+                          << "," << marker.box.width << "," << marker.box.height
+                          << ") | red_area=" << marker.contour_area
+                          << " | raw_saved=" << (raw_saved ? raw_path : "FAILED")
+                          << " | overlay_saved=" << (overlay_saved ? overlay_path : "FAILED");
             }
-        } catch (const std::exception &e) {
-            std::cerr << "[NCNN] 推理异常: " << e.what() << std::endl;
+            std::cout << std::endl;
         }
     }
 
     camera.stop_collect();
     input_thread.join();
     std::cout << "\n退出。总帧数: " << frame_cnt
-              << " | 检测到红色: " << detect_cnt
               << " | 推理成功: " << infer_cnt << std::endl;
 }
 

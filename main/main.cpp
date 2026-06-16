@@ -57,6 +57,7 @@ void timer_thread_1()
     while (!exit_flag)
     {
         Speed_BiHuan();
+        gpio_protect_heartbeat_pulse();
 
         std::this_thread::sleep_for(timer_interval_1);
     }
@@ -67,6 +68,8 @@ void timer_thread_1()
 
 int main()
 {
+    gpio_protect_heartbeat_init();
+
     // ================== 新增编码器排查 Demo ==================
     // 只要把这一行的注释解开，它就会阻断后续所有代码，专心跑编码器测试：
     // lq_car_encoder_test_demo(); 
@@ -95,9 +98,10 @@ int main()
     // lq_camera_video_demo();  // 视频录制 Demo，切换到实车模式时注释此行
     // return 0;
 
-    // ===== NCNN 推理验证 Demo（红色标记检测 + 模型推理）=====
-    lq_ncnn_image_infer_demo();
-    return 0;
+    // ===== Demo 33 分步调试总入口：输入编号运行对应测试 =====
+    // lq_parameter_step_interactive_demo();
+    gpio_protect_heartbeat_deinit();
+    // return 0;
 
     char image_flag = 0;
 
@@ -164,7 +168,7 @@ int main()
     // lq_gyro_loop_verify_demo();
     // 校赛无元素竞速模式：关闭元素识别/处理，只跑基础循迹闭环。
     // 若要重新调元素，再改回 lq_camera_tft18_demo() 或 34 号元素专项 Demo。
-    g_enable_element_process = true;
+    g_enable_element_process = false;
     printf("[RACE_MODE] no-element race mode: element process disabled, main loop enabled.\n");
     
     // 调用摄像头拍照测试Demo并阻断后面的逻辑
@@ -180,22 +184,24 @@ int main()
     printf("[UDP_DEBUG] center-line overlay to 192.168.90.22:8080, every 5 frames\n");
 
     // ===== NCNN 推理初始化（走马观碑组） =====
-    NcnnInference ncnn;
-    bool ncnn_ready = ncnn.init();  // 模型不存在时优雅降级，不阻塞主流程
-    if (!ncnn_ready) {
-        printf("[NCNN] MODEL_NOT_FOUND — 推理功能已禁用，仅运行循迹。\n");
-        printf("[NCNN] 请将 model.param 和 model.bin 放到工作目录。\n");
-    }
+    // 临时禁用：当前排查小车起步右转和速度异常，先确保主循环只跑基础循迹。
+    // NcnnInference ncnn;
+    // bool ncnn_ready = ncnn.init();  // 模型不存在时优雅降级，不阻塞主流程
+    // if (!ncnn_ready) {
+    //     printf("[NCNN] MODEL_NOT_FOUND — 推理功能已禁用，仅运行循迹。\n");
+    //     printf("[NCNN] 请将 model.param 和 model.bin 放到工作目录。\n");
+    // }
 
     // 分离线程，允许后台运行高速闭环控制代码
     std::thread threadA(timer_thread_1);
 
     int udp_frame_count = 0;
-    int ncnn_infer_count = 0;    // NCNN 推理帧计数器
-    std::string ncnn_last_label; // 最近一次 NCNN 推理结果
+    // int ncnn_infer_count = 0;    // NCNN 推理帧计数器
+    // std::string ncnn_last_label; // 最近一次 NCNN 推理结果
 
     while (1)
     {
+        gpio_protect_heartbeat_pulse();
 
         // auto start2 = std::chrono::high_resolution_clock::now();
 
@@ -225,22 +231,24 @@ int main()
         imageprocess();
 
         // ===== NCNN 推理（走马观碑：每 kNcnnInferInterval 帧执行一次） =====
-        if (ncnn_ready && ((ncnn_infer_count % car_config::kNcnnInferInterval) == 0)) {
-            std::string label;
-            if (ncnn.infer(image_cv_get_hires_frame(), label)) {
-                if (label != ncnn_last_label) {
-                    printf("[NCNN] 推理结果: %s\n", label.c_str());
-                    ncnn_last_label = label;
-                }
-            }
-        }
-        ncnn_infer_count++;
+        // 临时禁用：当前排查小车起步右转和速度异常，先不要让推理链路占用主循环。
+        // if (ncnn_ready && ((ncnn_infer_count % car_config::kNcnnInferInterval) == 0)) {
+        //     std::string label;
+        //     if (ncnn.infer(image_cv_get_hires_frame(), label)) {
+        //         if (label != ncnn_last_label) {
+        //             printf("[NCNN] 推理结果: %s\n", label.c_str());
+        //             ncnn_last_label = label;
+        //         }
+        //     }
+        // }
+        // ncnn_infer_count++;
 
         // UDP 图传：每5帧发送一次（调用 demo24 中的函数）
         if ((udp_frame_count % 5) == 0) {
             lq_udp_center_line_send_one_frame(udp_debug, 50);
         }
         udp_frame_count++;
+        gpio_protect_heartbeat_pulse();
         // image_show();
         
 
@@ -261,5 +269,6 @@ int main()
     exit_flag = true;
     threadA.join();  // 等待底层硬实时线程结束
     emergency_stop();  // 最终确认电机停止
+    gpio_protect_heartbeat_deinit();
     return 0;
 }
