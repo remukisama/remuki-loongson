@@ -118,6 +118,9 @@ int main()
     signal(SIGSEGV, signal_handler);  // 捕获段错误(访问了空指针等崩溃)
     signal(SIGPIPE, SIG_IGN);         // 忽略破损管道信号(当图传UDP发送失败时忽略之，不退出程序)
 
+    lq_atim_pwm_demo(); // 先单独跑这个 PWM Demo，验证 PWM 输出功能正常，再继续后续的电机控制和图像处理等功能开发。
+    return 0;
+
     int autotune_ret = run_autotune_stage_if_requested();
     if (autotune_ret != -999) {
         printf("[AUTOTUNE] stage_ret=%d\n", autotune_ret);

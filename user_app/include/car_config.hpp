@@ -265,6 +265,15 @@ constexpr float kUnclassifiedTurnTriggerError = 16.0f; // 未识别成元素时�
 constexpr float kUnclassifiedTurnGyroLimitDps = 54.0f; // 普通未分类急弯也收一点角速度，避免未识别成元素时过度内切。
 constexpr int kBadVisionOfflineThreshold = 55;    // 关了曲线补偿后弯道自然丢行多，从45提到55避免弯道误触发bad_vision。
 constexpr int kBadVisionCenterHoldOfflineThreshold = 55; // 十字/近乎全丢线时不沿用旧偏差，先按中线低速通过。
+
+// 十字路口角点补线参数
+constexpr int kCrossMinWhiteLine = 8;             // 触发十字角点检测的最小双丢边行数；过小会误触发普通弯道。
+constexpr int kCrossCornerScanStartRow = 10;      // 角点搜索起始行（从近端开始）。
+constexpr int kCrossCornerScanEndRow = 50;        // 角点搜索终止行（远端截止）。
+constexpr int kCrossCornerMinBorderLen = 5;       // 角点检测需要的连续有边行数最小值；过小会把噪点当角点。
+constexpr int kCrossRepairSlopeLimit = 2.0f;      // 补线斜率绝对值上限，防止补线角度过大飞掉。
+constexpr int kCrossMinCornerYGap = 5;            // 上下角点之间最小行距，过滤太近的伪角点。
+constexpr int kCrossRepairOfflineExtend = 3;      // 补线后OFFLine向上扩展行数，确保GetDet能看到补好的线。
 constexpr float kBadVisionSpeedGoal = 0.36f;       // 图像不可靠时的保护速度 m/s (原4RPS×0.0887≈0.36)
 constexpr float kBadVisionGyroLimitDps = 38.0f;   // 弯道出口偏差30+时22dps太弱追不回来，提到38配合Kp=2.40。
 constexpr float kBadVisionMaxDiff = 0.75f;        // 图像不稳/单边丢线时的差速上限，介于0.65止摆和0.90回中之间。

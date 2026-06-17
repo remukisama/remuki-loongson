@@ -1020,6 +1020,333 @@ static void DrawExtensionLine(void)        //绘制延长线并重新确定中�
 }
 
 
+// ==================== 十字路口角点检测与补线 ====================
+
+// 角点结构
+typedef struct {
+    int x;        // 列坐标
+    int y;        // 行坐标
+    bool valid;   // 是否有效
+} CrossCorner_t;
+
+// 限幅辅助
+static int cross_clamp_x(int x) {
+    if (x < 1) return 1;
+    if (x > 78) return 78;
+    return x;
+}
+
+// 斜率限幅
+static float cross_clamp_slope(float slope, float limit) {
+    if (slope > limit) return limit;
+    if (slope < -limit) return -limit;
+    return slope;
+}
+
+/*
+ * 检测十字路口的四个角点
+ * 策略：从近端向上扫描左右边界，找到"有边→丢边"的跳变点作为角点。
+ *   - 左下角(LB): 左边界从有边('T')变丢边('W')的位置
+ *   - 右下角(RB): 右边界从有边('T')变丢边('W')的位置
+ *   - 左上角(LT): 丢边区域上方左边界重新出现('W'→'T')的位置
+ *   - 右上角(RT): 丢边区域上方右边界重新出现('W'→'T')的位置
+ */
+static void DetectCrossCorners(CrossCorner_t *lt, CrossCorner_t *rt,
+                                CrossCorner_t *lb, CrossCorner_t *rb)
+{
+    lt->valid = false; rt->valid = false;
+    lb->valid = false; rb->valid = false;
+
+    const int start_row = car_config::kCrossCornerScanStartRow;
+    const int end_row   = car_config::kCrossCornerScanEndRow;
+    const int min_len   = car_config::kCrossCornerMinBorderLen;
+
+    // --- 找左下角：从近端向上，左边界从'T'变'W' ---
+    int left_found_count = 0;
+    for (int y = 58; y >= start_row; y--) {
+        if (ImageDeal[y].IsLeftFind == 'T') {
+            left_found_count++;
+        } else if (ImageDeal[y].IsLeftFind == 'W' && left_found_count >= min_len) {
+            // 角点在丢边开始的那一行
+            lb->x = ImageDeal[y + 1].LeftBorder;
+            lb->y = y + 1;
+            lb->valid = true;
+            break;
+        } else {
+            left_found_count = 0;  // 不连续，重置
+        }
+    }
+
+    // --- 找右下角：从近端向上，右边界从'T'变'W' ---
+    int right_found_count = 0;
+    for (int y = 58; y >= start_row; y--) {
+        if (ImageDeal[y].IsRightFind == 'T') {
+            right_found_count++;
+        } else if (ImageDeal[y].IsRightFind == 'W' && right_found_count >= min_len) {
+            rb->x = ImageDeal[y + 1].RightBorder;
+            rb->y = y + 1;
+            rb->valid = true;
+            break;
+        } else {
+            right_found_count = 0;
+        }
+    }
+
+    // --- 找左上角：从丢边区域上方，左边界从'W'变'T' ---
+    int lb_y = lb->valid ? lb->y : 40;
+    for (int y = lb_y - 1; y >= start_row; y--) {
+        if (ImageDeal[y].IsLeftFind == 'T'
+            && ImageDeal[y - 1].IsLeftFind == 'T'
+            && ImageDeal[y - 2].IsLeftFind == 'T'
+            && ImageDeal[y].LeftBorder > 0
+            && ImageDeal[y].LeftBorder < 70)
+        {
+            lt->x = ImageDeal[y].LeftBorder;
+            lt->y = y;
+            lt->valid = true;
+            break;
+        }
+    }
+
+    // --- 找右上角：从丢边区域上方，右边界从'W'变'T' ---
+    int rb_y = rb->valid ? rb->y : 40;
+    for (int y = rb_y - 1; y >= start_row; y--) {
+        if (ImageDeal[y].IsRightFind == 'T'
+            && ImageDeal[y - 1].IsRightFind == 'T'
+            && ImageDeal[y - 2].IsRightFind == 'T'
+            && ImageDeal[y].RightBorder > 10
+            && ImageDeal[y].RightBorder < 79)
+        {
+            rt->x = ImageDeal[y].RightBorder;
+            rt->y = y;
+            rt->valid = true;
+            break;
+        }
+    }
+
+    // --- 验证：上下角点行距不能太小 ---
+    if (lb->valid && lt->valid && (lb->y - lt->y) < car_config::kCrossMinCornerYGap) {
+        lt->valid = false;
+    }
+    if (rb->valid && rt->valid && (rb->y - rt->y) < car_config::kCrossMinCornerYGap) {
+        rt->valid = false;
+    }
+}
+
+/*
+ * 用两个角点做线性补线（两点式）
+ * side: 'L' = 补左边界, 'R' = 补右边界
+ */
+static void CrossRepairBetween(CrossCorner_t p_from, CrossCorner_t p_to, char side)
+{
+    if (!p_from.valid || !p_to.valid) return;
+    if (p_from.y == p_to.y) return;
+
+    float slope = (float)(p_to.x - p_from.x) / (float)(p_to.y - p_from.y);
+    slope = cross_clamp_slope(slope, car_config::kCrossRepairSlopeLimit);
+
+    int y_min = (p_from.y < p_to.y) ? p_from.y : p_to.y;
+    int y_max = (p_from.y > p_to.y) ? p_from.y : p_to.y;
+
+    for (int y = y_min; y <= y_max; y++) {
+        int x = p_from.x + (int)(slope * (y - p_from.y));
+        x = cross_clamp_x(x);
+        if (side == 'L') {
+            ImageDeal[y].LeftBorder = x;
+            ImageDeal[y].IsLeftFind = 'T';
+        } else {
+            ImageDeal[y].RightBorder = x;
+            ImageDeal[y].IsRightFind = 'T';
+        }
+        ImageDeal[y].Center = (ImageDeal[y].LeftBorder + ImageDeal[y].RightBorder) / 2;
+    }
+}
+
+/*
+ * 用角点斜率向上/向下延长补线（单方向）
+ * extend_up: true=从角点向上(向远端)延长, false=从角点向下(向近端)延长
+ */
+static void CrossRepairExtend(CrossCorner_t corner, float slope, char side, bool extend_up)
+{
+    if (!corner.valid) return;
+    slope = cross_clamp_slope(slope, car_config::kCrossRepairSlopeLimit);
+
+    if (extend_up) {
+        for (int y = corner.y - 1; y >= car_config::kCrossCornerScanStartRow; y--) {
+            int x = corner.x + (int)(slope * (y - corner.y));
+            x = cross_clamp_x(x);
+            // 如果本行已经有可靠边界，停止覆盖
+            if (side == 'L' && ImageDeal[y].IsLeftFind == 'T' &&
+                abs(ImageDeal[y].LeftBorder - x) < 8) break;
+            if (side == 'R' && ImageDeal[y].IsRightFind == 'T' &&
+                abs(ImageDeal[y].RightBorder - x) < 8) break;
+
+            if (side == 'L') {
+                ImageDeal[y].LeftBorder = x;
+                ImageDeal[y].IsLeftFind = 'T';
+            } else {
+                ImageDeal[y].RightBorder = x;
+                ImageDeal[y].IsRightFind = 'T';
+            }
+            ImageDeal[y].Center = (ImageDeal[y].LeftBorder + ImageDeal[y].RightBorder) / 2;
+        }
+    } else {
+        for (int y = corner.y + 1; y <= 58; y++) {
+            int x = corner.x + (int)(slope * (y - corner.y));
+            x = cross_clamp_x(x);
+            if (side == 'L' && ImageDeal[y].IsLeftFind == 'T' &&
+                abs(ImageDeal[y].LeftBorder - x) < 8) break;
+            if (side == 'R' && ImageDeal[y].IsRightFind == 'T' &&
+                abs(ImageDeal[y].RightBorder - x) < 8) break;
+
+            if (side == 'L') {
+                ImageDeal[y].LeftBorder = x;
+                ImageDeal[y].IsLeftFind = 'T';
+            } else {
+                ImageDeal[y].RightBorder = x;
+                ImageDeal[y].IsRightFind = 'T';
+            }
+            ImageDeal[y].Center = (ImageDeal[y].LeftBorder + ImageDeal[y].RightBorder) / 2;
+        }
+    }
+}
+
+/*
+ * 十字路口角点补线主函数
+ *
+ * 检测四个角点，根据角点存在性组合判断十字类型，然后补线：
+ *
+ * 情况1：四角点全在（普通十字）
+ *   → 左边界连 LB→LT，右边界连 RB→RT
+ *
+ * 情况2：只有上半角点（已进入十字深处）
+ *   → 用 LT/RT 斜率向下延长到图像底部
+ *
+ * 情况3：只有下半角点（刚进入十字）
+ *   → 用 LB/RB 斜率向上延长
+ *
+ * 情况4：斜入十字（只有对角角点）
+ *   → 用可见角点+标准半宽推算另一边
+ *
+ * 情况5：无角点
+ *   → 不处理，退回原方案
+ */
+static bool CrossCornerRepair(void)
+{
+    // 前置条件：必须有足够多的双丢边行才认为是十字
+    if (ImageStatus.WhiteLine < car_config::kCrossMinWhiteLine) {
+        return false;
+    }
+
+    // 排除圆环和坡道
+    if (ImageFlag.image_element_rings != 0) return false;
+    if (ImageStatus.Road_type == Ramp) return false;
+    if (ImageStatus.Road_type == LeftCirque || ImageStatus.Road_type == RightCirque) return false;
+
+    CrossCorner_t lt, rt, lb, rb;
+    DetectCrossCorners(&lt, &rt, &lb, &rb);
+
+    // 统计有效角点数
+    int valid_count = lt.valid + rt.valid + lb.valid + rb.valid;
+    if (valid_count < 2) return false;  // 至少需要2个角点
+
+    // ===== 情况1：四角点全在（普通十字）=====
+    if (lt.valid && rt.valid && lb.valid && rb.valid) {
+        CrossRepairBetween(lb, lt, 'L');  // 左边界：LB→LT
+        CrossRepairBetween(rb, rt, 'R');  // 右边界：RB→RT
+    }
+    // ===== 情况2：只有上半角点 =====
+    else if (lt.valid && rt.valid && !lb.valid && !rb.valid) {
+        // 用上角点的近端边界斜率向下延长
+        // 左边：假设底部边界在58行，用 LT 的斜率向下
+        float left_slope = (lt.x - ImageDeal[58].LeftBorder) / (float)(58 - lt.y);
+        float right_slope = (rt.x - ImageDeal[58].RightBorder) / (float)(58 - rt.y);
+        CrossRepairExtend(lt, left_slope, 'L', false);
+        CrossRepairExtend(rt, right_slope, 'R', false);
+    }
+    // ===== 情况3：只有下半角点 =====
+    else if (!lt.valid && !rt.valid && lb.valid && rb.valid) {
+        // 用下角点斜率向上延长
+        // 估计斜率：左边界向右上方倾斜（正斜率），右边界向左上方倾斜（负斜率）
+        float left_slope  = 0.3f;   // 默认斜率，基于梯形畸变
+        float right_slope = -0.3f;
+        // 如果有历史数据可以修正
+        if (lb.y > 2 && ImageDeal[lb.y - 2].IsLeftFind == 'T') {
+            left_slope = (float)(ImageDeal[lb.y - 2].LeftBorder - lb.x) / -2.0f;
+        }
+        if (rb.y > 2 && ImageDeal[rb.y - 2].IsRightFind == 'T') {
+            right_slope = (float)(ImageDeal[rb.y - 2].RightBorder - rb.x) / -2.0f;
+        }
+        CrossRepairExtend(lb, left_slope, 'L', true);
+        CrossRepairExtend(rb, right_slope, 'R', true);
+    }
+    // ===== 情况4：左下+右上（斜入左转）=====
+    else if (lb.valid && rt.valid && !lt.valid && !rb.valid) {
+        float left_slope  = 0.3f;
+        float right_slope = -0.3f;
+        CrossRepairExtend(lb, left_slope, 'L', true);
+        CrossRepairExtend(rt, right_slope, 'R', false);
+    }
+    // ===== 情况5：右下+左上（斜入右转）=====
+    else if (rb.valid && lt.valid && !rt.valid && !lb.valid) {
+        float left_slope  = 0.3f;
+        float right_slope = -0.3f;
+        CrossRepairExtend(lt, left_slope, 'L', false);
+        CrossRepairExtend(rb, right_slope, 'R', true);
+    }
+    // ===== 情况6：单侧有上下角点，对侧全无 =====
+    else if (lt.valid && lb.valid && !rt.valid && !rb.valid) {
+        // 左侧有完整角点，右侧用标准半宽推算
+        CrossRepairBetween(lb, lt, 'L');
+        for (int y = lb->y; y >= lt->y; y--) {
+            int x = ImageDeal[y].LeftBorder + Half_Road_Wide[y] * 2;
+            x = cross_clamp_x(x);
+            ImageDeal[y].RightBorder = x;
+            ImageDeal[y].IsRightFind = 'T';
+            ImageDeal[y].Center = (ImageDeal[y].LeftBorder + ImageDeal[y].RightBorder) / 2;
+        }
+    }
+    else if (rt.valid && rb.valid && !lt.valid && !lb.valid) {
+        // 右侧有完整角点，左侧用标准半宽推算
+        CrossRepairBetween(rb, rt, 'R');
+        for (int y = rb->y; y >= rt->y; y--) {
+            int x = ImageDeal[y].RightBorder - Half_Road_Wide[y] * 2;
+            x = cross_clamp_x(x);
+            ImageDeal[y].LeftBorder = x;
+            ImageDeal[y].IsLeftFind = 'T';
+            ImageDeal[y].Center = (ImageDeal[y].LeftBorder + ImageDeal[y].RightBorder) / 2;
+        }
+    }
+    else {
+        return false;  // 角点组合无法处理
+    }
+
+    // --- 补线后重新计算全图中线和宽度 ---
+    for (int y = 59; y >= ImageStatus.OFFLine; y--) {
+        ImageDeal[y].Wide = ImageDeal[y].RightBorder - ImageDeal[y].LeftBorder;
+        ImageDeal[y].Center = (ImageDeal[y].LeftBorder + ImageDeal[y].RightBorder) / 2;
+    }
+
+    // --- 扩展OFFLine，让GetDet能看到补好的线 ---
+    int min_corner_y = 59;
+    if (lt.valid && lt.y < min_corner_y) min_corner_y = lt.y;
+    if (rt.valid && rt.y < min_corner_y) min_corner_y = rt.y;
+    if (lb.valid && lb.y < min_corner_y) min_corner_y = lb.y;
+    if (rb.valid && rb.y < min_corner_y) min_corner_y = rb.y;
+
+    int new_offline = min_corner_y - car_config::kCrossRepairOfflineExtend;
+    if (new_offline < 2) new_offline = 2;
+    if (new_offline < ImageStatus.OFFLine) {
+        ImageStatus.OFFLine = new_offline;
+    }
+
+    ImageStatus.Road_type = Cross_ture;  // 标记为已补线的十字
+    return true;
+}
+
+// ============================================================
+
+
 static void RouteFilter(void) 
 {
   for (Ysite = 57; Ysite >= (ImageStatus.OFFLine + 5);   //改为57，防止 Ysite+2 时发生ImageDeal[60]数组越界导致奔溃
@@ -2484,6 +2811,10 @@ void imageprocess(void)
   
   if(!g_enable_element_process || ImageFlag.image_element_rings == 0)
     {DrawExtensionLine(); } //绘制延长线
+
+  // 十字角点补线：在延长线之后、滤波之前，用角点几何特征重构十字边界
+  // 如果成功补线，后续RouteFilter和GetDet会使用补好的边界
+  CrossCornerRepair();
 
   RouteFilter();//中线平滑滤波
   ApplyCurveCenterCompensation(); // 最后用可靠边界重构中线，避免RouteFilter把坏邻点重新混入

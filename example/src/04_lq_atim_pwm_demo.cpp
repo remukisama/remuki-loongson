@@ -20,9 +20,9 @@
 void lq_atim_pwm_demo(void)
 {
     // 默认极性的构造方式
-    ls_atim_pwm pwm1(ATIM_PWM0_PIN81, 25000, 5000, ATIM_PWM_POL_INV);
+    ls_atim_pwm pwm1(ATIM_PWM0_PIN81, 25000, 1000, ATIM_PWM_POL_INV);
     // // 自定义极性的构造方式
-    ls_atim_pwm pwm2(ATIM_PWM1_PIN82, 25000, 5000, ATIM_PWM_POL_INV);
+    ls_atim_pwm pwm2(ATIM_PWM1_PIN82, 25000, 1000, ATIM_PWM_POL_INV);
     // ls_atim_pwm pwm2(ATIM_PWM1_PIN82, 10000, 0);
     // // 拷贝构造使用方法, 调用 pwm3 与调用 pwm1 同效
     // ls_atim_pwm pwm3(pwm1);

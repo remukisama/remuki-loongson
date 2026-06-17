@@ -56,5 +56,6 @@ int lq_param_flow_airborne(void);
 int lq_param_flow_sensor(void);
 int lq_param_flow_low_speed(void);
 int lq_param_flow_element(void);
+void lq_atim_pwm_demo(void); // ATIM PWM 输出测试 Demo
 
 #endif
