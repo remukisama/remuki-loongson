@@ -35,6 +35,8 @@ static const uint32_t ATIM_CCR1 = 0x34;
 static const uint32_t ATIM_CCR2 = 0x38;
 static const uint32_t ATIM_CCR3 = 0x3C;
 static const uint32_t ATIM_CCR4 = 0x40;
+static const uint32_t ATIM_CCER = 0x20;
+static const uint32_t ATIM_ARR  = 0x2C;
 
 // ==================== GTIM CCR 偏移（CH1~CH4）====================
 // GTIM_TIM2_CH2 → CCR2(0x38)
@@ -177,12 +179,31 @@ int GpioWatchdog::init_registers(void)
 
 void GpioWatchdog::write_safe_values(void)
 {
-    // ---- ATIM: 4路电机 PWM duty=0 ----
-    // 反极性: duty=0 → 输出HIGH → 电机停止
-    ccr_write(atim_base_, ATIM_CCR1, 0);   // 电机1 (GPIO81)
-    ccr_write(atim_base_, ATIM_CCR2, 0);   // 电机2 (GPIO82)
-    ccr_write(atim_base_, ATIM_CCR3, 0);   // 电机3 (GPIO83)
-    ccr_write(atim_base_, ATIM_CCR4, 0);   // 电机4 (GPIO76)
+    // ---- ATIM: 4路电机原始 duty=10000 ----
+    // 当前双路驱动板为低有效输入，停车比较值是 ARR+1；CCR=0 会持续拉低并满转。
+    uint32_t safe_compare = 0;
+    if (atim_base_ && atim_base_ != MAP_FAILED) {
+        volatile uint32_t *arr =
+            (volatile uint32_t *)((uintptr_t)atim_base_ + ATIM_ARR);
+        safe_compare = *arr + 1u;
+    }
+    ccr_write(atim_base_, ATIM_CCR1, safe_compare);   // 电机1 (GPIO81)
+    ccr_write(atim_base_, ATIM_CCR2, safe_compare);   // 电机2 (GPIO82)
+    ccr_write(atim_base_, ATIM_CCR3, safe_compare);   // 电机3 (GPIO83)
+    ccr_write(atim_base_, ATIM_CCR4, safe_compare);   // 电机4 (GPIO76)
+
+    // 失能状态会让当前双路板的 PWM 输入悬空并可能满转。
+    // 看门狗接管时强制四路为 NORMAL 极性并保持通道使能，CCR=ARR+1 才能持续停车。
+    if (atim_base_ && atim_base_ != MAP_FAILED) {
+        volatile uint32_t *ccer =
+            (volatile uint32_t *)((uintptr_t)atim_base_ + ATIM_CCER);
+        uint32_t value = *ccer;
+        for (int ch = 0; ch < 4; ++ch) {
+            value &= ~(1u << (ch * 4 + 1)); // CCxP=0: NORMAL
+            value |=  (1u << (ch * 4));     // CCxE=1: 通道保持使能
+        }
+        *ccer = value;
+    }
 
     // ---- GTIM: 舵机 PWM duty=0 ----
     ccr_write(gtim_base_, GTIM_CCR2, 0);   // 舵机 (GPIO88)

@@ -6,7 +6,7 @@
 #include <cstdlib>
 
 
-int img1[60][80];//图像二值化之后的数组
+uint8_t img1[60][80];//图像二值化之后的数组
 int imgdisplay[60][80];//打印到中端图像数组
 
 // 定义像素类型（方便后续上位机识别）
@@ -23,7 +23,7 @@ int Zebra_num1=10000;//斑马线编码器计数设定值
 int Zebra_num2=1000;//停车斑马线编码器计数设定值
 
 static int IntervalLow = 0, IntervalHigh = 0;      //定义高低扫描区间
-static int *PicTemp;
+static uint8_t *PicTemp;
 static int Ysite = 0, Xsite = 0;   
 ImageDealDatatypedef ImageDeal[60]; //最终图像
 uint8 ExtenLFlag = 0;  //是否左延长标志
@@ -110,6 +110,24 @@ static int limit_step(int value, int reference, int max_step)
   return clamp_image_x(value);
 }
 
+static int predict_lost_border(int row, bool left_side)
+{
+  if (row >= 57) {
+    return left_side ? ImageDeal[row + 1].LeftBorder : ImageDeal[row + 1].RightBorder;
+  }
+
+  const uint8 near_flag = left_side ? ImageDeal[row + 1].IsLeftFind : ImageDeal[row + 1].IsRightFind;
+  const uint8 far_flag = left_side ? ImageDeal[row + 2].IsLeftFind : ImageDeal[row + 2].IsRightFind;
+  const int near_border = left_side ? ImageDeal[row + 1].LeftBorder : ImageDeal[row + 1].RightBorder;
+  const int far_border = left_side ? ImageDeal[row + 2].LeftBorder : ImageDeal[row + 2].RightBorder;
+
+  if (near_flag == 'T' && far_flag == 'T') {
+    const int predicted = near_border + (near_border - far_border);
+    return limit_step(predicted, near_border, 6);
+  }
+  return clamp_image_x(near_border);
+}
+
 static int g_curve_center_last[60] = {0};
 static bool g_curve_center_has_last = false;
 
@@ -175,6 +193,11 @@ static void ApplyCurveCenterCompensation(void)
     if (row < start_row && (single_side_candidate || weak_candidate)) {
       candidate = limit_step(candidate, ImageDeal[row + 1].Center,
                              car_config::kCurveCenterMaxRowStep);
+    }
+    if (g_curve_center_has_last) {
+      const int frame_max_step = weak_candidate ?
+          car_config::kCurveCenterBadFrameMaxStep : car_config::kCurveCenterFrameMaxStep;
+      candidate = limit_step(candidate, g_curve_center_last[row], frame_max_step);
     }
 
     ImageDeal[row].Center = clamp_image_x(candidate);
@@ -357,7 +380,7 @@ static uint8 drawfirstline(void)
   return 'T';
 }
 
-void GetJumpPointFromDet(int* p,uint8 type,int L,int H,JumpPointtypedef* Q)  //第一个参数是要查找的数组（80个点）
+void GetJumpPointFromDet(uint8_t* p,uint8 type,int L,int H,JumpPointtypedef* Q)  //第一个参数是要查找的数组（80个点）
                                                                                //第二个扫左边线还是扫右边线
 {                                                                              //三四是开始和结束点
   int i = 0;
@@ -435,11 +458,20 @@ static void DrawLinesProcess(void)  //////不用更改
   {                        //太远的图像不稳定，OFFLine以后的不处理
     PicTemp = img1[Ysite];
     JumpPointtypedef JumpPoint[2];                                          // 0左1右
+    int dynamic_scan_interval = car_config::kImageScanInterval;
+    const int max_loss_count = (ImageStatus.Left_Line > ImageStatus.Right_Line) ? ImageStatus.Left_Line : ImageStatus.Right_Line;
+    if (max_loss_count >= car_config::kImageScanDynamicLossStart ||
+        abs(ImageStatus.Det_True - ImageStatus.MiddleLine) >= 12) {
+      dynamic_scan_interval = car_config::kImageScanIntervalMax;
+    } else if (ImageStatus.straight_acc_flag == 1 && max_loss_count == 0) {
+      dynamic_scan_interval = car_config::kImageScanIntervalMin;
+    }
+
     if (ImageStatus.Road_type != Cross_ture
            /* &&SystemData.SpeedData.Length*OX>500*/)
     {
-      IntervalLow =ImageDeal[Ysite + 1].RightBorder -ImageScanInterval;//暂时为2             //从上一行右边线-Interval的点开始（确定扫描开始点）
-      IntervalHigh =ImageDeal[Ysite + 1].RightBorder + ImageScanInterval;           //到上一行右边线+Interval的点结束（确定扫描结束点）
+      IntervalLow =ImageDeal[Ysite + 1].RightBorder -dynamic_scan_interval;//暂时为2             //从上一行右边线-Interval的点开始（确定扫描开始点）
+      IntervalHigh =ImageDeal[Ysite + 1].RightBorder + dynamic_scan_interval;           //到上一行右边线+Interval的点结束（确定扫描结束点）
     } else {
       IntervalLow =ImageDeal[Ysite + 1].RightBorder -ImageScanInterval_Cross;//暂时为2        //从上一行右边线-Interval_Cross的点开始（确定扫描开始点）
       IntervalHigh = ImageDeal[Ysite + 1].RightBorder + ImageScanInterval_Cross;    //到上一行右边线+Interval_Cross的点开始（确定扫描开始点）
@@ -449,8 +481,8 @@ static void DrawLinesProcess(void)  //////不用更改
     LimitH(IntervalHigh);  //确定右扫描区间并进行限制
     GetJumpPointFromDet(PicTemp, 'R', IntervalLow, IntervalHigh,&JumpPoint[1]);     //扫右边线
 
-    IntervalLow =ImageDeal[Ysite + 1].LeftBorder -ImageScanInterval;                //从上一行左边线-5的点开始（确定扫描开始点）
-    IntervalHigh =ImageDeal[Ysite + 1].LeftBorder +ImageScanInterval;               //到上一行左边线+5的点结束（确定扫描结束点）
+    IntervalLow =ImageDeal[Ysite + 1].LeftBorder -dynamic_scan_interval;                //从上一行左边线-动态窗口开始（确定扫描开始点）
+    IntervalHigh =ImageDeal[Ysite + 1].LeftBorder +dynamic_scan_interval;               //到上一行左边线+动态窗口结束（确定扫描结束点）
 
     LimitL(IntervalLow);   //确定左扫描区间并进行限制
     LimitH(IntervalHigh);  //确定右扫描区间并进行限制
@@ -459,7 +491,7 @@ static void DrawLinesProcess(void)  //////不用更改
     
     if (JumpPoint[0].type =='W')                                                    //如果本行左边线不正常跳变，即这10个点都是白的
     {
-      ImageDeal[Ysite].LeftBorder =ImageDeal[Ysite + 1].LeftBorder;                 //本行左边线用上一行的数值
+      ImageDeal[Ysite].LeftBorder = predict_lost_border(Ysite, true);                 //本行左边线用下方两行预测，失败再退回上一行
     }
     else                                                                          //左边线正常
     {
@@ -468,7 +500,7 @@ static void DrawLinesProcess(void)  //////不用更改
 
     if (JumpPoint[1].type == 'W')                                                   //如果本行右边线不正常跳变
     {
-      ImageDeal[Ysite].RightBorder =ImageDeal[Ysite + 1].RightBorder;               //本行右边线用上一行的数值
+      ImageDeal[Ysite].RightBorder = predict_lost_border(Ysite, false);               //本行右边线用下方两行预测，失败再退回上一行
     }
     else                                                                          //右边线正常
     {
@@ -579,13 +611,17 @@ static void DrawLinesProcess(void)  //////不用更改
       {
         Get_R_line = 'T';       //找了  一帧图像只跑一次 置为T
         ytemp_W_R = Ysite + 2;
-        for (ysite = Ysite + 1; ysite < Ysite + 15; ysite++) {
-          if (ImageDeal[ysite].IsRightFind =='T')  //往无边行下面搜索  一般都是有边的
+        const int right_search_end = (Ysite + 15 < 60) ? (Ysite + 15) : 60;
+        int right_last_found_row = Ysite + 3;
+        for (ysite = Ysite + 1; ysite < right_search_end; ysite++) {
+          if (ImageDeal[ysite].IsRightFind =='T') {  //往无边行下面搜索  一般都是有边的
             R_found_point++;
+            right_last_found_row = ysite;
+          }
         }
-        if (R_found_point >8)                      //找到基准斜率边  做延长线重新确定无边   当有边的点数大于8
+        if (R_found_point >8 && right_last_found_row > Ysite + 3)                      //找到基准斜率边  做延长线重新确定无边   当有边的点数大于8
         {
-          D_R = ((float)(ImageDeal[Ysite + R_found_point].RightBorder - ImageDeal[Ysite + 3].RightBorder)) /((float)(R_found_point - 3));
+          D_R = ((float)(ImageDeal[right_last_found_row].RightBorder - ImageDeal[Ysite + 3].RightBorder)) /((float)(right_last_found_row - (Ysite + 3)));
                                                   //求下面这些点连起来的斜率
                                                   //好给无边行做延长线左个基准
           if (D_R > 0) {
@@ -610,13 +646,17 @@ static void DrawLinesProcess(void)  //////不用更改
       if (Get_L_line == 'F') {
         Get_L_line = 'T';
         ytemp_W_L = Ysite + 2;
-        for (ysite = Ysite + 1; ysite < Ysite + 15; ysite++) {
-          if (ImageDeal[ysite].IsLeftFind == 'T')
+        const int left_search_end = (Ysite + 15 < 60) ? (Ysite + 15) : 60;
+        int left_last_found_row = Ysite + 3;
+        for (ysite = Ysite + 1; ysite < left_search_end; ysite++) {
+          if (ImageDeal[ysite].IsLeftFind == 'T') {
             L_found_point++;
+            left_last_found_row = ysite;
+          }
         }
-        if (L_found_point > 8)              //找到基准斜率边  做延长线重新确定无边
+        if (L_found_point > 8 && left_last_found_row > Ysite + 3)              //找到基准斜率边  做延长线重新确定无边
         {
-          D_L = ((float)(ImageDeal[Ysite + 3].LeftBorder -ImageDeal[Ysite + L_found_point].LeftBorder)) /((float)(L_found_point - 3));
+          D_L = ((float)(ImageDeal[Ysite + 3].LeftBorder -ImageDeal[left_last_found_row].LeftBorder)) /((float)(left_last_found_row - (Ysite + 3)));
           if (D_L > 0) {
             L_Found_T = 'T';
 
@@ -674,7 +714,7 @@ static void DrawLinesProcess(void)  //////不用更改
   return;
 }
 
-void Search_Bottom_Line_OTSU(int imageInput[CAMERA_H][CAMERA_W], uint8 Row, uint8 Col, uint8 Bottonline)
+void Search_Bottom_Line_OTSU(uint8_t imageInput[CAMERA_H][CAMERA_W], uint8 Row, uint8 Col, uint8 Bottonline)
 {
 
     //寻找左边边界
@@ -697,7 +737,12 @@ void Search_Bottom_Line_OTSU(int imageInput[CAMERA_H][CAMERA_W], uint8 Row, uint
 
 }
 
-void Search_Left_and_Right_Lines(int imageInput[CAMERA_H][CAMERA_W], int Row, int Col, int Bottonline)
+static bool is_image_xy_valid(int x, int y)
+{
+  return x >= 0 && x < CAMERA_W && y >= 0 && y < CAMERA_H;
+}
+
+void Search_Left_and_Right_Lines(uint8_t imageInput[CAMERA_H][CAMERA_W], int Row, int Col, int Bottonline)
 {
     //定义小人的当前行走状态位置为 上 左 下 右 一次要求 上：左边为黑色 左：上边为褐色 下：右边为色  右：下面有黑色
 /*  前进方向定义：
@@ -716,18 +761,18 @@ void Search_Left_and_Right_Lines(int imageInput[CAMERA_H][CAMERA_W], int Row, in
                               {1,-1,1,1,-1,1,-1,-1} //{1,-1},{1,1},{-1,1},{-1,-1}
     };
       int num=0;
-    uint8 Left_Ysite = Bottonline;
-    uint8 Left_Xsite = ImageDeal[Bottonline].LeftBoundary;
-    uint8 Left_Rirection = 0;//左边方向
-    uint8 Pixel_Left_Ysite = Bottonline;
-    uint8 Pixel_Left_Xsite = 0;
+    int Left_Ysite = Bottonline;
+    int Left_Xsite = ImageDeal[Bottonline].LeftBoundary;
+    int Left_Rirection = 0;//左边方向
+    int Pixel_Left_Ysite = Bottonline;
+    int Pixel_Left_Xsite = 0;
 
-    uint8 Right_Ysite = Bottonline;
-    uint8 Right_Xsite = ImageDeal[Bottonline].RightBoundary;
-    uint8 Right_Rirection = 0;//右边方向
-    uint8 Pixel_Right_Ysite = Bottonline;
-    uint8 Pixel_Right_Xsite = 0;
-    uint8 Ysite = Bottonline;
+    int Right_Ysite = Bottonline;
+    int Right_Xsite = ImageDeal[Bottonline].RightBoundary;
+    int Right_Rirection = 0;//右边方向
+    int Pixel_Right_Ysite = Bottonline;
+    int Pixel_Right_Xsite = 0;
+    int Ysite = Bottonline;
     ImageStatus.OFFLineBoundary = 5;
     while (1)
     {
@@ -755,6 +800,10 @@ void Search_Left_and_Right_Lines(int imageInput[CAMERA_H][CAMERA_W], int Row, in
             /*计算前方坐标*/
             Pixel_Left_Ysite = Left_Ysite + Left_Rule[0][2 * Left_Rirection + 1];
             Pixel_Left_Xsite = Left_Xsite + Left_Rule[0][2 * Left_Rirection];
+            if (!is_image_xy_valid(Pixel_Left_Xsite, Pixel_Left_Ysite)) {
+                ImageStatus.OFFLineBoundary = Ysite;
+                break;
+            }
 
             if (imageInput[Pixel_Left_Ysite][Pixel_Left_Xsite] == 0)//前方是黑色
             {
@@ -769,6 +818,10 @@ void Search_Left_and_Right_Lines(int imageInput[CAMERA_H][CAMERA_W], int Row, in
                 /*计算左前方坐标*/
                 Pixel_Left_Ysite = Left_Ysite + Left_Rule[1][2 * Left_Rirection + 1];
                 Pixel_Left_Xsite = Left_Xsite + Left_Rule[1][2 * Left_Rirection];
+                if (!is_image_xy_valid(Pixel_Left_Xsite, Pixel_Left_Ysite)) {
+                    ImageStatus.OFFLineBoundary = Ysite;
+                    break;
+                }
 
                 if (imageInput[Pixel_Left_Ysite][Pixel_Left_Xsite] == 0)//左前方为黑色
                 {
@@ -802,6 +855,10 @@ void Search_Left_and_Right_Lines(int imageInput[CAMERA_H][CAMERA_W], int Row, in
             /*计算前方坐标*/
             Pixel_Right_Ysite = Right_Ysite + Right_Rule[0][2 * Right_Rirection + 1];
             Pixel_Right_Xsite = Right_Xsite + Right_Rule[0][2 * Right_Rirection];
+            if (!is_image_xy_valid(Pixel_Right_Xsite, Pixel_Right_Ysite)) {
+                ImageStatus.OFFLineBoundary = Ysite;
+                break;
+            }
 
             if (imageInput[Pixel_Right_Ysite][Pixel_Right_Xsite] == 0)//前方是黑色
             {
@@ -816,6 +873,10 @@ void Search_Left_and_Right_Lines(int imageInput[CAMERA_H][CAMERA_W], int Row, in
                 /*计算右前方坐标*/
                 Pixel_Right_Ysite = Right_Ysite + Right_Rule[1][2 * Right_Rirection + 1];
                 Pixel_Right_Xsite = Right_Xsite + Right_Rule[1][2 * Right_Rirection];
+                if (!is_image_xy_valid(Pixel_Right_Xsite, Pixel_Right_Ysite)) {
+                    ImageStatus.OFFLineBoundary = Ysite;
+                    break;
+                }
 
                 if (imageInput[Pixel_Right_Ysite][Pixel_Right_Xsite] == 0)//左前方为黑色
                 {
@@ -852,7 +913,7 @@ void Search_Left_and_Right_Lines(int imageInput[CAMERA_H][CAMERA_W], int Row, in
     }
 }
 
-void Search_Border_OTSU(int imageInput[CAMERA_H][CAMERA_W], uint8 Row, uint8 Col, uint8 Bottonline)
+void Search_Border_OTSU(uint8_t imageInput[CAMERA_H][CAMERA_W], uint8 Row, uint8 Col, uint8 Bottonline)
 {
     ImageStatus.WhiteLine_L = 0;
     ImageStatus.WhiteLine_R = 0;
@@ -868,6 +929,8 @@ void Search_Border_OTSU(int imageInput[CAMERA_H][CAMERA_W], uint8 Row, uint8 Col
     {
             ImageDeal[Ysite].LeftBoundary_First = 0;
             ImageDeal[Ysite].RightBoundary_First = 79;
+            ImageDeal[Ysite].LeftBoundary = 0;
+            ImageDeal[Ysite].RightBoundary = 79;
 
             imageInput[Ysite][0] = 0;
             imageInput[Ysite][CAMERA_W - 1] = 0;
@@ -1043,6 +1106,21 @@ static float cross_clamp_slope(float slope, float limit) {
     return slope;
 }
 
+// 角点局部验证：角点附近必须同时存在足够黑/白像素，避免单色噪声区域误判。
+static bool is_cross_corner_local_valid(int x, int y)
+{
+    if (x < 2 || x > 77 || y < 2 || y > 57) return false;
+    int black_count = 0;
+    int white_count = 0;
+    for (int yy = y - 2; yy <= y + 2; yy++) {
+        for (int xx = x - 2; xx <= x + 2; xx++) {
+            if (img1[yy][xx] == 0) black_count++;
+            else white_count++;
+        }
+    }
+    return black_count >= 6 && white_count >= 6;
+}
+
 /*
  * 检测十字路口的四个角点
  * 策略：从近端向上扫描左右边界，找到"有边→丢边"的跳变点作为角点。
@@ -1060,16 +1138,24 @@ static void DetectCrossCorners(CrossCorner_t *lt, CrossCorner_t *rt,
     const int start_row = car_config::kCrossCornerScanStartRow;
     const int end_row   = car_config::kCrossCornerScanEndRow;
     const int min_len   = car_config::kCrossCornerMinBorderLen;
+    const int search_top = (start_row < 2) ? 2 : start_row;
+    const int search_bottom = (end_row > 58) ? 58 : end_row;
 
     // --- 找左下角：从近端向上，左边界从'T'变'W' ---
     int left_found_count = 0;
-    for (int y = 58; y >= start_row; y--) {
+    for (int y = search_bottom; y >= search_top; y--) {
         if (ImageDeal[y].IsLeftFind == 'T') {
             left_found_count++;
         } else if (ImageDeal[y].IsLeftFind == 'W' && left_found_count >= min_len) {
             // 角点在丢边开始的那一行
-            lb->x = ImageDeal[y + 1].LeftBorder;
-            lb->y = y + 1;
+            const int corner_x = ImageDeal[y + 1].LeftBorder;
+            const int corner_y = y + 1;
+            if (!is_cross_corner_local_valid(corner_x, corner_y)) {
+                left_found_count = 0;
+                continue;
+            }
+            lb->x = corner_x;
+            lb->y = corner_y;
             lb->valid = true;
             break;
         } else {
@@ -1079,12 +1165,18 @@ static void DetectCrossCorners(CrossCorner_t *lt, CrossCorner_t *rt,
 
     // --- 找右下角：从近端向上，右边界从'T'变'W' ---
     int right_found_count = 0;
-    for (int y = 58; y >= start_row; y--) {
+    for (int y = search_bottom; y >= search_top; y--) {
         if (ImageDeal[y].IsRightFind == 'T') {
             right_found_count++;
         } else if (ImageDeal[y].IsRightFind == 'W' && right_found_count >= min_len) {
-            rb->x = ImageDeal[y + 1].RightBorder;
-            rb->y = y + 1;
+            const int corner_x = ImageDeal[y + 1].RightBorder;
+            const int corner_y = y + 1;
+            if (!is_cross_corner_local_valid(corner_x, corner_y)) {
+                right_found_count = 0;
+                continue;
+            }
+            rb->x = corner_x;
+            rb->y = corner_y;
             rb->valid = true;
             break;
         } else {
@@ -1094,14 +1186,19 @@ static void DetectCrossCorners(CrossCorner_t *lt, CrossCorner_t *rt,
 
     // --- 找左上角：从丢边区域上方，左边界从'W'变'T' ---
     int lb_y = lb->valid ? lb->y : 40;
-    for (int y = lb_y - 1; y >= start_row; y--) {
+    if (lb_y > search_bottom) lb_y = search_bottom;
+    for (int y = lb_y - 1; y >= search_top; y--) {
         if (ImageDeal[y].IsLeftFind == 'T'
             && ImageDeal[y - 1].IsLeftFind == 'T'
             && ImageDeal[y - 2].IsLeftFind == 'T'
             && ImageDeal[y].LeftBorder > 0
             && ImageDeal[y].LeftBorder < 70)
         {
-            lt->x = ImageDeal[y].LeftBorder;
+            const int corner_x = ImageDeal[y].LeftBorder;
+            if (!is_cross_corner_local_valid(corner_x, y)) {
+                continue;
+            }
+            lt->x = corner_x;
             lt->y = y;
             lt->valid = true;
             break;
@@ -1110,14 +1207,19 @@ static void DetectCrossCorners(CrossCorner_t *lt, CrossCorner_t *rt,
 
     // --- 找右上角：从丢边区域上方，右边界从'W'变'T' ---
     int rb_y = rb->valid ? rb->y : 40;
-    for (int y = rb_y - 1; y >= start_row; y--) {
+    if (rb_y > search_bottom) rb_y = search_bottom;
+    for (int y = rb_y - 1; y >= search_top; y--) {
         if (ImageDeal[y].IsRightFind == 'T'
             && ImageDeal[y - 1].IsRightFind == 'T'
             && ImageDeal[y - 2].IsRightFind == 'T'
             && ImageDeal[y].RightBorder > 10
             && ImageDeal[y].RightBorder < 79)
         {
-            rt->x = ImageDeal[y].RightBorder;
+            const int corner_x = ImageDeal[y].RightBorder;
+            if (!is_cross_corner_local_valid(corner_x, y)) {
+                continue;
+            }
+            rt->x = corner_x;
             rt->y = y;
             rt->valid = true;
             break;
@@ -1250,6 +1352,16 @@ static bool CrossCornerRepair(void)
     int valid_count = lt.valid + rt.valid + lb.valid + rb.valid;
     if (valid_count < 2) return false;  // 至少需要2个角点
 
+    const bool paired_bottom_corners = lb.valid && rb.valid;
+    const bool paired_top_corners = lt.valid && rt.valid;
+    const bool strong_cross_geometry =
+        valid_count >= 3 ||
+        paired_bottom_corners ||
+        (paired_top_corners && ImageStatus.OFFLine >= car_config::kBadVisionCenterHoldOfflineThreshold);
+    if (!strong_cross_geometry) {
+        return false;
+    }
+
     // ===== 情况1：四角点全在（普通十字）=====
     if (lt.valid && rt.valid && lb.valid && rb.valid) {
         CrossRepairBetween(lb, lt, 'L');  // 左边界：LB→LT
@@ -1259,8 +1371,13 @@ static bool CrossCornerRepair(void)
     else if (lt.valid && rt.valid && !lb.valid && !rb.valid) {
         // 用上角点的近端边界斜率向下延长
         // 左边：假设底部边界在58行，用 LT 的斜率向下
-        float left_slope = (lt.x - ImageDeal[58].LeftBorder) / (float)(58 - lt.y);
-        float right_slope = (rt.x - ImageDeal[58].RightBorder) / (float)(58 - rt.y);
+        const int left_denom = 58 - lt.y;
+        const int right_denom = 58 - rt.y;
+        if (left_denom <= 0 || right_denom <= 0) {
+            return false;
+        }
+        float left_slope = (lt.x - ImageDeal[58].LeftBorder) / (float)left_denom;
+        float right_slope = (rt.x - ImageDeal[58].RightBorder) / (float)right_denom;
         CrossRepairExtend(lt, left_slope, 'L', false);
         CrossRepairExtend(rt, right_slope, 'R', false);
     }
@@ -1298,7 +1415,7 @@ static bool CrossCornerRepair(void)
     else if (lt.valid && lb.valid && !rt.valid && !rb.valid) {
         // 左侧有完整角点，右侧用标准半宽推算
         CrossRepairBetween(lb, lt, 'L');
-        for (int y = lb->y; y >= lt->y; y--) {
+        for (int y = lb.y; y >= lt.y; y--) {
             int x = ImageDeal[y].LeftBorder + Half_Road_Wide[y] * 2;
             x = cross_clamp_x(x);
             ImageDeal[y].RightBorder = x;
@@ -1309,7 +1426,7 @@ static bool CrossCornerRepair(void)
     else if (rt.valid && rb.valid && !lt.valid && !lb.valid) {
         // 右侧有完整角点，左侧用标准半宽推算
         CrossRepairBetween(rb, rt, 'R');
-        for (int y = rb->y; y >= rt->y; y--) {
+        for (int y = rb.y; y >= rt.y; y--) {
             int x = ImageDeal[y].RightBorder - Half_Road_Wide[y] * 2;
             x = cross_clamp_x(x);
             ImageDeal[y].LeftBorder = x;
@@ -1365,11 +1482,15 @@ static void RouteFilter(void)
         if (  ImageDeal[ytemp].IsLeftFind == 'T'
             &&ImageDeal[ytemp].IsRightFind == 'T')  //寻找两边都正常的，找到离本行最近的就不找了
         {
-          DetR = (float)(ImageDeal[ytemp - 1].Center - ImageDeal[Ysite + 2].Center) /(float)(ytemp - 1 - Ysite - 2);          //算斜率
+          const int slope_den = ytemp - 1 - Ysite - 2;
+          if (slope_den == 0) {
+            break;
+          }
+          DetR = (float)(ImageDeal[ytemp - 1].Center - ImageDeal[Ysite + 2].Center) /(float)slope_den;          //算斜率
           int CenterTemp = ImageDeal[Ysite + 2].Center;
           int LineTemp = Ysite + 2;
           while (Ysite >= ytemp) {
-            ImageDeal[Ysite].Center =(int)(CenterTemp +DetR * (float)(Ysite - LineTemp));                                     //用斜率补
+            ImageDeal[Ysite].Center = clamp_image_x((int)(CenterTemp +DetR * (float)(Ysite - LineTemp)));                                     //用斜率补
             Ysite--;
           }
           break;
@@ -1378,7 +1499,7 @@ static void RouteFilter(void)
     }
     // ImageDeal[Ysite].Center =(ImageDeal[Ysite - 1].Center + 2 * ImageDeal[Ysite].Center) /3;                                  //求平均，应该会比较滑  本来是上下两点平均
     // 【重点】加强滤波，从3点平均改为5点滑动平均，减少抖动
-    ImageDeal[Ysite].Center =(ImageDeal[Ysite - 2].Center + 2*ImageDeal[Ysite - 1].Center + 4*ImageDeal[Ysite].Center + 2*ImageDeal[Ysite + 1].Center + ImageDeal[Ysite + 2].Center) /10;
+    ImageDeal[Ysite].Center = clamp_image_x((ImageDeal[Ysite - 2].Center + 2*ImageDeal[Ysite - 1].Center + 4*ImageDeal[Ysite].Center + 2*ImageDeal[Ysite + 1].Center + ImageDeal[Ysite + 2].Center) /10);
   }
   
 }
@@ -1392,7 +1513,11 @@ void GetDet()
   //Speed_Control_Factor();
 
   /*固定圆环前瞻*/
-  if (ImageStatus.image_element_rings_flag != 0) TowPoint =Circle[circle_count_flag];
+  if (ImageStatus.image_element_rings_flag != 0) {
+    uint32 circle_index = circle_count_flag;
+    if (circle_index > 4) circle_index = 4;
+    TowPoint = Circle[circle_index];
+  }
 //   else if(ImageStatus.Road_type ==Cross_ture)
 //   {
 //     TowPoint=29;
@@ -1429,7 +1554,7 @@ void GetDet()
       DetTemp += Weighting[-TowPoint + Ysite - 1] * (ImageDeal[Ysite].Center);
       UnitAll += Weighting[-TowPoint + Ysite - 1];
     }
-    DetTemp = (ImageDeal[Ysite].Center + DetTemp) / (UnitAll + 1);
+    DetTemp = (ImageDeal[TowPoint].Center + DetTemp) / (UnitAll + 1);
   } 
   else if (ImageStatus.OFFLine < 49)  //前瞻等于截至行
   {
@@ -2787,6 +2912,12 @@ void imageprocess(void)
 {
     ImageStatus.OFFLine = 2;  //这个值根据真实距离得到，必须进行限制//图像顶边
     ImageStatus.WhiteLine = 0;//双边丢边数
+    if (ImageFlag.image_element_rings == 0 &&
+        ImageStatus.Road_type != Ramp &&
+        ImageStatus.Road_type != LeftCirque &&
+        ImageStatus.Road_type != RightCirque) {
+      ImageStatus.Road_type = Normol;
+    }
     for (Ysite = 59; Ysite >= ImageStatus.OFFLine; Ysite--)
     {
     ImageDeal[Ysite].IsLeftFind = 'F';//左边有边

@@ -9,8 +9,8 @@
 void lq_motor_pid_demo(void)
 {
     // // 1. 初始化电机 PWM 控制 (频率10KHz，初始占空比0)
-    // ls_atim_pwm pwm1(ATIM_PWM0_PIN81, 10000, 0, ATIM_PWM_POL_INV);
-    // ls_atim_pwm pwm2(ATIM_PWM1_PIN82, 10000, 0, ATIM_PWM_POL_INV);
+    // ls_atim_pwm pwm1(ATIM_PWM0_PIN81, 10000, 10000, ATIM_PWM_POL_NORMAL);
+    // ls_atim_pwm pwm2(ATIM_PWM1_PIN82, 10000, 10000, ATIM_PWM_POL_NORMAL);
     
     // // 2. 初始化电机方向控制引脚
     // ls_gpio pwm1dir(PIN_21, GPIO_MODE_OUT);
@@ -67,23 +67,23 @@ void lq_motor_pid_demo(void)
     //     if (current_pwm1 >= 0) 
     //     {
     //         pwm1dir.gpio_level_set(GPIO_LOW); // 控制电机正转 (如果是倒退，把1改成0即可)
-    //         pwm1.atim_pwm_set_duty((uint32_t)current_pwm1);
+    //         pwm1.atim_pwm_set_active_low_duty((uint32_t)current_pwm1);
     //     } 
     //     else 
     //     {
     //         pwm1dir.gpio_level_set(GPIO_HIGH); // 控制电机反转
-    //         pwm1.atim_pwm_set_duty((uint32_t)(-current_pwm1)); // duty不能接收负数
+    //         pwm1.atim_pwm_set_active_low_duty((uint32_t)(-current_pwm1)); // duty不能接收负数
     //     }
 
     //     if (current_pwm2 >= 0) 
     //     {
     //         pwm2dir.gpio_level_set(GPIO_LOW); // 控制电机正转 (如果是倒退，把1改成0即可)
-    //         pwm2.atim_pwm_set_duty((uint32_t)current_pwm2);
+    //         pwm2.atim_pwm_set_active_low_duty((uint32_t)current_pwm2);
     //     } 
     //     else 
     //     {
     //         pwm2dir.gpio_level_set(GPIO_HIGH); // 控制电机反转
-    //         pwm2.atim_pwm_set_duty((uint32_t)(-current_pwm2)); // duty不能接收负数
+    //         pwm2.atim_pwm_set_active_low_duty((uint32_t)(-current_pwm2)); // duty不能接收负数
     //     }
 
     //     // // --- 打印信息查看平滑度 ---

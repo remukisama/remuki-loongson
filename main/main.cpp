@@ -100,7 +100,6 @@ int main()
 
     // ===== Demo 33 分步调试总入口：输入编号运行对应测试 =====
     // lq_parameter_step_interactive_demo();
-    gpio_protect_heartbeat_deinit();
     // return 0;
 
     char image_flag = 0;
@@ -113,23 +112,29 @@ int main()
     signal(SIGINT, signal_handler);   // 捕获Ctrl+C
     signal(SIGTERM, signal_handler);  // 捕获系统kill命令
     signal(SIGHUP, signal_handler);   // 捕获SSH断开/终端被关掉的情况
-    signal(SIGABRT, signal_handler);  // 捕获程序自己 abort 崩溃的情况
     signal(SIGQUIT, signal_handler);  // 捕获 Ctrl+\ 退出
-    signal(SIGSEGV, signal_handler);  // 捕获段错误(访问了空指针等崩溃)
+    // SIGABRT/SIGSEGV 保持系统默认动作：立即终止整个进程，使控制线程停止喂狗，
+    // 由 gpio_manager 在心跳超时后写入硬件停车值。禁止捕获后返回到故障指令。
     signal(SIGPIPE, SIG_IGN);         // 忽略破损管道信号(当图传UDP发送失败时忽略之，不退出程序)
 
-    lq_atim_pwm_demo(); // 先单独跑这个 PWM Demo，验证 PWM 输出功能正常，再继续后续的电机控制和图像处理等功能开发。
-    return 0;
-
-    int autotune_ret = run_autotune_stage_if_requested();
-    if (autotune_ret != -999) {
-        printf("[AUTOTUNE] stage_ret=%d\n", autotune_ret);
-        return autotune_ret;
-    }
-
-    // lq_parameter_step_interactive_demo();
-    // // lq_vofa_speed_sine_demo();
+    // 双路 PWM 原始波形测试已完成；整车调试必须进入下方正式闭环，禁止在此早返回。
+    // lq_atim_pwm_demo();
+    // gpio_protect_heartbeat_deinit();
     // return 0;
+    //
+    // 整车赛道模式禁用文件触发的调参分流，避免板上残留 /tmp/lq_autotune_stage.txt
+    // 让程序意外进入 T06/T07 等测试流程。需要自动调参时再显式恢复此段。
+    // int autotune_ret = run_autotune_stage_if_requested();
+    // if (autotune_ret != -999) {
+    //     printf("[AUTOTUNE] stage_ret=%d\n", autotune_ret);
+    //     return autotune_ret;
+    // }
+    //
+    // 当前交付模式：先进入 Demo33 分步测试总入口，不直接启动整车赛道闭环。
+    lq_parameter_step_interactive_demo();
+    gpio_protect_heartbeat_deinit();
+    return 0;
+    // lq_vofa_speed_sine_demo();
 
     // lq_gyro_loop_verify_demo();
     // return 0;
@@ -202,7 +207,7 @@ int main()
     // int ncnn_infer_count = 0;    // NCNN 推理帧计数器
     // std::string ncnn_last_label; // 最近一次 NCNN 推理结果
 
-    while (1)
+    while (!exit_flag)
     {
         gpio_protect_heartbeat_pulse();
 

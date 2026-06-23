@@ -21,8 +21,8 @@
 //     // 实例化正交编码器对象
 //     ls_quadrature_encoder my_encoder(pinA, pinB);
 
-//     ls_atim_pwm pwm1(ATIM_PWM0_PIN81, 10000, 3000, ATIM_PWM_POL_INV);
-//     ls_atim_pwm pwm2(ATIM_PWM1_PIN82, 10000, 3000, ATIM_PWM_POL_INV);
+//     ls_atim_pwm pwm1(ATIM_PWM0_PIN81, 10000, 3000, ATIM_PWM_POL_NORMAL);
+//     ls_atim_pwm pwm2(ATIM_PWM1_PIN82, 10000, 3000, ATIM_PWM_POL_NORMAL);
 //     ls_gpio pwm1dir(PIN_21, GPIO_MODE_OUT);
 //     ls_gpio pwm2dir(PIN_22, GPIO_MODE_OUT);
 //     pwm1.atim_pwm_enable();

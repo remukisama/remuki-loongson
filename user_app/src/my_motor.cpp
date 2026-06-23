@@ -97,14 +97,14 @@ void motor_Init(void)
 {
     // 延迟初始化：首次调用时才构造硬件对象，避免全局构造时访问 /dev/mem 导致崩溃
     if (!motor_L) {
-        motor_L = new ls_atim_pwm(ATIM_PWM0_PIN81, car_config::kMotorPwmFrequencyHz, car_config::kMotorInitialDuty, ATIM_PWM_POL_INV);
-        motor_R = new ls_atim_pwm(ATIM_PWM1_PIN82, car_config::kMotorPwmFrequencyHz, car_config::kMotorInitialDuty, ATIM_PWM_POL_INV);
+        motor_L = new ls_atim_pwm(ATIM_PWM0_PIN81, car_config::kMotorPwmFrequencyHz, car_config::kMotorInitialDuty, ATIM_PWM_POL_NORMAL);
+        motor_R = new ls_atim_pwm(ATIM_PWM1_PIN82, car_config::kMotorPwmFrequencyHz, car_config::kMotorInitialDuty, ATIM_PWM_POL_NORMAL);
         motor_L_Dir = new ls_gpio(PIN_21, GPIO_MODE_OUT);
         motor_R_Dir = new ls_gpio(PIN_22, GPIO_MODE_OUT);
     }
 
-    motor_R->atim_pwm_set_duty(0);
-    motor_L->atim_pwm_set_duty(0);
+    motor_R->atim_pwm_set_active_low_duty(0);
+    motor_L->atim_pwm_set_active_low_duty(0);
     
     printf("R:OK!");
     
@@ -116,30 +116,53 @@ void motor_Init(void)
 
 void motor_Duty_R(int duty)
 {
-    if (duty <= 0)
+    if (!motor_R || !motor_R_Dir) return;  // 电机未初始化时安全跳过
+    if (duty == 0)
     {
-        motor_R->atim_pwm_set_duty(-duty);
+        motor_R->atim_pwm_set_active_low_duty(0);
+        motor_R_Dir->gpio_level_set(GPIO_LOW);
+    }
+    else if (duty < 0)
+    {
+        // 反转：DIR=HIGH + 反转PWM占空比（对称力矩）
+        const int magnitude = std::min(-duty, car_config::kMotorPwmStopDuty);
+        motor_R->atim_pwm_set_active_low_duty(car_config::kMotorPwmStopDuty - magnitude);
         motor_R_Dir->gpio_level_set(GPIO_HIGH);
     }
     else
     {
-        motor_R->atim_pwm_set_duty(duty);
+        // 正转：DIR=LOW + active_low_duty
+        const int magnitude = std::min(duty, car_config::kMotorPwmStopDuty);
+        motor_R->atim_pwm_set_active_low_duty(magnitude);
         motor_R_Dir->gpio_level_set(GPIO_LOW);
     }
+    // 只有真实电机控制持续更新时才续命；控制循环卡死后看门狗会自动停车。
+    gpio_protect_heartbeat_pulse();
 }
 
 void motor_Duty_L(int duty)
 {
-    if (duty <= 0)
+    if (!motor_L || !motor_L_Dir) return;  // 电机未初始化时安全跳过
+    if (duty == 0)
     {
-        motor_L->atim_pwm_set_duty(-duty);
+        motor_L->atim_pwm_set_active_low_duty(0);
+        motor_L_Dir->gpio_level_set(GPIO_LOW);
+    }
+    else if (duty < 0)
+    {
+        // 反转：DIR=HIGH + 反转PWM占空比（对称力矩）
+        const int magnitude = std::min(-duty, car_config::kMotorPwmStopDuty);
+        motor_L->atim_pwm_set_active_low_duty(car_config::kMotorPwmStopDuty - magnitude);
         motor_L_Dir->gpio_level_set(GPIO_HIGH);
     }
     else
     {
-        motor_L->atim_pwm_set_duty(duty);
+        // 正转：DIR=LOW + active_low_duty
+        const int magnitude = std::min(duty, car_config::kMotorPwmStopDuty);
+        motor_L->atim_pwm_set_active_low_duty(magnitude);
         motor_L_Dir->gpio_level_set(GPIO_LOW);
     }
+    gpio_protect_heartbeat_pulse();
 }
 
 
@@ -464,6 +487,10 @@ void speed_dif_cascade()
         single_side_loss >= car_config::kUTurnSingleSideLossThreshold &&
         (std::fabs(raw_steer_error) >= car_config::kUTurnRawThreshold ||
          std::fabs(steer_error) >= car_config::kUTurnRawThreshold);
+    const bool u_turn_early_risk =
+        !ring_now &&
+        (ImageStatus.Road_type == Normol || ImageStatus.Road_type == Straight) &&
+        single_side_loss >= car_config::kUTurnEarlyLossThreshold;
     const bool u_turn_exit_centered =
         !u_turn_prepare &&
         u_turn_forced_dir != 0 &&
@@ -520,6 +547,10 @@ void speed_dif_cascade()
     }
     if (Speed_Goal > car_config::kUTurnSpeedGoal && u_turn_risk) {
         Speed_Goal = car_config::kUTurnSpeedGoal;
+    }
+    if (!u_turn_risk && u_turn_early_risk &&
+        Speed_Goal > car_config::kUTurnEarlySpeedGoal) {
+        Speed_Goal = car_config::kUTurnEarlySpeedGoal;
     }
     if (ring_now && Speed_Goal > car_config::kRingSpeedGoal) {
         Speed_Goal = car_config::kRingSpeedGoal;
@@ -985,7 +1016,7 @@ void Car_Speed_Contrl(void)
 
 void Speed_BiHuan(void)
 {
-    // encoder_num() 返回的已经是当前的瞬时速度（引脚脉冲测频），不需要再做差分差值计算！
+    // encoder_num() 已内置四重滤波（垃圾/尖峰/限幅/低通），直接使用
     speed_encoder_raw_L = encoder_num_L();
     speed_encoder_raw_R = encoder_num_R();
     speed_encoder_L = speed_encoder_raw_L;
@@ -1109,19 +1140,15 @@ void emergency_stop() {
         motor_Duty_R(0);    // 右电机停转
         motor_Duty_L(0);    // 左电机停转
     }
+    // [T01修正] DIR极性反转后，停车时拉到反转方向的无效端（LOW=反转，与duty=0配对无输出）
     if (motor_R_Dir) motor_R_Dir->gpio_level_set(GPIO_LOW);
     if (motor_L_Dir) motor_L_Dir->gpio_level_set(GPIO_LOW);
 
     if (motor_R && motor_L) {
-        if (car_config::kMotorStopKeepPwmEnabled) {
-            motor_R->atim_pwm_enable();
-            motor_L->atim_pwm_enable();
-            motor_R->atim_pwm_set_duty(0);
-            motor_L->atim_pwm_set_duty(0);
-        } else {
-            motor_R->atim_pwm_disable();
-            motor_L->atim_pwm_disable();
-        }
+        motor_R->atim_pwm_set_active_low_duty(0);
+        motor_L->atim_pwm_set_active_low_duty(0);
+        motor_R->atim_pwm_enable();
+        motor_L->atim_pwm_enable();
     }
     // stree_M.SetDutyCycle(170000);  // 舵机归中
     printf("程序终止，电机已停止。\n");
@@ -1129,8 +1156,8 @@ void emergency_stop() {
 
 // 信号处理函数（捕获 Ctrl+C 等终止信号）
 void signal_handler(int signum) {
-    exit_flag = true;    // 触发子线程退出
-    emergency_stop();    // 立即停止电机
-    gpio_protect_heartbeat_deinit();
-    exit(signum);        // 终止进程
+    (void)signum;
+    // 信号上下文只通知退出。PWM/GPIO/心跳清理由 main 的正常执行流完成，
+    // 避免在异步信号中加锁、打印或 exit() 导致停机流程被中断。
+    exit_flag.store(true, std::memory_order_relaxed);
 }

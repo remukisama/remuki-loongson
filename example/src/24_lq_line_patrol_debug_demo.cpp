@@ -18,7 +18,7 @@ static const std::string TARGET_IP    = "192.168.255.22";  // 目标PC IP地址
 static const uint16_t    TARGET_PORT  = 8080;             // 目标UDP端口
 static const uint8_t     JPEG_QUALITY = 50;               // 压缩质量(1~100)
 
-extern int img1[60][80];
+extern uint8_t img1[60][80];
 extern ImageDealDatatypedef ImageDeal[60];
 extern ImageStatustypedef ImageStatus;
 

@@ -77,9 +77,8 @@ bool image_cv_zip(void)
     cv::flip(raw, raw, -1);
 
     // ---- 保存高分辨率帧供 NCNN 推理等下游使用 ----
-    // TODO: 此处不执行任何操作，仅暴露高分辨率帧
-    // 将高分辨率帧克隆到全局变量
-    frame_hires = raw.clone();
+    // 这里只保留 Mat 引用计数，不做每帧深拷贝；异步消费者需要长期持有时自行 clone。
+    frame_hires = raw;
 
     // ---- 下采样到 160x120 供循迹算法 ----
     cv::resize(raw, frame, cv::Size(car_config::kCameraWidth, car_config::kCameraHeight));
@@ -115,10 +114,12 @@ bool image_cv_zip(void)
 
         if (car_config::kImageAlgorithm == 2)
         {
-            const int blur_kernel = (car_config::kImageOtsuBlurKernel % 2 == 1 && car_config::kImageOtsuBlurKernel > 1)
+            const int blur_kernel = (car_config::kImageOtsuBlurKernel % 2 == 1)
                 ? car_config::kImageOtsuBlurKernel
-                : 3;
-            cv::GaussianBlur(gray, gray, cv::Size(blur_kernel, blur_kernel), 0);
+                : (car_config::kImageOtsuBlurKernel + 1);
+            if (blur_kernel > 1) {
+                cv::GaussianBlur(gray, gray, cv::Size(blur_kernel, blur_kernel), 0);
+            }
             cv::threshold(gray, binary, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
         }
         else
@@ -130,12 +131,17 @@ bool image_cv_zip(void)
     // 统一形态学后处理：先开运算去孤点，再闭运算补小孔；kernel<=1时跳过。
     if (car_config::kImageMorphKernel > 1)
     {
+        static int cached_morph_kernel = 0;
+        static cv::Mat cached_kernel;
         const int morph_kernel = (car_config::kImageMorphKernel % 2 == 1)
             ? car_config::kImageMorphKernel
             : (car_config::kImageMorphKernel + 1);
-        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(morph_kernel, morph_kernel));
-        cv::morphologyEx(binary, binary, cv::MORPH_OPEN, kernel);
-        cv::morphologyEx(binary, binary, cv::MORPH_CLOSE, kernel);
+        if (cached_kernel.empty() || cached_morph_kernel != morph_kernel) {
+            cached_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(morph_kernel, morph_kernel));
+            cached_morph_kernel = morph_kernel;
+        }
+        cv::morphologyEx(binary, binary, cv::MORPH_OPEN, cached_kernel);
+        cv::morphologyEx(binary, binary, cv::MORPH_CLOSE, cached_kernel);
     }
 
     // 指针快速遍历：roi_frame 已经是 160x60，行数 0~59

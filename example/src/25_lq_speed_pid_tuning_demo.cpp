@@ -21,8 +21,8 @@ void lq_speed_pid_tuning_demo(void)
     std::cout << "按 Ctrl+C 安全退出。" << std::endl;
 
     // 1. 初始化电机 PWM 控制 (频率10KHz，初始占空比0)
-    ls_atim_pwm motor_L(ATIM_PWM0_PIN81, 10000, 0, ATIM_PWM_POL_INV);
-    ls_atim_pwm motor_R(ATIM_PWM1_PIN82, 10000, 0, ATIM_PWM_POL_INV);
+    ls_atim_pwm motor_L(ATIM_PWM0_PIN81, 10000, 10000, ATIM_PWM_POL_NORMAL);
+    ls_atim_pwm motor_R(ATIM_PWM1_PIN82, 10000, 10000, ATIM_PWM_POL_NORMAL);
     
     // 2. 初始化电机方向控制引脚
     ls_gpio motor_L_Dir(PIN_21, GPIO_MODE_OUT);
@@ -107,19 +107,19 @@ void lq_speed_pid_tuning_demo(void)
         // 左轮输出
         if (speed_out_L >= 0) {
             motor_L_Dir.gpio_level_set(GPIO_LOW);  // 假设 LOW 为正转
-            motor_L.atim_pwm_set_duty(speed_out_L);
+            motor_L.atim_pwm_set_active_low_duty(speed_out_L);
         } else {
             motor_L_Dir.gpio_level_set(GPIO_HIGH); // 反转
-            motor_L.atim_pwm_set_duty(-speed_out_L);
+            motor_L.atim_pwm_set_active_low_duty(-speed_out_L);
         }
 
         // 右轮输出
         if (speed_out_R >= 0) {
             motor_R_Dir.gpio_level_set(GPIO_LOW);  // 假设 LOW 为正转
-            motor_R.atim_pwm_set_duty(speed_out_R);
+            motor_R.atim_pwm_set_active_low_duty(speed_out_R);
         } else {
             motor_R_Dir.gpio_level_set(GPIO_HIGH); // 反转
-            motor_R.atim_pwm_set_duty(-speed_out_R);
+            motor_R.atim_pwm_set_active_low_duty(-speed_out_R);
         }
 
         // ==============================================
@@ -144,8 +144,8 @@ void lq_speed_pid_tuning_demo(void)
 
     // 退出程序时的安全断电逻辑
     std::cout << "正在关闭电机..." << std::endl;
-    motor_L.atim_pwm_set_duty(0);
-    motor_R.atim_pwm_set_duty(0);
-    motor_L.atim_pwm_disable();
-    motor_R.atim_pwm_disable();
+    motor_L.atim_pwm_set_active_low_duty(0);
+    motor_R.atim_pwm_set_active_low_duty(0);
+    motor_L.atim_pwm_enable();
+    motor_R.atim_pwm_enable();
 }

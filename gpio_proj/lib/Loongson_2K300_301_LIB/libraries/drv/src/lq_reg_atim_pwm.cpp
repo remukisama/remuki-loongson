@@ -129,9 +129,24 @@ void ls_atim_pwm::atim_pwm_set_duty(uint32_t _duty)
 {
     std::lock_guard<std::mutex> lock(this->mtx);
     pthread_mutex_lock(&ATIM_MUTEX);
+    if (_duty > ATIM_PWM_DUTY_MAX) {
+        _duty = ATIM_PWM_DUTY_MAX;
+    }
     this->duty = _duty;
-    ls_writel(this->atim_ccrx, ATIM_PWM_CLK_FRE / this->period * this->duty / ATIM_PWM_DUTY_MAX);
+
+    // 保持寄存器占空比直映射：3000=30%、5000=50%、10000=100%。
+    // 当前双路电机板为低有效输入，电机功率反向换算应由电机应用层完成。
+    ls_writel(this->atim_ccrx,
+              ATIM_PWM_CLK_FRE / this->period * this->duty / ATIM_PWM_DUTY_MAX);
     pthread_mutex_unlock(&ATIM_MUTEX);
+}
+
+void ls_atim_pwm::atim_pwm_set_active_low_duty(uint32_t _duty)
+{
+    if (_duty > ATIM_PWM_DUTY_MAX) {
+        _duty = ATIM_PWM_DUTY_MAX;
+    }
+    this->atim_pwm_set_duty(ATIM_PWM_DUTY_MAX - _duty);
 }
 
 /********************************************************************************
@@ -180,11 +195,12 @@ void ls_atim_pwm::cleanup()
     if (this->atim_base != nullptr) {
         if (this->pola == ATIM_PWM_POL_NORMAL) {
             this->atim_pwm_set_duty(ATIM_PWM_DUTY_MAX);
+            this->atim_pwm_enable();
         } else if (this->pola == ATIM_PWM_POL_INV) {
             this->atim_pwm_set_duty(0);
+            this->atim_pwm_disable();
         }
         std::lock_guard<std::mutex> lock(this->mtx);
-        this->atim_pwm_disable();
         LQ::ls_addr_munmap(this->atim_base);
         this->atim_base    = this->atim_arr     = nullptr;
         this->atim_ccrx    = this->atim_ccmr[0] = nullptr;

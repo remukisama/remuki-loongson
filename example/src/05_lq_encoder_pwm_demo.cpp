@@ -23,8 +23,8 @@ void lq_encoder_pwm_demo(void)
     // ls_encoder_pwm enc3(ENC_PWM2_PIN66, PIN_74);
     ls_encoder_pwm enc4(ENC_PWM3_PIN67, PIN_75);
 
-    // ls_atim_pwm pwm1(ATIM_PWM0_PIN81, 10000, 3000, ATIM_PWM_POL_INV);
-    // ls_atim_pwm pwm2(ATIM_PWM1_PIN82, 10000, 3000, ATIM_PWM_POL_INV);
+    // ls_atim_pwm pwm1(ATIM_PWM0_PIN81, 10000, 3000, ATIM_PWM_POL_NORMAL);
+    // ls_atim_pwm pwm2(ATIM_PWM1_PIN82, 10000, 3000, ATIM_PWM_POL_NORMAL);
     // ls_gpio pwm1dir(PIN_21, GPIO_MODE_OUT);
     // ls_gpio pwm2dir(PIN_22, GPIO_MODE_OUT);
     // pwm1.atim_pwm_enable();

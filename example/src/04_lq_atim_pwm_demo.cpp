@@ -1,4 +1,19 @@
 #include "lq_all_demo.hpp"
+#include "gpio_protect_heartbeat.hpp"
+#include <signal.h>
+#include <unistd.h>
+
+namespace {
+
+volatile sig_atomic_t g_atim_pwm_test_stop = 0;
+
+void atim_pwm_test_signal_handler(int)
+{
+    // 信号处理函数中只置位；PWM/GPIO 操作放回正常执行流中完成。
+    g_atim_pwm_test_stop = 1;
+}
+
+} // namespace
 
 /********************************************************************************
  * @file    lq_atim_pwm_demo.cpp
@@ -19,10 +34,13 @@
  ********************************************************************************/
 void lq_atim_pwm_demo(void)
 {
+    constexpr uint32_t kTestFrequencyHz = 25000;
+    constexpr uint32_t kTestDuty = 3000; // 原始PWM直映射测试：示波器应读到约30%
+
     // 默认极性的构造方式
-    ls_atim_pwm pwm1(ATIM_PWM0_PIN81, 25000, 1000, ATIM_PWM_POL_INV);
+    ls_atim_pwm pwm1(ATIM_PWM0_PIN81, kTestFrequencyHz, 10000, ATIM_PWM_POL_NORMAL);
     // // 自定义极性的构造方式
-    ls_atim_pwm pwm2(ATIM_PWM1_PIN82, 25000, 1000, ATIM_PWM_POL_INV);
+    ls_atim_pwm pwm2(ATIM_PWM1_PIN82, kTestFrequencyHz, 10000, ATIM_PWM_POL_NORMAL);
     // ls_atim_pwm pwm2(ATIM_PWM1_PIN82, 10000, 0);
     // // 拷贝构造使用方法, 调用 pwm3 与调用 pwm1 同效
     // ls_atim_pwm pwm3(pwm1);
@@ -32,6 +50,17 @@ void lq_atim_pwm_demo(void)
     ls_gpio pwm1dir(PIN_21, GPIO_MODE_OUT);
     ls_gpio pwm2dir(PIN_22, GPIO_MODE_OUT);
 
+    // 覆盖 main 中会直接 exit() 的处理函数，使局部 PWM 对象能够正常停机。
+    g_atim_pwm_test_stop = 0;
+    signal(SIGINT, atim_pwm_test_signal_handler);
+    signal(SIGTERM, atim_pwm_test_signal_handler);
+    signal(SIGHUP, atim_pwm_test_signal_handler);
+    signal(SIGQUIT, atim_pwm_test_signal_handler);
+
+    pwm1dir.gpio_level_set(GPIO_HIGH);
+    pwm2dir.gpio_level_set(GPIO_HIGH);
+    pwm1.atim_pwm_set_duty(kTestDuty);
+    pwm2.atim_pwm_set_duty(kTestDuty);
     pwm1.atim_pwm_enable();
     pwm2.atim_pwm_enable();
     // pwm3.atim_pwm_enable();
@@ -39,13 +68,27 @@ void lq_atim_pwm_demo(void)
     // pwm2dir.gpio_level_set(GPIO_HIGH);
     // pwm1.atim_pwm_set_duty(5000);
     // pwm2.atim_pwm_set_duty(7000);
-    while (1)
+    printf("[ATIM_PWM_TEST] CH0(pin81) and CH1(pin82): %u Hz, duty=%u. Press Ctrl+C to stop.\n",
+           kTestFrequencyHz, kTestDuty);
+
+    while (!g_atim_pwm_test_stop)
     {
-        pwm1dir.gpio_level_set(GPIO_HIGH);//左反
-        pwm2dir.gpio_level_set(GPIO_HIGH);//右正
-        // sleep(2);
-        // pwm1dir.gpio_level_set(GPIO_LOW);//左正
-        // pwm2dir.gpio_level_set(GPIO_LOW);
-        // sleep(2);
+        gpio_protect_heartbeat_pulse();
+        usleep(10000);
     }
+
+    // 当前双路驱动板为低有效输入；保持100%高电平并维持PWM使能才是安全停止。
+    pwm1.atim_pwm_set_duty(10000);
+    pwm2.atim_pwm_set_duty(10000);
+    pwm1.atim_pwm_enable();
+    pwm2.atim_pwm_enable();
+    pwm1dir.gpio_level_set(GPIO_LOW);
+    pwm2dir.gpio_level_set(GPIO_LOW);
+    gpio_protect_heartbeat_deinit();
+
+    printf("\n[ATIM_PWM_TEST] Both PWM channels stopped at raw duty=10000 with PWM enabled.\n");
+    fflush(stdout);
+
+    // 不返回，避免局部 PWM 对象析构时 disable 通道，使驱动输入悬空/落低而触发满转。
+    _exit(0);
 }

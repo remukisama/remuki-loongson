@@ -31,7 +31,7 @@
 #define PIN_MOTOR_PWM_3         ATIM_PWM2_PIN83     // GPIO83, TIM1_CH3, MAIN复用
 #define PIN_MOTOR_PWM_4         ATIM_PWM3_PIN76     // GPIO76, TIM1_CH4, ALT1复用
 #define PIN_MOTOR_PWM_FREQ      25000               // 25kHz
-#define PIN_MOTOR_PWM_POLARITY  ATIM_PWM_POL_INV    // 反极性（duty=0 → HIGH → 停止）
+#define PIN_MOTOR_PWM_POLARITY  ATIM_PWM_POL_NORMAL // 当前双路驱动板实测使用正常极性
 
 // ==================== 电机方向 GPIO ====================
 #define PIN_MOTOR_DIR_1         21          // GPIO21（LCD_D17）— 电机1方向
@@ -78,9 +78,9 @@
 #define PIN_I2C_SDA             51          // GPIO51（I2C1_SDA）
 
 // ==================== 安全默认值 ====================
-// ATIM 反极性：duty=0 → 输出HIGH → 电机停止
+// 当前双路驱动板正常极性、低有效：保持通道使能且原始 duty=10000 时电机停止
 // GTIM 反极性：duty=0 → 输出HIGH → 舵机中位（或停止）
-#define SAFE_MOTOR_DUTY         0           // 电机停止
+#define SAFE_MOTOR_DUTY         10000       // 电机停止（100%高电平）
 #define SAFE_MOTOR_DIR          0           // 方向 LOW（标定安全方向）
 #define SAFE_SERVO_DUTY         0           // 舵机停止
 #define SAFE_BUZZER             0           // 静音

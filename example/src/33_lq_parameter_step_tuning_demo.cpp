@@ -56,7 +56,7 @@ static inline ElementScene_e current_element_scene_from_flags() {
 #define g_element_scene current_element_scene_from_flags()
 #define g_element_cooldown_frames 0
 
-extern int img1[60][80];
+extern uint8_t img1[60][80];
 extern int imgdisplay[60][80];
 extern int Left_RingsFlag_Point1_Ysite;
 extern int Left_RingsFlag_Point2_Ysite;
@@ -1865,7 +1865,7 @@ int test_06_low_speed_visual_gyro_closed_loop(int seconds = 10) {
         if (!grab_and_process()) { img_bad_cnt++; break; }
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now - start).count() >= seconds) break;
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_print).count() >= 100) {
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_print).count() >= 200) {
             last_print = now;
             total_prints++;
             raw.add(dbg_raw_steer_error);
@@ -1911,7 +1911,7 @@ int test_06_low_speed_visual_gyro_closed_loop(int seconds = 10) {
                    dbg_opposing_active, dbg_target_before_opposing);
             dbg_frame_count = 0; dbg_spike_count = 0; dbg_dt_max = 0.0f;
         }
-        usleep(5 * 1000);
+        usleep(2 * 1000);  // T06降低sleep让图像处理跟上摄像头帧率（原5ms→2ms）
     }
     exit_flag = true;
     if (ctrl_thread.joinable()) ctrl_thread.join();

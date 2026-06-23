@@ -61,11 +61,11 @@ int main()
     // === 初始化硬件（小车线程直接操作）===
     printf("[INIT] 初始化 4路电机 + 1路舵机 + 4路方向GPIO...\n");
 
-    // 4路电机 ATIM PWM (25kHz, 反极性)
-    ls_atim_pwm m1(PIN_MOTOR_PWM_1, PIN_MOTOR_PWM_FREQ, 0, PIN_MOTOR_PWM_POLARITY);
-    ls_atim_pwm m2(PIN_MOTOR_PWM_2, PIN_MOTOR_PWM_FREQ, 0, PIN_MOTOR_PWM_POLARITY);
-    ls_atim_pwm m3(PIN_MOTOR_PWM_3, PIN_MOTOR_PWM_FREQ, 0, PIN_MOTOR_PWM_POLARITY);
-    ls_atim_pwm m4(PIN_MOTOR_PWM_4, PIN_MOTOR_PWM_FREQ, 0, PIN_MOTOR_PWM_POLARITY);
+    // 4路电机 ATIM PWM (25kHz, NORMAL；100%高电平停车)
+    ls_atim_pwm m1(PIN_MOTOR_PWM_1, PIN_MOTOR_PWM_FREQ, SAFE_MOTOR_DUTY, PIN_MOTOR_PWM_POLARITY);
+    ls_atim_pwm m2(PIN_MOTOR_PWM_2, PIN_MOTOR_PWM_FREQ, SAFE_MOTOR_DUTY, PIN_MOTOR_PWM_POLARITY);
+    ls_atim_pwm m3(PIN_MOTOR_PWM_3, PIN_MOTOR_PWM_FREQ, SAFE_MOTOR_DUTY, PIN_MOTOR_PWM_POLARITY);
+    ls_atim_pwm m4(PIN_MOTOR_PWM_4, PIN_MOTOR_PWM_FREQ, SAFE_MOTOR_DUTY, PIN_MOTOR_PWM_POLARITY);
 
     // 1路舵机 GTIM PWM (50Hz, 反极性)
     ls_gtim_pwm servo(PIN_SERVO_PWM, PIN_SERVO_PWM_FREQ, 0, PIN_SERVO_PWM_POLARITY);
@@ -77,8 +77,8 @@ int main()
     ls_gpio d4(static_cast<gpio_pin_t>(PIN_MOTOR_DIR_4), GPIO_MODE_OUT, GPIO_MUX_GPIO);
 
     // 初始：全部停止
-    m1.atim_pwm_set_duty(0); m2.atim_pwm_set_duty(0);
-    m3.atim_pwm_set_duty(0); m4.atim_pwm_set_duty(0);
+    m1.atim_pwm_set_duty(SAFE_MOTOR_DUTY); m2.atim_pwm_set_duty(SAFE_MOTOR_DUTY);
+    m3.atim_pwm_set_duty(SAFE_MOTOR_DUTY); m4.atim_pwm_set_duty(SAFE_MOTOR_DUTY);
     servo.gtim_pwm_set_duty(0);
     d1.gpio_level_set(GPIO_LOW); d2.gpio_level_set(GPIO_LOW);
     d3.gpio_level_set(GPIO_LOW); d4.gpio_level_set(GPIO_LOW);
@@ -86,7 +86,7 @@ int main()
     printf("[OK] 硬件初始化完成\n\n");
 
     // ==================== 阶段 A ====================
-    printf("=== A: 电机20%% 舵机30%% DIR=LOW 心跳正常 (3秒) ===\n");
+    printf("=== A: 电机原始PWM 20%% 舵机30%% DIR=LOW 心跳正常 (3秒) ===\n");
     m1.atim_pwm_set_duty(2000); m2.atim_pwm_set_duty(2000);
     m3.atim_pwm_set_duty(2000); m4.atim_pwm_set_duty(2000);
     servo.gtim_pwm_set_duty(3000);
@@ -100,7 +100,7 @@ int main()
     }
 
     // ==================== 阶段 B ====================
-    printf("\n=== B: 电机50%% 舵机60%% DIR=LOW 心跳正常 (3秒) ===\n");
+    printf("\n=== B: 电机原始PWM 50%% 舵机60%% DIR=LOW 心跳正常 (3秒) ===\n");
     m1.atim_pwm_set_duty(5000); m2.atim_pwm_set_duty(5000);
     m3.atim_pwm_set_duty(5000); m4.atim_pwm_set_duty(5000);
     servo.gtim_pwm_set_duty(6000);
@@ -113,7 +113,7 @@ int main()
 
     // ==================== 阶段 C ====================
     printf("\n=== C: 停止心跳！模拟小车线程掉线 (5秒) ===\n");
-    printf("  >>> 50ms后看门狗接管：4路PWM归零 + 舵机归零 + 方向LOW <<<\n\n");
+    printf("  >>> 50ms后看门狗接管：4路电机PWM拉到100%%高电平停车 + 舵机归零 + 方向LOW <<<\n\n");
 
     for (int i = 0; i < 500; i++) {
         usleep(10000);
@@ -159,8 +159,8 @@ int main()
 
     // === 清理 ===
     printf("\n=== 测试结束 ===\n");
-    m1.atim_pwm_set_duty(0); m2.atim_pwm_set_duty(0);
-    m3.atim_pwm_set_duty(0); m4.atim_pwm_set_duty(0);
+    m1.atim_pwm_set_duty(SAFE_MOTOR_DUTY); m2.atim_pwm_set_duty(SAFE_MOTOR_DUTY);
+    m3.atim_pwm_set_duty(SAFE_MOTOR_DUTY); m4.atim_pwm_set_duty(SAFE_MOTOR_DUTY);
     servo.gtim_pwm_set_duty(0);
     d1.gpio_level_set(GPIO_LOW); d2.gpio_level_set(GPIO_LOW);
     d3.gpio_level_set(GPIO_LOW); d4.gpio_level_set(GPIO_LOW);

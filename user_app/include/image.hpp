@@ -17,7 +17,7 @@
 #define LimitL(L) (L = ((L < 1) ? 1 : L))    //限制幅度
 #define LimitH(H) (H = ((H > 78) ? 78 : H))  //限制幅度
 
-extern int img1[60][80];//图像二值化之后的数组
+extern uint8_t img1[60][80];//图像二值化之后的数组
 extern int imgdisplay[60][80];//打印的图像数组
 extern uint8 Garage_Location_Flag;//斑马线累积初始次数
 extern bool g_enable_element_process; // 是否启用元素判断与元素处理

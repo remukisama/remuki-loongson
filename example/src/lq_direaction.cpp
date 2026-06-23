@@ -3,8 +3,8 @@
 
 void lq_direaction(void)
 {
-    // ls_atim_pwm pwm1(ATIM_PWM0_PIN81, 10000, 2000, ATIM_PWM_POL_INV);
-    // ls_atim_pwm pwm2(ATIM_PWM1_PIN82, 10000, 2000, ATIM_PWM_POL_INV);
+    // ls_atim_pwm pwm1(ATIM_PWM0_PIN81, 10000, 2000, ATIM_PWM_POL_NORMAL);
+    // ls_atim_pwm pwm2(ATIM_PWM1_PIN82, 10000, 2000, ATIM_PWM_POL_NORMAL);
 
     // ls_gpio pwm1dir(PIN_21, GPIO_MODE_OUT);
     // ls_gpio pwm2dir(PIN_22, GPIO_MODE_OUT);

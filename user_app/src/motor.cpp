@@ -7,8 +7,8 @@
 // // 在文件开头、函数定义之前声明
 // std::atomic<bool> exit_flag(false);  // 原子变量，多线程安全
 // /* 电机PWM */
-// ls_atim_pwm motor_R(ATIM_PWM0_PIN81, 10000, 5000, ATIM_PWM_POL_INV);
-// ls_atim_pwm motor_L(ATIM_PWM1_PIN82, 10000, 5000, ATIM_PWM_POL_INV);
+// ls_atim_pwm motor_R(ATIM_PWM0_PIN81, 10000, 5000, ATIM_PWM_POL_NORMAL);
+// ls_atim_pwm motor_L(ATIM_PWM1_PIN82, 10000, 5000, ATIM_PWM_POL_NORMAL);
 // /* 电机方向GPIO */
 // //方向引脚输出0是正转，1是反转
 // ls_gpio motor_R_Dir(PIN_21, GPIO_MODE_OUT);
@@ -35,8 +35,8 @@
 // void motor_Init(void)
 // {
 //     // 设置占空比
-//     motor_R.atim_pwm_set_duty(0);
-//     motor_L.atim_pwm_set_duty(0);
+//     motor_R.atim_pwm_set_active_low_duty(0);
+//     motor_L.atim_pwm_set_active_low_duty(0);
 //     // 使能
 //     printf("R:OK!");
 //     motor_R.atim_pwm_enable();
@@ -54,12 +54,12 @@
     
 //     if (duty <= 0)
 //     {
-//         motor_R.atim_pwm_set_duty(-duty);
+//         motor_R.atim_pwm_set_active_low_duty(-duty);
 //         motor_R_Dir.gpio_level_set(GPIO_HIGH); // 反转：观察电机是否反转
 //     }
 //     else
 //     {
-//         motor_R.atim_pwm_set_duty(duty);
+//         motor_R.atim_pwm_set_active_low_duty(duty);
 //         motor_R_Dir.gpio_level_set(GPIO_LOW);  // 正转：观察电机是否正转
 //     }
 
@@ -72,12 +72,12 @@
 
 //     if (duty <= 0)
 //     {
-//         motor_L.atim_pwm_set_duty(-duty);
+//         motor_L.atim_pwm_set_active_low_duty(-duty);
 //         motor_L_Dir.gpio_level_set(GPIO_HIGH); 
 //     }
 //     else
 //     {
-//         motor_L.atim_pwm_set_duty(duty);
+//         motor_L.atim_pwm_set_active_low_duty(duty);
 //         motor_L_Dir.gpio_level_set(GPIO_LOW);
 //     }
 // }
@@ -460,8 +460,8 @@
 // void emergency_stop() {
 //     motor_Duty_R(0);    // 右电机停转
 //     motor_Duty_L(0);    // 左电机停转
-//     motor_R.atim_pwm_disable();  // 禁用右电机PWM
-//     motor_L.atim_pwm_disable();  // 禁用左电机PWM
+//     motor_R.atim_pwm_set_active_low_duty(0); // 低有效板停车，保持PWM使能
+//     motor_L.atim_pwm_set_active_low_duty(0);
 //     // stree_M.atim_pwm_set_duty(170000);  // 舵机归中
 //     printf("程序终止，电机已停止。\n");
 // }
@@ -496,8 +496,8 @@
 //     motor_Duty_R(0);
 
 //     // 4. 失能PWM外设，彻底关闭输出
-//     motor_R.atim_pwm_disable();
-//     motor_L.atim_pwm_disable();
+//     motor_R.atim_pwm_set_active_low_duty(0);
+//     motor_L.atim_pwm_set_active_low_duty(0);
 
 //     // 5. 复位电机方向引脚，拉低电平
 //     motor_R_Dir.gpio_level_set(GPIO_HIGH);
