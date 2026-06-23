@@ -16,6 +16,7 @@ constexpr int kMotorPwmFrequencyHz = 25000;      // 电机 PWM 频率，频率�
 constexpr int kMotorPwmStopDuty = 10000;         // 当前双路驱动板低有效：PWM保持100%高电平时停车。
 constexpr int kMotorInitialDuty = kMotorPwmStopDuty; // 上电即写停车电平，避免初始化瞬间冲车。
 constexpr int kGpioProtectHeartbeatIntervalMs = 10; // 对齐 loongson-car-system：10ms=100Hz，通过 /gpio_proj_shm 递增 heartbeat_counter。
+constexpr int kWatchdogHeartbeatStallTimeoutMs = 100; // 运行期 watchdog 活性检测：heartbeat_last_ms 超过该值未更新则认为 gpio_manager 失活，主动停车退出。
 constexpr float kSpeedPidP = 1800.0f;             // 【基准值】速度环比例项，实车正弦跑线测试标定。
 constexpr float kSpeedPidI = 35.0f;              // 【基准值】速度环积分项，实车正弦跑线测试标定。
 constexpr float kSpeedPidD = 0.0f;               // 【基准值】速度环微分项，保持0。

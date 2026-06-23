@@ -6,7 +6,7 @@
 # 使用方法：
 #   ./build.sh                    # 编译所有
 #   ./build.sh manager            # 只编译守护进程
-#   ./build.sh test               # 只编译测试程序
+#   ./build.sh test               # 只编译测试程序(test_client/test_motor)
 #   ./build.sh manager <IP>       # 编译 + 传输到板子
 #   ./build.sh manager <IP> run   # 编译 + 传输 + 运行
 ##############################################################################
@@ -59,7 +59,7 @@ do_build() {
 
     case $1 in
         manager) make gpio_manager -j$(nproc) ;;
-        test)    make test_channels -j$(nproc) ;;
+        test)    make test -j$(nproc) ;;
         *)       make -j$(nproc) ;;
     esac
     [ $? -ne 0 ] && log_error "Build failed"
@@ -82,7 +82,10 @@ do_build "${BUILD_TARGET}"
 if [ -n "${BOARD_IP}" ]; then
     case ${BUILD_TARGET} in
         manager) do_transfer "${BUILD_DIR}/gpio_manager" "gpio_manager" ;;
-        test)    do_transfer "${BUILD_DIR}/test/test_channels" "test_channels" ;;
+        test)
+            do_transfer "${BUILD_DIR}/test/test_client" "test_client"
+            do_transfer "${BUILD_DIR}/test/test_motor" "test_motor"
+            ;;
     esac
 
     if [ "${RUN_FLAG}" = "1" ]; then
@@ -93,8 +96,8 @@ if [ -n "${BOARD_IP}" ]; then
                 ssh -t "${BOARD_USER}@${BOARD_IP}" "${BOARD_TARGET_PATH}/gpio_manager"
                 ;;
             test)
-                log_info "Running test_channels on board..."
-                ssh -t "${BOARD_USER}@${BOARD_IP}" "${BOARD_TARGET_PATH}/test_channels"
+                log_info "Running test_motor hardware watchdog test on board..."
+                ssh -t "${BOARD_USER}@${BOARD_IP}" "${BOARD_TARGET_PATH}/test_motor"
                 ;;
         esac
     fi

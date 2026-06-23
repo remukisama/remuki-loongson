@@ -177,3 +177,23 @@ void gpio_protect_heartbeat_deinit(void)
     close_watchdog_shm();
     g_heartbeat_enabled.store(false);
 }
+
+bool gpio_protect_heartbeat_is_wd_alive(int timeout_ms)
+{
+    if (!g_heartbeat_enabled.load()) {
+        return true;
+    }
+    if (!g_shm && open_watchdog_shm() != 0) {
+        return false;
+    }
+    if (!g_shm) {
+        return false;
+    }
+    const uint32_t last_ms = g_shm->heartbeat_last_ms;
+    if (last_ms == 0) {
+        return false;
+    }
+    const long long now = now_ms();
+    const long long age = now - static_cast<long long>(last_ms);
+    return age <= timeout_ms;
+}

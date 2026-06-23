@@ -65,25 +65,28 @@ static void print_usage(const char *program)
 static std::string parse_mode(int argc, char **argv, bool &unsafe_dev_mode)
 {
     unsafe_dev_mode = false;
+    std::string mode;
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];
         if (std::strncmp(arg, "--mode=", 7) == 0) {
-            return std::string(arg + 7);
+            mode = std::string(arg + 7);
+            continue;
         }
         if (std::strcmp(arg, "--mode") == 0 && i + 1 < argc) {
-            return std::string(argv[++i]);
+            mode = std::string(argv[++i]);
+            continue;
         }
         if (std::strcmp(arg, "--unsafe-dev-mode") == 0) {
             unsafe_dev_mode = true;
             continue;
         }
         if (std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0) {
-            return "help";
+            return "help";  // 立即返回帮助
         }
         std::printf("[MAIN] unknown argument: %s\n", arg);
         return "help";
     }
-    return "help";
+    return mode.empty() ? "help" : mode;
 }
 
 // 闭环控制定时器（极高优先级）

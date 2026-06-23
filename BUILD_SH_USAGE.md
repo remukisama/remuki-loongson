@@ -96,13 +96,35 @@ cd main
 
 ## 编译、传输并远程运行
 
-第二个参数传 `-r`：
+第二个参数传 `-r`，远程会自动执行 `main --mode=car`：
 
 ```bash
 bash main/build.sh 192.168.1.100 -r
 ```
 
-脚本会在传输完成后通过 SSH 在开发板后台启动程序。
+脚本会在传输完成后通过 SSH 在开发板后台启动 `main --mode=car`。
+
+如果需要进入调参模式：
+
+```bash
+APP_ARGS="--mode=tune" bash main/build.sh 192.168.1.100 -r
+```
+
+## 增量编译与全量清理
+
+脚本默认使用增量编译（已有 build 目录时直接 `make -j`），不会每次都删除重建。
+
+如果需要全量清理后重新编译：
+
+```bash
+bash main/build.sh --clean
+```
+
+如果需要强制重新执行 CMake 配置（例如修改了 CMakeLists.txt）：
+
+```bash
+bash main/build.sh --reconfigure
+```
 
 ## 目标 IP 写在哪里
 

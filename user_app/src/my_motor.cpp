@@ -1,6 +1,7 @@
 #include "main.hpp"
 #include "my_cascade_pid.hpp"
 #include "car_config.hpp"
+#include "gpio_protect_heartbeat.hpp"
 #include <chrono>
 #include <cmath>
 
@@ -1061,6 +1062,28 @@ void Speed_BiHuan(void)
             printf("[VISION_GUARD] stale/no frame age=%lldms; stop output and skip watchdog heartbeat\n",
                    vision_age_ms);
         }
+        return;
+    }
+
+    // 运行期 watchdog 活性检测：gpio_manager 崩溃/重启后 heartbeat_last_ms 停止更新
+    if (!gpio_protect_heartbeat_is_wd_alive(car_config::kWatchdogHeartbeatStallTimeoutMs)) {
+        static int wd_stall_warn_count = 0;
+        Speed_Goal = 0.0f;
+        Speed_Goal_l = 0.0f;
+        Speed_Goal_r = 0.0f;
+        speed_out_l = 0.0f;
+        speed_out_r = 0.0f;
+        speed_last_erro_L = 0.0f;
+        speed_last_erro_R = 0.0f;
+        if (motor_L && motor_R) {
+            motor_Duty_L(0);
+            motor_Duty_R(0);
+        }
+        if (wd_stall_warn_count < 8) {
+            ++wd_stall_warn_count;
+            printf("[WATCHDOG_GUARD] gpio_manager heartbeat stalled; stop output and exit\n");
+        }
+        exit_flag.store(true, std::memory_order_relaxed);
         return;
     }
 

@@ -6,15 +6,8 @@
 ## 1. 使用前先看这三个结论
 
 1. 自制双路驱动板调试时，必须先启动 `gpio_manager` 看门狗，再启动小车主程序。
-2. 小车主程序会每 10ms 向 `/gpio_proj_shm` 发送心跳；如果程序崩溃、卡死或被强退，`gpio_manager` 会在约 50ms 后把电机 PWM 和方向 GPIO 写回安全值。
-3. 当前 `main/main.cpp` 里仍有一段 NCNN demo 早返回：
-
-```cpp
-lq_ncnn_image_infer_demo();
-return 0;
-```
-
-如果要跑真实小车控制循环，需要先确认是否关闭这段早返回。
+2. 小车主程序控制线程每 5ms 运行一次完整闭环（编码器→速度环→电机输出），只有完整周期结束后才向 `/gpio_proj_shm` 写心跳；如果程序崩溃、卡死或被强退，`gpio_manager` 会在约 50ms 后把电机 PWM 和方向 GPIO 写回安全值。
+3. 当前 `main/main.cpp` 已无 NCNN 早返回；NCNN 推理代码已注释。正式跑车使用 `--mode=car` 参数。
 
 ## 2. 推荐目录认知
 
@@ -148,15 +141,15 @@ systemctl status gpio-manager
 ps aux | grep gpio_manager
 ```
 
-然后运行主程序：
+然后运行主程序（注意必须带 `--mode=car` 参数）：
 
 ```bash
 cd /root
-./main
+./main --mode=car
 ```
 
-如果你用 `main/build.sh <board-ip> -r` 部署并运行，也要先确认板子上的
-`gpio-manager` 是 active。
+如果你用 `main/build.sh <board-ip> -r` 部署并运行，脚本会自动传入 `--mode=car`。
+调参模式需显式指定：`APP_ARGS="--mode=tune" ./build.sh <board-ip> -r`。
 
 ## 6. 自制双路驱动板保护逻辑
 
@@ -175,10 +168,10 @@ emergency_stop()
 
 这层用于避免自制驱动板在 PWM disable 后输入悬空，被误识别为满转。
 
-第二层在 `gpio_manager`：
+第二层在 `gpio_manager`（心跳只在完整控制周期后发送）：
 
 ```text
-小车主程序每 10ms 写一次 heartbeat_counter
+小车主程序每 5ms 控制周期完成后写一次 heartbeat_counter
 gpio_manager 每 1ms 检查 heartbeat_counter
 超过约 50ms 不变化：
   ATIM CCR1..CCR4 = 0
