@@ -25,7 +25,7 @@ void motor_Duty_L(int duty);
 void motor_Duty_R(int duty);
 
 //闭环
-void Speed_decision(void);
+bool Speed_decision(void);
 void Speed_PID_L(void);
 void Speed_PID_R(void);
 void Speed_BiHuan(void);

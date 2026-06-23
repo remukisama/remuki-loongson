@@ -7,9 +7,11 @@
 # 注意事项：需确保 LQ_Dep_libs 下存在 ncnn_install/opencv_install 目录
 # 注意事项：尽量避免修改原有的文件夹结构和名称, 以免脚本无法正常运行
 # 使用说明：
-#       1. 仅编译：./build.sh
-#       2. 编译 + 传输到开发板：./build.sh 192.168.1.100(写入开发板IP)
-#       3. 编译 + 传输到开发板 + 运行：./build.sh 192.168.1.100 -r
+#       1. 增量编译：./build.sh
+#       2. 增量编译 + 传输到开发板：./build.sh 192.168.1.100(写入开发板IP)
+#       3. 增量编译 + 传输到开发板 + 运行：./build.sh 192.168.1.100 -r
+#       4. 全量清理后编译：./build.sh --clean
+#       5. 强制重新配置 CMake：./build.sh --reconfigure
 ##############################################################################
 
 # ====================================================================================================================================================== #
@@ -414,28 +416,72 @@ function run_remote_program() {
 # ==================================================================== 解析传入参数 ====================================================================== #
 # ====================================================================================================================================================== #
 # 获取传入参数
-BOARD_IP="${1:-}"       # 第一个参数：开发板的 IP
-RUN_FLAG="${2:-}"       # 第二个参数：是否运行程序（-r 代表运行）
+CLEAN_BUILD=false
+FORCE_RECONFIGURE=false
 RUN_PROGRAM=false       # 默认不运行
+BOARD_IP=""             # 开发板的 IP
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --clean)
+            CLEAN_BUILD=true
+            shift
+            ;;
+        --reconfigure)
+            FORCE_RECONFIGURE=true
+            shift
+            ;;
+        -r)
+            RUN_PROGRAM=true
+            shift
+            ;;
+        --help|-h)
+            echo "用法："
+            echo "  ./build.sh                         # 增量编译"
+            echo "  ./build.sh 192.168.1.100           # 增量编译 + 传输"
+            echo "  ./build.sh 192.168.1.100 -r        # 增量编译 + 传输 + 运行"
+            echo "  ./build.sh --clean                 # 删除 build 后全量编译"
+            echo "  ./build.sh --reconfigure           # 强制重新执行 CMake 配置"
+            exit 0
+            ;;
+        *)
+            if [ -z "${BOARD_IP:-}" ]; then
+                BOARD_IP="$1"
+                shift
+            else
+                log_error "❌ 未知参数：$1"
+            fi
+            ;;
+    esac
+done
+
+BOARD_IP="${BOARD_IP:-}"       # 开发板的 IP
 
 # 参数校验逻辑
 if [ -n "${BOARD_IP}" ]; then
     # 校验IP合法性
     if ! is_valid_ip "${BOARD_IP}"; then
-        log_error "❌ 第一个参数不是合法IP地址！用法：\n  仅编译：./build.sh\n  编译+传输：./build.sh 192.168.1.100\n  编译+传输+运行：./build.sh 192.168.1.100 -r"
+        log_error "❌ 参数不是合法IP地址！用法：\n  增量编译：./build.sh\n  增量编译+传输：./build.sh 192.168.1.100\n  增量编译+传输+运行：./build.sh 192.168.1.100 -r\n  全量编译：./build.sh --clean\n  重新配置：./build.sh --reconfigure"
     fi
-    # 校验第二个参数
-    if [ "${RUN_FLAG}" = "-r" ]; then
-        RUN_PROGRAM=true
+    if [ "${RUN_PROGRAM}" = true ]; then
         log_info "🔧 本次执行：编译 → 传输 → 远程运行程序\n"
     else
-        if [ -n "${RUN_FLAG}" ]; then
-            log_warn "⚠️ 第二个参数 ${RUN_FLAG} 无效，仅传输不运行程序（正确参数：-r）\n"
-        fi
         log_info "🔧 本次执行：编译 → 传输（未指定-r，不运行程序）\n"
     fi
 else
+    if [ "${RUN_PROGRAM}" = true ]; then
+        log_warn "⚠️ 未传入开发板 IP，-r 参数无效，将仅编译\n"
+        RUN_PROGRAM=false
+    fi
     log_info "🔧 本次执行：仅编译（未传入IP，跳过传输/运行）\n"
+fi
+
+if [ "${CLEAN_BUILD}" = true ]; then
+    log_warn "⚠️ 已启用 --clean：本次会删除 ${BUILD_DIR} 后全量编译"
+fi
+
+if [ "${FORCE_RECONFIGURE}" = true ]; then
+    log_warn "⚠️ 已启用 --reconfigure：本次会强制重新执行 CMake 配置"
 fi
 
 # 该指令表示任意指令执行失败，立即终止脚本
@@ -513,14 +559,17 @@ log_info "======================================================================
 
 # 生成 CMake 可识别的宏文件
 log_info "================================================================== CMake 宏文件生成 =================================================================="
-log_info "🔧 开始生成 CMake 宏文件：${TOOLCHAIN_CMAKE_MACRO_FILE}"
-# 写入相对路径宏（CMAKE_TOOLCHAIN_PATH 供 CMake 调用）
-cat > "${TOOLCHAIN_CMAKE_MACRO_FILE}" << EOF
-set(CMAKE_TOOLCHAIN_PATH "\${CMAKE_CURRENT_LIST_DIR}/../tools/${TOOLCHAIN_DIR_NAME}" CACHE PATH "Loongson toolchain path" FORCE)
-EOF
+log_info "🔧 检查 CMake 宏文件：${TOOLCHAIN_CMAKE_MACRO_FILE}"
+TOOLCHAIN_CMAKE_CONTENT="set(CMAKE_TOOLCHAIN_PATH \"\${CMAKE_CURRENT_LIST_DIR}/../tools/${TOOLCHAIN_DIR_NAME}\" CACHE PATH \"Loongson toolchain path\" FORCE)"
+if [ ! -f "${TOOLCHAIN_CMAKE_MACRO_FILE}" ] || ! grep -Fxq "${TOOLCHAIN_CMAKE_CONTENT}" "${TOOLCHAIN_CMAKE_MACRO_FILE}"; then
+    printf '%s\n' "${TOOLCHAIN_CMAKE_CONTENT}" > "${TOOLCHAIN_CMAKE_MACRO_FILE}"
+    log_info "✅ CMake 宏文件已更新"
+else
+    log_info "✅ CMake 宏文件内容未变化，跳过写入"
+fi
 # 验证宏文件是否生成
 if [ -f "${TOOLCHAIN_CMAKE_MACRO_FILE}" ]; then
-    log_info "✅ CMake 宏文件生成成功！内容："
+    log_info "✅ CMake 宏文件检查完成！内容："
     cat "${TOOLCHAIN_CMAKE_MACRO_FILE}" | grep -v "^#" | grep -v "^$"
 else
     log_error "❌ CMake 宏文件生成失败！"
@@ -565,31 +614,47 @@ setup_pkgconfig_path
 
 # 构建编译项目
 log_info "====================================================================== 编译项目 ======================================================================"
-# 删除旧的build目录
-if [ -d "${BUILD_DIR}" ]; then
-    log_info "🔧 删除旧的 build 目录：${BUILD_DIR}"
+if [ "${CLEAN_BUILD}" = true ] && [ -d "${BUILD_DIR}" ]; then
+    log_warn "⚠️ 执行全量清理构建：删除 ${BUILD_DIR}"
     rm -rf "${BUILD_DIR}"
 fi
 
-# 创建并配置构建目录
-log_info "🔧 创建并配置构建目录：${BUILD_DIR}"
-cmake -B "${BUILD_DIR}" || log_error "❌ cmake 配置失败！"
+if [ ! -f "${BUILD_DIR}/CMakeCache.txt" ] || [ "${FORCE_RECONFIGURE}" = true ]; then
+    log_info "🔧 执行 CMake 配置：${BUILD_DIR}"
+    cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" || log_error "❌ cmake 配置失败！"
+else
+    log_info "✅ 检测到已有 CMake 构建缓存，使用增量构建"
+fi
 
-# 编译项目
-log_info "🔧 开始编译项目（线程数：${BUILD_THREADS}）"
-cmake --build "${BUILD_DIR}" -j"${BUILD_THREADS}" || log_error "❌ 编译失败！"
-log_info "✅ 项目编译完成！"
+log_info "🔧 开始增量编译项目（线程数：${BUILD_THREADS}）"
+cmake --build "${BUILD_DIR}" --parallel "${BUILD_THREADS}" || log_error "❌ 编译失败！"
+log_info "✅ 项目编译完成！未修改的源文件不会重复编译。"
 log_info "======================================================================================================================================================\n"
 
 # SCP 传输到开发板
 if [ -n "${BOARD_IP}" ]; then
-    stop_remote_program "${BOARD_IP}"
-    log_info "==================================================================== 传输到开发板 ===================================================================="
-    scp_to_board "${BOARD_IP}" # （函数）
+    LOCAL_EXEC_PATH="${BUILD_DIR}/${EXECUTABLE_NAME}"
+    if [ ! -f "${LOCAL_EXEC_PATH}" ]; then
+        log_error "❌ 可执行程序不存在！路径：${LOCAL_EXEC_PATH}"
+    fi
 
-    # 如果指定了 -r，远程运行程序
-    if [ "${RUN_PROGRAM}" = true ]; then
-        run_remote_program "${BOARD_IP}" # （函数）
+    LOCAL_SHA="$(sha256sum "${LOCAL_EXEC_PATH}" | awk '{print $1}')"
+    REMOTE_SHA="$(ssh -o ConnectTimeout=5 "${BOARD_USER}@${BOARD_IP}" "sha256sum '${REMOTE_EXEC_CMD}' 2>/dev/null | awk '{print \$1}'" 2>/dev/null || true)"
+
+    if [ -n "${REMOTE_SHA}" ] && [ "${LOCAL_SHA}" = "${REMOTE_SHA}" ]; then
+        log_info "✅ 开发板上的可执行文件与本地一致，跳过停止和传输"
+        if [ "${RUN_PROGRAM}" = true ]; then
+            run_remote_program "${BOARD_IP}" # （函数）
+        fi
+    else
+        stop_remote_program "${BOARD_IP}"
+        log_info "==================================================================== 传输到开发板 ===================================================================="
+        scp_to_board "${BOARD_IP}" # （函数）
+
+        # 如果指定了 -r，远程运行程序
+        if [ "${RUN_PROGRAM}" = true ]; then
+            run_remote_program "${BOARD_IP}" # （函数）
+        fi
     fi
     log_info "======================================================================================================================================================\n"
 fi

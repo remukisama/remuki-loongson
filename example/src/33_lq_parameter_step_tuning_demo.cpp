@@ -113,7 +113,7 @@ extern bool image_cv_zip(void);
 extern void Data_Settings(void);
 extern void imageprocess(void);
 extern void motor_Init(void);
-extern void Speed_decision(void);
+extern bool Speed_decision(void);
 extern void Speed_BiHuan(void);
 extern void Speed_PID_L(void);
 extern void Speed_PID_R(void);
@@ -769,6 +769,8 @@ static void release_camera_for_imu_test() {
     }
 }
 
+static void safe_stop_and_print(const char *tag);
+
 static bool grab_and_process() {
     if (!ensure_camera_ready()) return false;
     if (!image_cv_zip()) {
@@ -783,7 +785,11 @@ static void init_control_for_motor_tests() {
     static bool inited = false;
     if (!inited) {
         motor_Init();
-        Speed_decision();
+        if (!Speed_decision()) {
+            safe_stop_and_print("INIT");
+            printf("[FAIL] Speed_decision/MPU6050 init failed. 检查 I2C/驱动/供电。\n");
+            return;
+        }
         inited = true;
     }
 }

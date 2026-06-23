@@ -174,7 +174,7 @@ void motor_Duty_L(int duty)
 // [4.1] 速度环 PID
 // ==========================
 
-void Speed_decision(void)
+bool Speed_decision(void)
 {
     // 参考demo，增量式PI控制
     speed_P_l = car_config::kSpeedPidP;  // 对齐demo参数
@@ -195,9 +195,14 @@ void Speed_decision(void)
     cascade_ctrl.init(); // 初始化姿态三串级控制器参数
     static bool imu_inited = false;
     if (!imu_inited) {
-        imu.init();          // 初始化IMU
+        if (!imu.init()) {   // 初始化IMU
+            dbg_imu_ok = 0;
+            return false;
+        }
         imu_inited = true;
     }
+    dbg_imu_ok = 1;
+    return true;
 }
 
 void Speed_PID_L(void)

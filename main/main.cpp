@@ -51,6 +51,41 @@ static int run_autotune_stage_if_requested()
     return 98;
 }
 
+
+static void print_usage(const char *program)
+{
+    std::printf("用法：%s --mode=<car|tune|encoder-test|vision-debug> [--unsafe-dev-mode]\n", program);
+    std::printf("  --mode=car           正式整车闭环模式，强制要求 gpio_manager 看门狗和 IMU 正常\n");
+    std::printf("  --mode=tune          Demo33 分步调参入口\n");
+    std::printf("  --mode=encoder-test  编码器/电机方向测试\n");
+    std::printf("  --mode=vision-debug  巡线图像调试\n");
+    std::printf("  --unsafe-dev-mode    仅调试使用：允许 car 模式跳过 gpio_manager 强制检查\n");
+}
+
+static std::string parse_mode(int argc, char **argv, bool &unsafe_dev_mode)
+{
+    unsafe_dev_mode = false;
+    for (int i = 1; i < argc; ++i) {
+        const char *arg = argv[i];
+        if (std::strncmp(arg, "--mode=", 7) == 0) {
+            return std::string(arg + 7);
+        }
+        if (std::strcmp(arg, "--mode") == 0 && i + 1 < argc) {
+            return std::string(argv[++i]);
+        }
+        if (std::strcmp(arg, "--unsafe-dev-mode") == 0) {
+            unsafe_dev_mode = true;
+            continue;
+        }
+        if (std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0) {
+            return "help";
+        }
+        std::printf("[MAIN] unknown argument: %s\n", arg);
+        return "help";
+    }
+    return "help";
+}
+
 // 闭环控制定时器（极高优先级）
 void timer_thread_1()
 {
@@ -66,8 +101,15 @@ void timer_thread_1()
 }
 
 
-int main()
+int main(int argc, char **argv)
 {
+    bool unsafe_dev_mode = false;
+    std::string run_mode = parse_mode(argc, argv, unsafe_dev_mode);
+    if (run_mode == "help") {
+        print_usage(argv[0]);
+        return 0;
+    }
+
     gpio_protect_heartbeat_init();
 
     // ================== 新增编码器排查 Demo ==================
@@ -130,10 +172,35 @@ int main()
     //     return autotune_ret;
     // }
     //
-    // 当前交付模式：先进入 Demo33 分步测试总入口，不直接启动整车赛道闭环。
-    lq_parameter_step_interactive_demo();
-    gpio_protect_heartbeat_deinit();
-    return 0;
+    if (run_mode == "tune") {
+        lq_parameter_step_interactive_demo();
+        gpio_protect_heartbeat_deinit();
+        return 0;
+    }
+    if (run_mode == "encoder-test") {
+        lq_car_encoder_test_demo();
+        gpio_protect_heartbeat_deinit();
+        return 0;
+    }
+    if (run_mode == "vision-debug") {
+        lq_line_patrol_debug_demo();
+        gpio_protect_heartbeat_deinit();
+        return 0;
+    }
+    if (run_mode != "car") {
+        std::printf("[MAIN] unsupported mode: %s\n", run_mode.c_str());
+        print_usage(argv[0]);
+        gpio_protect_heartbeat_deinit();
+        return 2;
+    }
+
+    if (!unsafe_dev_mode && !gpio_protect_heartbeat_require_ready(1500)) {
+        gpio_protect_heartbeat_deinit();
+        return 3;
+    }
+    if (unsafe_dev_mode) {
+        std::printf("\033[31m[MAIN][UNSAFE] --unsafe-dev-mode: gpio_manager watchdog check skipped. Do not drive on track.\033[0m\n");
+    }
     // lq_vofa_speed_sine_demo();
 
     // lq_gyro_loop_verify_demo();
@@ -146,7 +213,12 @@ int main()
 
     // InitMH();       //  模糊pid初始化
     motor_Init();     // 电机初始化
-    Speed_decision(); // 电机PID参数初始化
+    if (!Speed_decision()) { // 电机PID参数初始化 + IMU 自检
+        emergency_stop();
+        gpio_protect_heartbeat_deinit();
+        std::printf("[MAIN][FATAL] MPU6050 init failed; car mode refused.\n");
+        return 4;
+    }
     // Stree_Init();     // 舵机初始化
     // ICM42605_Init();
     // TFTSPI_Init(0);

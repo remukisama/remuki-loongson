@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 
 namespace
@@ -126,6 +127,35 @@ void gpio_protect_heartbeat_pulse(void)
 
     uint32_t counter = g_heartbeat_counter.fetch_add(1) + 1;
     g_shm->heartbeat_counter = counter;
+}
+
+bool gpio_protect_heartbeat_require_ready(int timeout_ms)
+{
+    if (heartbeat_disabled_by_env()) {
+        std::printf("[GPIO_PROTECT][FATAL] heartbeat disabled by env; car mode requires gpio_manager\n");
+        return false;
+    }
+
+    g_heartbeat_enabled.store(true);
+    const long long deadline_ms = now_ms() + timeout_ms;
+    do {
+        if (g_shm || open_watchdog_shm() == 0) {
+            const uint32_t before = g_shm->heartbeat_counter;
+            g_last_pulse_ms.store(0);
+            gpio_protect_heartbeat_pulse();
+            const uint32_t after = g_shm->heartbeat_counter;
+            if (after != before) {
+                std::printf("[GPIO_PROTECT] required watchdog ready: heartbeat %u -> %u\n",
+                            before, after);
+                return true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    } while (now_ms() < deadline_ms);
+
+    std::printf("[GPIO_PROTECT][FATAL] gpio_manager watchdog not ready within %dms; refuse car mode\n",
+                timeout_ms);
+    return false;
 }
 
 void gpio_protect_heartbeat_deinit(void)

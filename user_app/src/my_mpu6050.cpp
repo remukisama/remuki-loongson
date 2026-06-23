@@ -39,10 +39,8 @@ bool MyMpu6050::init() {
         return true;
     } else {
         std::cerr << "MPU6050 Init Failed! Device ID (read): 0x" << std::hex << (int)id << std::dec << " (expected 0x68)" << std::endl;
-        // 注意：有的系统上可能由于外设占线等问题读取不到精确ID，具体视硬件而定。
-        // return false; 
+        return false;
     }
-    return true;
 }
 
 bool MyMpu6050::read_processed_data(Mpu6050Data& data) {
