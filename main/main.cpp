@@ -92,7 +92,6 @@ void timer_thread_1()
     while (!exit_flag)
     {
         Speed_BiHuan();
-        gpio_protect_heartbeat_pulse();
 
         std::this_thread::sleep_for(timer_interval_1);
     }
@@ -281,8 +280,6 @@ int main(int argc, char **argv)
 
     while (!exit_flag)
     {
-        gpio_protect_heartbeat_pulse();
-
         // auto start2 = std::chrono::high_resolution_clock::now();
 
         // if (flags)
@@ -328,7 +325,6 @@ int main(int argc, char **argv)
             lq_udp_center_line_send_one_frame(udp_debug, 50);
         }
         udp_frame_count++;
-        gpio_protect_heartbeat_pulse();
         // image_show();
         
 

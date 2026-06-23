@@ -9,9 +9,10 @@
 # 使用说明：
 #       1. 增量编译：./build.sh
 #       2. 增量编译 + 传输到开发板：./build.sh 192.168.1.100(写入开发板IP)
-#       3. 增量编译 + 传输到开发板 + 运行：./build.sh 192.168.1.100 -r
-#       4. 全量清理后编译：./build.sh --clean
-#       5. 强制重新配置 CMake：./build.sh --reconfigure
+#       3. 增量编译 + 传输到开发板 + 运行正式模式：./build.sh 192.168.1.100 -r
+#       4. 指定远程运行参数：APP_ARGS="--mode=tune" ./build.sh 192.168.1.100 -r
+#       5. 全量清理后编译：./build.sh --clean
+#       6. 强制重新配置 CMake：./build.sh --reconfigure
 ##############################################################################
 
 # ====================================================================================================================================================== #
@@ -54,7 +55,9 @@ BUILD_DIR="build"           # 构建目录名称
 BOARD_USER="root"                                           # 登录开发板的用户名
 BOARD_TARGET_PATH="${BOARD_TARGET_PATH:-~}"                  # 开发板目标路径
 EXECUTABLE_NAME="main"                                      # 可执行程序名（根据实际情况修改）
-REMOTE_EXEC_CMD="${BOARD_TARGET_PATH}/${EXECUTABLE_NAME}"   # 远程执行命令
+APP_ARGS="${APP_ARGS:---mode=car}"                          # 远程运行参数；正式部署默认进入 car 模式
+REMOTE_EXEC_CMD="${BOARD_TARGET_PATH}/${EXECUTABLE_NAME}"   # 远程可执行文件路径
+REMOTE_RUN_CMD="${REMOTE_EXEC_CMD} ${APP_ARGS}"             # 远程执行命令
 BOARD_PHYSICAL_TTY="/dev/console"                           # 开发板物理终端（指向开发板主屏幕）
 BOARD_LOG_FILE="${BOARD_LOG_FILE:-${EXECUTABLE_NAME}.log}"   # 程序日志文件（开发板上保存输出，方便排查）
 
@@ -347,7 +350,7 @@ function stop_remote_program() {
 function run_remote_program() {
     local board_ip=$1
     log_info "==================== 远程执行程序 ===================="
-    log_info "🔧 开始在开发板 ${board_ip} 执行程序：${REMOTE_EXEC_CMD}"
+    log_info "🔧 开始在开发板 ${board_ip} 执行程序：${REMOTE_RUN_CMD}"
     # 创建远程执行的临时脚本（去掉ldd检查）
     local temp_script="${BOARD_TARGET_PATH}/run_app.sh"
     local remote_script_content="
@@ -355,6 +358,7 @@ function run_remote_program() {
         set -e  # 出错立即退出
         echo '===== 开始执行程序 =====' >> ${BOARD_LOG_FILE}
         echo '程序路径：${REMOTE_EXEC_CMD}' >> ${BOARD_LOG_FILE}
+        echo '启动命令：${REMOTE_RUN_CMD}' >> ${BOARD_LOG_FILE}
         
         # 停止旧实例
         pkill -f ${EXECUTABLE_NAME} >/dev/null 2>&1 || true
@@ -378,7 +382,7 @@ function run_remote_program() {
         
         # 执行程序（禁用缓冲+后台运行+输出到屏幕+日志）
         echo '启动程序...' >> ${BOARD_LOG_FILE}
-        stdbuf -o0 -e0 nohup ${REMOTE_EXEC_CMD} > ${BOARD_PHYSICAL_TTY} 2>&1 >> ${BOARD_LOG_FILE} &
+        stdbuf -o0 -e0 nohup ${REMOTE_RUN_CMD} > ${BOARD_PHYSICAL_TTY} 2>&1 >> ${BOARD_LOG_FILE} &
         
         # 等待程序启动，输出PID
         sleep 1
@@ -439,7 +443,8 @@ while [ $# -gt 0 ]; do
             echo "用法："
             echo "  ./build.sh                         # 增量编译"
             echo "  ./build.sh 192.168.1.100           # 增量编译 + 传输"
-            echo "  ./build.sh 192.168.1.100 -r        # 增量编译 + 传输 + 运行"
+            echo "  ./build.sh 192.168.1.100 -r        # 增量编译 + 传输 + 运行 main --mode=car"
+            echo "  APP_ARGS=\"--mode=tune\" ./build.sh 192.168.1.100 -r"
             echo "  ./build.sh --clean                 # 删除 build 后全量编译"
             echo "  ./build.sh --reconfigure           # 强制重新执行 CMake 配置"
             exit 0

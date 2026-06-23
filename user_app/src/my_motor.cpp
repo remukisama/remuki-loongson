@@ -136,8 +136,6 @@ void motor_Duty_R(int duty)
         motor_R->atim_pwm_set_active_low_duty(magnitude);
         motor_R_Dir->gpio_level_set(GPIO_LOW);
     }
-    // 只有真实电机控制持续更新时才续命；控制循环卡死后看门狗会自动停车。
-    gpio_protect_heartbeat_pulse();
 }
 
 void motor_Duty_L(int duty)
@@ -162,7 +160,6 @@ void motor_Duty_L(int duty)
         motor_L->atim_pwm_set_active_low_duty(magnitude);
         motor_L_Dir->gpio_level_set(GPIO_LOW);
     }
-    gpio_protect_heartbeat_pulse();
 }
 
 
@@ -1108,6 +1105,9 @@ void Speed_BiHuan(void)
     
     motor_Duty_R(speed_out_r); // 输出到PWM驱动
     motor_Duty_L(speed_out_l);
+    // 只有完整完成“编码器读取 → 速度环 → 电机输出”的控制周期后才续命。
+    // 图像/UDP/调试线程不能续命，控制线程卡死时 gpio_manager 必须能超时停车。
+    gpio_protect_heartbeat_pulse();
 }
 
 // 差速速度调整函数

@@ -16,7 +16,7 @@
 namespace
 {
 static const char *kShmName = "/gpio_proj_shm";
-static const uint32_t kShmVersion = 2;
+static const uint32_t kShmVersion = 3;
 
 struct GpioWatchdogShmLayout {
     uint32_t version;
@@ -25,6 +25,7 @@ struct GpioWatchdogShmLayout {
     uint8_t heartbeat_alive;
     uint8_t reserved[2];
     uint32_t heartbeat_last_ms;
+    uint32_t watchdog_started_ms;
 };
 
 static const size_t kShmSize = sizeof(GpioWatchdogShmLayout);
@@ -138,23 +139,33 @@ bool gpio_protect_heartbeat_require_ready(int timeout_ms)
 
     g_heartbeat_enabled.store(true);
     const long long deadline_ms = now_ms() + timeout_ms;
+    uint32_t last_watchdog_ms = 0;
     do {
         if (g_shm || open_watchdog_shm() == 0) {
             const uint32_t before = g_shm->heartbeat_counter;
             g_last_pulse_ms.store(0);
             gpio_protect_heartbeat_pulse();
             const uint32_t after = g_shm->heartbeat_counter;
-            if (after != before) {
-                std::printf("[GPIO_PROTECT] required watchdog ready: heartbeat %u -> %u\n",
-                            before, after);
+            const uint32_t first_watchdog_ms = g_shm->heartbeat_last_ms;
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+            const uint32_t second_watchdog_ms = g_shm->heartbeat_last_ms;
+            last_watchdog_ms = second_watchdog_ms;
+            if (after != before &&
+                g_shm->watchdog_started_ms != 0 &&
+                g_shm->heartbeat_alive == 1 &&
+                g_shm->safe_mode == 0 &&
+                second_watchdog_ms != 0 &&
+                second_watchdog_ms != first_watchdog_ms) {
+                std::printf("[GPIO_PROTECT] required watchdog ready: heartbeat %u -> %u watchdog_ms %u -> %u\n",
+                            before, after, first_watchdog_ms, second_watchdog_ms);
                 return true;
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     } while (now_ms() < deadline_ms);
 
-    std::printf("[GPIO_PROTECT][FATAL] gpio_manager watchdog not ready within %dms; refuse car mode\n",
-                timeout_ms);
+    std::printf("[GPIO_PROTECT][FATAL] gpio_manager watchdog not ready within %dms; refuse car mode (last_watchdog_ms=%u)\n",
+                timeout_ms, last_watchdog_ms);
     return false;
 }
 

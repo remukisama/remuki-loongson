@@ -39,13 +39,14 @@ struct ShmLayout {
 
     // ---- 时间戳（GPIO 看门狗写入）----
     uint32_t heartbeat_last_ms;             // 最后心跳时间（毫秒）
+    uint32_t watchdog_started_ms;           // 看门狗启动并完成硬件安全值写入的时间
 
     // ---- 显存区域（预留，屏幕工程开发时启用）----
     // uint32_t framebuffer_size;           // 显存区域大小
     // uint8_t  framebuffer[];              // 柔性数组，屏幕分辨率决定大小
 };
 
-static const uint32_t SHM_VERSION = 2;      // 版本号更新为 2（看门狗架构）
+static const uint32_t SHM_VERSION = 3;      // 版本号更新为 3（暴露看门狗启动状态）
 static const uint32_t SHM_SIZE    = sizeof(ShmLayout);
 
 }  // namespace gpio

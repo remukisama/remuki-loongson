@@ -80,11 +80,14 @@ int GpioWatchdog::init(void)
     if (init_shm() != 0) return -1;
     if (init_registers() != 0) return -1;
 
+    write_safe_values();
+
     shm_->version = SHM_VERSION;
     shm_->heartbeat_counter = 0;
     shm_->heartbeat_alive = 0;
     shm_->safe_mode = 0;
     shm_->heartbeat_last_ms = 0;
+    shm_->watchdog_started_ms = get_time_ms();
 
     last_heartbeat_counter_ = 0;
     last_heartbeat_time_ms_ = get_time_ms();
@@ -111,6 +114,11 @@ void GpioWatchdog::stop(void) { running_ = false; }
 
 void GpioWatchdog::cleanup(void)
 {
+    write_safe_values();
+    if (shm_ && shm_ != MAP_FAILED) {
+        shm_->safe_mode = 1;
+        shm_->heartbeat_alive = 0;
+    }
     cleanup_shm();
     if (atim_base_ && atim_base_ != MAP_FAILED) { munmap((void*)atim_base_, REG_PAGE); atim_base_ = nullptr; }
     if (gtim_base_ && gtim_base_ != MAP_FAILED) { munmap((void*)gtim_base_, REG_PAGE); gtim_base_ = nullptr; }
@@ -144,6 +152,10 @@ void GpioWatchdog::cleanup_shm(void)
 int GpioWatchdog::init_registers(void)
 {
     int fd = open("/dev/mem", O_RDWR | O_SYNC);
+    if (fd < 0) {
+        printf("[Watchdog] ERROR: open /dev/mem failed; refuse to create fake-safe watchdog\n");
+        return -1;
+    }
 
     auto try_mmap = [](uintptr_t phys, int fd) -> void* {
         void *p = mmap(NULL, REG_PAGE, PROT_READ | PROT_WRITE,
@@ -166,11 +178,12 @@ int GpioWatchdog::init_registers(void)
     printf("[Watchdog] GPIO  %s (phys 0x%lx)\n",
            gpio_base_ ? "OK" : "FAIL", (unsigned long)GPIO_PHYS);
 
-    if (fd >= 0) close(fd);
+    close(fd);
 
-    // 至少需要 ATIM 和 GPIO 才能执行安全接管
+    // ATIM 和 GPIO 是电机安全接管的硬要求；缺任一项都必须 fail-closed。
     if (!atim_base_ || !gpio_base_) {
-        printf("[Watchdog] WARNING: register mmap incomplete, safety takeover may not work\n");
+        printf("[Watchdog] ERROR: ATIM/GPIO mmap incomplete; refuse to create fake-safe watchdog\n");
+        return -1;
     }
     return 0;
 }
