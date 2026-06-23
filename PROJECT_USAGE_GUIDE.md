@@ -102,16 +102,15 @@ chmod +x install.sh
 
 安装脚本会：
 
-1. 给 `bin/gpio_manager` 和 `bin/screen_app` 添加执行权限。
+1. 给 `bin/gpio_manager` 添加执行权限。
 2. 写入 systemd 服务文件。
 3. 启用开机自启。
-4. 立即启动 `gpio-manager` 和 `screen` 服务。
+4. 禁用并停止 `screen` 服务（如果存在），立即启动 `gpio-manager` 服务。
 
 ### 4.3 验证服务状态
 
 ```bash
 systemctl status gpio-manager
-systemctl status screen
 ```
 
 重点看 `gpio-manager` 是否为：

@@ -1059,9 +1059,10 @@ void Speed_BiHuan(void)
         }
         if (vision_guard_warn_count < 8) {
             ++vision_guard_warn_count;
-            printf("[VISION_GUARD] stale/no frame age=%lldms; stop output and skip watchdog heartbeat\n",
+            printf("[VISION_GUARD] stale/no frame age=%lldms; stop output, lock out (restart required)\n",
                    vision_age_ms);
         }
+        exit_flag.store(true, std::memory_order_relaxed);
         return;
     }
 

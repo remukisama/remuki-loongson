@@ -322,7 +322,7 @@ function stop_remote_program() {
     local board_ip=$1
     log_info "================================================================== 停止开发板旧程序 =================================================================="
     # 检查是否有运行中的程序
-    local pid=$(ssh -o ConnectTimeout=10 "${BOARD_USER}@${board_ip}" "pgrep -f ${EXECUTABLE_NAME}")
+    local pid=$(ssh -o ConnectTimeout=10 "${BOARD_USER}@${board_ip}" "pgrep -x ${EXECUTABLE_NAME}")
     if [ -z "${pid}" ]; then
         log_warn "⚠️ 未检测到运行中的 ${EXECUTABLE_NAME} 程序，跳过停止步骤"
         return
@@ -332,7 +332,7 @@ function stop_remote_program() {
     ssh -o ConnectTimeout=10 "${BOARD_USER}@${board_ip}" "kill -9 ${pid} >/dev/null 2>&1"
     # 验证是否停止成功
     sleep 1
-    local pid_after=$(ssh -o ConnectTimeout=10 "${BOARD_USER}@${board_ip}" "pgrep -f ${EXECUTABLE_NAME}")
+    local pid_after=$(ssh -o ConnectTimeout=10 "${BOARD_USER}@${board_ip}" "pgrep -x ${EXECUTABLE_NAME}")
     if [ -z "${pid_after}" ]; then
         log_info "✅ 程序已成功停止（PID：${pid}）"
     else
@@ -361,7 +361,7 @@ function run_remote_program() {
         echo '启动命令：${REMOTE_RUN_CMD}' >> ${BOARD_LOG_FILE}
         
         # 停止旧实例
-        pkill -f ${EXECUTABLE_NAME} >/dev/null 2>&1 || true
+        pkill -x ${EXECUTABLE_NAME} >/dev/null 2>&1 || true
         echo '已停止旧程序实例' >> ${BOARD_LOG_FILE}
         
         # 检查程序是否存在
@@ -386,7 +386,7 @@ function run_remote_program() {
         
         # 等待程序启动，输出PID
         sleep 1
-        PID=\$(pgrep -f '${EXECUTABLE_NAME}')
+        PID=\$(pgrep -x '${EXECUTABLE_NAME}')
         if [ -n \"\$PID\" ]; then
             echo \"程序启动成功！PID：\$PID\" >> ${BOARD_LOG_FILE}
             exit 0
@@ -404,10 +404,10 @@ function run_remote_program() {
     log_info "🔧 执行启动脚本，日志写入：${board_ip}:${BOARD_LOG_FILE}"
     if ssh -o ConnectTimeout=20 "${BOARD_USER}@${board_ip}" "bash ${temp_script}"; then
         log_info "✅ 程序启动脚本执行成功！"
-        log_info "  ├─ 开发板程序PID：$(ssh ${BOARD_USER}@${board_ip} "pgrep -f ${EXECUTABLE_NAME}")"
+        log_info "  ├─ 开发板程序PID：$(ssh ${BOARD_USER}@${board_ip} "pgrep -x ${EXECUTABLE_NAME}")"
         log_info "  ├─ 查看运行日志：ssh ${BOARD_USER}@${board_ip} 'cat ${BOARD_LOG_FILE}'"
-        log_info "  ├─ 停止程序：1.在当前编译终端运行 ssh ${BOARD_USER}@${board_ip} 'pkill -f ${EXECUTABLE_NAME}'"
-        log_info "  └─ 停止程序：2.在开发板终端运行 pkill -f ${EXECUTABLE_NAME}"
+        log_info "  ├─ 停止程序：1.在当前编译终端运行 ssh ${BOARD_USER}@${board_ip} 'pkill -x ${EXECUTABLE_NAME}'"
+        log_info "  └─ 停止程序：2.在开发板终端运行 pkill -x ${EXECUTABLE_NAME}"
     else
         log_error "❌ 程序启动失败！请查看开发板日志：
         ssh ${BOARD_USER}@${board_ip} 'cat ${BOARD_LOG_FILE}'"
