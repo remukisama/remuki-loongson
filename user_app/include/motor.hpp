@@ -23,6 +23,8 @@ extern int DEAD_BAND;
 void motor_Init(void);
 void motor_Duty_L(int duty);
 void motor_Duty_R(int duty);
+void control_mark_vision_frame_ready(void);
+void control_reset_vision_health(void);
 
 //闭环
 bool Speed_decision(void);

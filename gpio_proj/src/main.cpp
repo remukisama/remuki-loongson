@@ -13,8 +13,16 @@
  */
 
 #include "watchdog.hpp"
-#include "lq_signal_handle.hpp"
+#include <atomic>
 #include <cstdio>
+#include <csignal>
+
+static std::atomic<bool> g_watchdog_exit_requested(false);
+
+static void watchdog_signal_handler(int)
+{
+    g_watchdog_exit_requested.store(true, std::memory_order_relaxed);
+}
 
 int main()
 {
@@ -24,6 +32,14 @@ int main()
     printf("  Mode: Pure watchdog (no relay)\n");
     printf("========================================\n");
 
+    struct sigaction sa = {};
+    sa.sa_handler = watchdog_signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+    sigaction(SIGHUP, &sa, nullptr);
+    sigaction(SIGQUIT, &sa, nullptr);
+
     gpio::GpioWatchdog watchdog;
 
     if (watchdog.init() != 0) {
@@ -31,7 +47,7 @@ int main()
         return -1;
     }
 
-    watchdog.run();       // 阻塞，直到收到 SIGINT 或 ls_system_running=false
+    watchdog.run(&g_watchdog_exit_requested);       // 阻塞，直到收到退出信号
     watchdog.cleanup();
 
     printf("[Main] Exited\n");

@@ -2945,10 +2945,16 @@ void imageprocess(void)
 
   // 十字角点补线：在延长线之后、滤波之前，用角点几何特征重构十字边界
   // 如果成功补线，后续RouteFilter和GetDet会使用补好的边界
-  CrossCornerRepair();
+  if (!(car_config::kBasicLineBaselineMode && !g_enable_element_process)) {
+    CrossCornerRepair();
+  }
 
   RouteFilter();//中线平滑滤波
-  ApplyCurveCenterCompensation(); // 最后用可靠边界重构中线，避免RouteFilter把坏邻点重新混入
+  if (!(car_config::kBasicLineBaselineMode && !g_enable_element_process)) {
+    ApplyCurveCenterCompensation(); // 最后用可靠边界重构中线，避免RouteFilter把坏邻点重新混入
+  } else {
+    ResetCurveCenterHistory();
+  }
   Straightacc_Test(); //直线加速
   if (g_enable_element_process) {
     Element_Handle();//元素处理

@@ -100,12 +100,18 @@ int GpioWatchdog::init(void)
 
 // ==================== 主循环 ====================
 
-void GpioWatchdog::run(void)
+void GpioWatchdog::run(const std::atomic<bool> *external_stop)
 {
     printf("[Watchdog] Main loop started (1ms heartbeat check)\n");
-    while (running_) {
+    while (running_ && !(external_stop && external_stop->load(std::memory_order_relaxed))) {
         check_heartbeat();
         usleep(1000);
+    }
+    running_ = false;
+    write_safe_values();
+    if (shm_ && shm_ != MAP_FAILED) {
+        shm_->safe_mode = 1;
+        shm_->heartbeat_alive = 0;
     }
     printf("[Watchdog] Main loop exited\n");
 }

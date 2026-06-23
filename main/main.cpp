@@ -212,6 +212,7 @@ int main(int argc, char **argv)
 
     // InitMH();       //  模糊pid初始化
     motor_Init();     // 电机初始化
+    control_reset_vision_health();
     if (!Speed_decision()) { // 电机PID参数初始化 + IMU 自检
         emergency_stop();
         gpio_protect_heartbeat_deinit();
@@ -225,8 +226,12 @@ int main(int argc, char **argv)
     // TFTTest();
     Data_Settings();              // 图像处理参数初始化
     image_flag = image_cv_Init(); // 摄像头初始化 - （由于Demo内已经初始化了此项，主函数先屏蔽以防重复打开设备报错）
-    if (image_flag == -1)
-        return 0;
+    if (!image_flag) {
+        emergency_stop();
+        gpio_protect_heartbeat_deinit();
+        std::printf("[MAIN][FATAL] camera init failed; car mode refused.\n");
+        return 5;
+    }
 
     // // ============================================
     // // 手推车图像调试模式：拦截进入以下Demo
@@ -257,10 +262,12 @@ int main(int argc, char **argv)
     // lq_line_patrol_debug_demo();
     // lq_udp_img_trans_ex_demo();
 
-    // UDP 图传初始化（192.168.90.22:8080）
+    // UDP 图传初始化（正式 car 模式默认关闭；图传只用于 vision-debug/低速诊断）
     lq_udp_client udp_debug;
-    udp_debug.udp_client_init("192.168.90.22", 8080);
-    printf("[UDP_DEBUG] center-line overlay to 192.168.90.22:8080, every 5 frames\n");
+    if (car_config::kRaceUdpDebugEnable) {
+        udp_debug.udp_client_init("192.168.90.22", 8080);
+        printf("[UDP_DEBUG] center-line overlay to 192.168.90.22:8080, every 5 frames\n");
+    }
 
     // ===== NCNN 推理初始化（走马观碑组） =====
     // 临时禁用：当前排查小车起步右转和速度异常，先确保主循环只跑基础循迹。
@@ -291,7 +298,7 @@ int main(int argc, char **argv)
 
         // 图像二值化和压缩
         image_flag = image_cv_zip();
-        if (image_flag == -1)   //如果图像获取失败，电机负压全部停止
+        if (!image_flag)   // 如果图像获取失败，立即停车并停止心跳
         {
             motor_Duty_R(0);
             motor_Duty_L(0);
@@ -306,6 +313,7 @@ int main(int argc, char **argv)
 
         // 图像处理
         imageprocess();
+        control_mark_vision_frame_ready();
 
         // ===== NCNN 推理（走马观碑：每 kNcnnInferInterval 帧执行一次） =====
         // 临时禁用：当前排查小车起步右转和速度异常，先不要让推理链路占用主循环。
@@ -321,7 +329,7 @@ int main(int argc, char **argv)
         // ncnn_infer_count++;
 
         // UDP 图传：每5帧发送一次（调用 demo24 中的函数）
-        if ((udp_frame_count % 5) == 0) {
+        if (car_config::kRaceUdpDebugEnable && ((udp_frame_count % 5) == 0)) {
             lq_udp_center_line_send_one_frame(udp_debug, 50);
         }
         udp_frame_count++;
@@ -344,6 +352,7 @@ int main(int argc, char **argv)
     }
     exit_flag = true;
     threadA.join();  // 等待底层硬实时线程结束
+    control_reset_vision_health();
     emergency_stop();  // 最终确认电机停止
     gpio_protect_heartbeat_deinit();
     return 0;

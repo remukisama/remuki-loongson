@@ -64,6 +64,28 @@ int dbg_deadband_active = 0;
 AttitudeCascade cascade_ctrl;
 MyMpu6050 imu;
 
+static constexpr uint32_t kVisionFreshTimeoutMs = 60;
+static std::atomic<uint32_t> g_control_vision_frame_seq(0);
+static std::atomic<long long> g_control_last_vision_frame_ms(0);
+
+static long long control_now_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void control_mark_vision_frame_ready(void)
+{
+    g_control_last_vision_frame_ms.store(control_now_ms(), std::memory_order_release);
+    g_control_vision_frame_seq.fetch_add(1, std::memory_order_release);
+}
+
+void control_reset_vision_health(void)
+{
+    g_control_last_vision_frame_ms.store(0, std::memory_order_release);
+    g_control_vision_frame_seq.store(0, std::memory_order_release);
+}
+
 // ===============================================================================
 // [2] 闭环控制系统变量定义
 // ===============================================================================
@@ -1018,6 +1040,30 @@ void Car_Speed_Contrl(void)
 
 void Speed_BiHuan(void)
 {
+    const long long last_vision_ms =
+        g_control_last_vision_frame_ms.load(std::memory_order_acquire);
+    const long long vision_age_ms = (last_vision_ms > 0) ? (control_now_ms() - last_vision_ms) : 1000000;
+    if (last_vision_ms <= 0 || vision_age_ms > kVisionFreshTimeoutMs) {
+        static int vision_guard_warn_count = 0;
+        Speed_Goal = 0.0f;
+        Speed_Goal_l = 0.0f;
+        Speed_Goal_r = 0.0f;
+        speed_out_l = 0.0f;
+        speed_out_r = 0.0f;
+        speed_last_erro_L = 0.0f;
+        speed_last_erro_R = 0.0f;
+        if (motor_L && motor_R) {
+            motor_Duty_L(0);
+            motor_Duty_R(0);
+        }
+        if (vision_guard_warn_count < 8) {
+            ++vision_guard_warn_count;
+            printf("[VISION_GUARD] stale/no frame age=%lldms; stop output and skip watchdog heartbeat\n",
+                   vision_age_ms);
+        }
+        return;
+    }
+
     // encoder_num() 已内置四重滤波（垃圾/尖峰/限幅/低通），直接使用
     speed_encoder_raw_L = encoder_num_L();
     speed_encoder_raw_R = encoder_num_R();

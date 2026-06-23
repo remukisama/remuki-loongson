@@ -24,7 +24,7 @@ public:
     ~GpioWatchdog();
 
     int  init(void);
-    void run(void);
+    void run(const std::atomic<bool> *external_stop = nullptr);
     void stop(void);
     void cleanup(void);
 

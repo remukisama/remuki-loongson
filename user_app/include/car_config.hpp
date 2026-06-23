@@ -99,7 +99,7 @@ constexpr float kOpposingGyroHoldDps = 24.0f;   // S弯反打时，如果车身�
 constexpr float kOpposingGyroTargetLimitDps = 95.0f; // 反向旋转未收住时的临时目标角速度上限，从95提到130避免S弯换向时目标被过度限制。
 constexpr int kOpposingGyroRecoveryFrames = 18; // 反向保护触发后继续保持几帧较低目标，从18降到10加快恢复。
 constexpr float kOpposingGyroRecoveryLimitDps = 115.0f; // 反向保护解除后的短暂恢复目标上限，从115提到145加快S弯换向恢复。
-constexpr bool kSteerDebugPrintEnable = true;    // 置 false 可关闭位置环/视觉调试串口打印。
+constexpr bool kSteerDebugPrintEnable = false;   // 正式基础循迹关闭实时串口打印；需要诊断时单独打开。
 constexpr int kSteerDebugPrintDivider = 20;      // 外环每 N 次刷新打印一次；20 次约400ms，降低终端输出对2K301闭环的干扰。
 constexpr float kFallbackDiffLimit = 250.0f;     // IMU 失效时纯视觉差速限幅，主要是保护值；若 IMU 偶发断联导致猛打方向，应降低。
 
@@ -289,7 +289,9 @@ constexpr int kStraightRightLineMax = 3;         // 直道允许的右丢边数�
 constexpr int kSingleSideLossThreshold = 42;      // T06单侧丢边经常49-52且触发img_warn，先提高门槛减少普通弯误触发单边追踪。
 
 // 稳定中心线重构：按边界可信度做补线，避免单侧丢线/宽度异常时中线乱飘。
-constexpr bool kCurveCenterCompEnable = true;     // 开启轻量级可信度补线；若T14显示补线方向错误，可临时置false回退到原始平均中线。
+constexpr bool kRaceUdpDebugEnable = false;       // 正式 car 模式关闭 JPEG 图传；图传只放到 vision-debug/低速诊断模式。
+constexpr bool kBasicLineBaselineMode = true;     // 基础循迹基线：无元素模式先跳过十字补线和曲线跨帧补偿。
+constexpr bool kCurveCenterCompEnable = true;     // 开启轻量级可信度补线；基础基线模式会临时跳过。
 constexpr int kCurveCenterLossStart = 4;          // 单侧丢线达到该值后提高单边重构权重；过小会误伤普通小弯，过大则大弯介入偏晚。
 constexpr int kCurveCenterOppositeLossMax = 12;   // 对侧也严重丢线时少信单侧边界，改走本帧行间预测，避免双边弱观测乱补。
 constexpr int kCurveCenterWidthTolerance = 16;    // 宽度偏离期望赛道宽度超过该值时，即使标记为T也按不可靠边界处理。
