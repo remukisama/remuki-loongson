@@ -90,9 +90,8 @@ cd main
 
 1. 检查工具链和依赖库。
 2. 生成 `toolchain_path.cmake`。
-3. 删除旧的 `main/build/`。
-4. 重新 CMake 配置并编译。
-5. 通过 `scp` 把 `main/build/main` 传输到开发板。
+3. 增量编译（已有 build 目录时直接 `make -j`）。
+4. 通过 `scp` 把 `main/build/main` 传输到开发板。
 
 ## 编译、传输并远程运行
 

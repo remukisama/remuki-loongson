@@ -139,33 +139,39 @@ bool gpio_protect_heartbeat_require_ready(int timeout_ms)
 
     g_heartbeat_enabled.store(true);
     const long long deadline_ms = now_ms() + timeout_ms;
-    uint32_t last_watchdog_ms = 0;
-    do {
+    uint32_t prev_watchdog_ms = 0;
+    uint32_t prev_heartbeat_counter = 0;
+    int check_count = 0;
+    while (now_ms() < deadline_ms) {
         if (g_shm || open_watchdog_shm() == 0) {
-            const uint32_t before = g_shm->heartbeat_counter;
+            // 持续喂狗：每 10ms 发送一次，避免 watchdog 超时进入安全模式
             g_last_pulse_ms.store(0);
             gpio_protect_heartbeat_pulse();
-            const uint32_t after = g_shm->heartbeat_counter;
-            const uint32_t first_watchdog_ms = g_shm->heartbeat_last_ms;
-            std::this_thread::sleep_for(std::chrono::milliseconds(60));
-            const uint32_t second_watchdog_ms = g_shm->heartbeat_last_ms;
-            last_watchdog_ms = second_watchdog_ms;
-            if (after != before &&
+
+            const uint32_t cur_watchdog_ms = g_shm->heartbeat_last_ms;
+            const uint32_t cur_heartbeat = g_shm->heartbeat_counter;
+
+            // 至少完成两轮心跳+watchdog确认后才判定就绪
+            if (check_count >= 2 &&
                 g_shm->watchdog_started_ms != 0 &&
                 g_shm->heartbeat_alive == 1 &&
                 g_shm->safe_mode == 0 &&
-                second_watchdog_ms != 0 &&
-                second_watchdog_ms != first_watchdog_ms) {
-                std::printf("[GPIO_PROTECT] required watchdog ready: heartbeat %u -> %u watchdog_ms %u -> %u\n",
-                            before, after, first_watchdog_ms, second_watchdog_ms);
+                cur_watchdog_ms != 0 &&
+                cur_watchdog_ms != prev_watchdog_ms &&
+                cur_heartbeat != prev_heartbeat_counter) {
+                std::printf("[GPIO_PROTECT] required watchdog ready: heartbeat %u->%u watchdog_ms %u->%u\n",
+                            prev_heartbeat_counter, cur_heartbeat, prev_watchdog_ms, cur_watchdog_ms);
                 return true;
             }
+            prev_watchdog_ms = cur_watchdog_ms;
+            prev_heartbeat_counter = cur_heartbeat;
+            ++check_count;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    } while (now_ms() < deadline_ms);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 
     std::printf("[GPIO_PROTECT][FATAL] gpio_manager watchdog not ready within %dms; refuse car mode (last_watchdog_ms=%u)\n",
-                timeout_ms, last_watchdog_ms);
+                timeout_ms, prev_watchdog_ms);
     return false;
 }
 
