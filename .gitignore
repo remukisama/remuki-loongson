@@ -30,6 +30,12 @@ main/toolchain_path.cmake
 Thumbs.db
 *.swp
 *.swo
+*.bak
+*.bak_*
+
+# Compiled binaries / temp executables
+autoboot/bin/gpio_manager
+atim_pwm_disable
 
 # MATLAB autotune runtime files
 lq_autotune_stage.txt
