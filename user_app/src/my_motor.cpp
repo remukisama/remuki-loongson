@@ -1035,6 +1035,7 @@ void Car_Speed_Contrl(void)
 
 void Speed_BiHuan(void)
 {
+    static long long control_start_ms = 0;
     const long long last_vision_ms =
         g_control_last_vision_frame_ms.load(std::memory_order_acquire);
     
@@ -1052,7 +1053,9 @@ void Speed_BiHuan(void)
             motor_Duty_R(0);
         }
 
-        static long long control_start_ms = 0;
+        // Keep watchdog alive during startup waiting
+        gpio_protect_heartbeat_pulse();
+
         if (control_start_ms == 0) {
             control_start_ms = control_now_ms();
         }
@@ -1063,6 +1066,9 @@ void Speed_BiHuan(void)
         }
         return;
     }
+
+    // Reset startup timer once first frame is successfully processed
+    control_start_ms = 0;
 
     const long long vision_age_ms = control_now_ms() - last_vision_ms;
     if (vision_age_ms > kVisionFreshTimeoutMs) {
