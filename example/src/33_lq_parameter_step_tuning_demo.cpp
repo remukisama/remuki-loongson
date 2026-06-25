@@ -112,6 +112,7 @@ extern bool image_cv_Init(void);
 extern bool image_cv_zip(void);
 extern void Data_Settings(void);
 extern void imageprocess(void);
+extern void control_mark_vision_frame_ready(void);
 extern void motor_Init(void);
 extern bool Speed_decision(void);
 extern void Speed_BiHuan(void);
@@ -778,6 +779,7 @@ static bool grab_and_process() {
         return false;
     }
     imageprocess();
+    control_mark_vision_frame_ready();
     return true;
 }
 
