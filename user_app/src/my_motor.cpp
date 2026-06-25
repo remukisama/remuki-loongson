@@ -147,6 +147,7 @@ float speed_encoder_raw_R = 0.0f;
 // PWM与路�?
 int MAX_PWM; // PWM最大限�?
 float Record_encoder = 0.0f; // 记录编码�?(m/s)
+static float planned_speed_goal = 0.0f;
 
 
 // ===============================================================================
@@ -358,7 +359,7 @@ static void distribute_wheel_speeds(float speed_goal, float diff_speed, float ef
     dbg_speed_err_r = Speed_Goal_r - speed_encoder_R;
 }
 
-void speed_dif_cascade()
+void speed_dif_cascade(float inner_dt)
 {
     // --- Status and time variables ---
     static auto last_visual_frame_time_ms = 0LL;
@@ -530,7 +531,7 @@ void speed_dif_cascade()
              std::fabs(diff_steer_normalized) >= car_config::kSCurveDerivativeThreshold) ||
             (std::fabs(control_raw_steer_error) >= car_config::kSCurveSharpRawThreshold);
         if (s_curve_active_raw && !ring_now) {
-            s_curve_hold_until_ms = now + 80; // 8 frames * 10ms = 80ms
+            s_curve_hold_until_ms = now + car_config::kSCurveHoldMs; // 8 frames * 10ms = 80ms
         }
         bool s_curve_active = (now < s_curve_hold_until_ms);
 
@@ -572,7 +573,7 @@ void speed_dif_cascade()
             u_turn_hold_until_ms = 0;
             u_turn_forced_dir = 0;
         } else if (u_turn_prepare) {
-            u_turn_hold_until_ms = now + 150; // 15 frames * 10ms = 150ms
+            u_turn_hold_until_ms = now + car_config::kUTurnHoldMs;
             if (side_loss_delta >= car_config::kUTurnSideLossDominance) {
                 u_turn_forced_dir = 1;
             } else if (side_loss_delta <= -car_config::kUTurnSideLossDominance) {
@@ -580,6 +581,8 @@ void speed_dif_cascade()
             } else if (u_turn_forced_dir == 0 && std::fabs(control_raw_steer_error) > 0.1f) {
                 u_turn_forced_dir = (control_raw_steer_error > 0.0f) ? 1 : -1;
             }
+        } else if (now >= u_turn_hold_until_ms) {
+            u_turn_forced_dir = 0;
         }
         u_turn_risk = u_turn_prepare || (now < u_turn_hold_until_ms);
 
@@ -597,45 +600,52 @@ void speed_dif_cascade()
             (std::fabs(diff_steer_normalized) >= car_config::kCurveEntryBrakeDerivativeThreshold);
 
         if (curve_entry_brake_prepare) {
-            curve_entry_brake_until_ms = now + 120; // 12 frames * 10ms = 120ms
+            curve_entry_brake_until_ms = now + car_config::kCurveEntryBrakeHoldMs; // 12 frames * 10ms = 120ms
         }
         bool curve_entry_brake_active = (now < curve_entry_brake_until_ms);
 
         // G. Basic target speed reduction planning
+        float base_speed = (local_vision.straight_acc == 1) ? ZD_Speed_Goal : WD_Speed_Goal;
+        if (SystemData.Stop == 1) {
+            base_speed = 0.0f;
+        }
+        float speed_to_plan = base_speed;
+
         if (std::fabs(steer_error) > car_config::kSharpTurnSteerError) {
-            Speed_Goal = std::min(Speed_Goal, WD_Speed_Goal); // FIXED: WD_Speed_Goal instead of ZD_Speed_Goal
+            speed_to_plan = std::min(speed_to_plan, WD_Speed_Goal);
         }
-        if (Speed_Goal > car_config::kCurveEntryBrakeSpeedGoal && curve_entry_brake_active) {
-            Speed_Goal = car_config::kCurveEntryBrakeSpeedGoal;
+        if (speed_to_plan > car_config::kCurveEntryBrakeSpeedGoal && curve_entry_brake_active) {
+            speed_to_plan = car_config::kCurveEntryBrakeSpeedGoal;
         }
-        if (Speed_Goal > car_config::kSCurveSpeedGoal && s_curve_active) {
-            Speed_Goal = car_config::kSCurveSpeedGoal;
+        if (speed_to_plan > car_config::kSCurveSpeedGoal && s_curve_active) {
+            speed_to_plan = car_config::kSCurveSpeedGoal;
         }
-        if (Speed_Goal > car_config::kExtremeTurnSpeedGoal && extreme_turn_active) {
-            Speed_Goal = car_config::kExtremeTurnSpeedGoal;
+        if (speed_to_plan > car_config::kExtremeTurnSpeedGoal && extreme_turn_active) {
+            speed_to_plan = car_config::kExtremeTurnSpeedGoal;
         }
-        if (Speed_Goal > car_config::kUTurnSpeedGoal && u_turn_risk) {
-            Speed_Goal = car_config::kUTurnSpeedGoal;
+        if (speed_to_plan > car_config::kUTurnSpeedGoal && u_turn_risk) {
+            speed_to_plan = car_config::kUTurnSpeedGoal;
         }
         const bool u_turn_early_risk =
             !ring_now &&
             (local_vision.Road_type == Normol || local_vision.Road_type == Straight) &&
             single_side_loss >= car_config::kUTurnEarlyLossThreshold;
-        if (!u_turn_risk && u_turn_early_risk && Speed_Goal > car_config::kUTurnEarlySpeedGoal) {
-            Speed_Goal = car_config::kUTurnEarlySpeedGoal;
+        if (!u_turn_risk && u_turn_early_risk && speed_to_plan > car_config::kUTurnEarlySpeedGoal) {
+            speed_to_plan = car_config::kUTurnEarlySpeedGoal;
         }
-        if (ring_now && Speed_Goal > car_config::kRingSpeedGoal) {
-            Speed_Goal = car_config::kRingSpeedGoal;
+        if (ring_now && speed_to_plan > car_config::kRingSpeedGoal) {
+            speed_to_plan = car_config::kRingSpeedGoal;
         }
-        if (bad_vision && local_vision.image_element_rings == 0 && Speed_Goal > car_config::kBadVisionSpeedGoal) {
-            Speed_Goal = car_config::kBadVisionSpeedGoal;
+        if (bad_vision && local_vision.image_element_rings == 0 && speed_to_plan > car_config::kBadVisionSpeedGoal) {
+            speed_to_plan = car_config::kBadVisionSpeedGoal;
         }
-        last_effective_speed_goal = Speed_Goal;
+        last_effective_speed_goal = speed_to_plan;
+        planned_speed_goal = speed_to_plan;
 
         // H. Visual outer loop PID calculation for target_gyro_z
         float visual_pd_out = 0.0f;
         float delta_target = 0.0f;
-        static int opposing_gyro_recovery_frames = 0;
+        static long long opposing_gyro_recovery_until_ms = 0;
 
         const float DEAD_BAND = (local_vision.Road_type == Straight || local_vision.Road_type == Normol) ? 
             (float)car_config::kSteerDeadBandStraight : (float)car_config::kSteerDeadBandCurve;
@@ -665,9 +675,7 @@ void speed_dif_cascade()
             if (std::fabs(target_gyro_z) < car_config::kGyroDeadBandDps) {
                 target_gyro_z = 0.0f;
                 delta_target = -last_target_gyro_z;
-                opposing_gyro_recovery_frames = 0;
-            } else if (opposing_gyro_recovery_frames > 0) {
-                --opposing_gyro_recovery_frames;
+                opposing_gyro_recovery_until_ms = 0;
             }
             last_target_gyro_z = target_gyro_z;
             last_steer_error = steer_error;
@@ -754,17 +762,16 @@ void speed_dif_cascade()
                 std::fabs(target_gyro_z) > car_config::kOpposingGyroTargetLimitDps) {
                 target_gyro_z = std::copysign(car_config::kOpposingGyroTargetLimitDps, target_gyro_z);
                 delta_target = target_gyro_z - last_target_gyro_z;
-                opposing_gyro_recovery_frames = car_config::kOpposingGyroRecoveryFrames;
+                opposing_gyro_recovery_until_ms = now + car_config::kOpposingGyroRecoveryMs;
                 opposing_gyro_limited = true;
             }
-            if (!opposing_gyro_limited && s_curve_active && opposing_gyro_recovery_frames > 0) {
+            if (!opposing_gyro_limited && s_curve_active && now < opposing_gyro_recovery_until_ms) {
                 if (std::fabs(target_gyro_z) > car_config::kOpposingGyroRecoveryLimitDps) {
                     target_gyro_z = std::copysign(car_config::kOpposingGyroRecoveryLimitDps, target_gyro_z);
                     delta_target = target_gyro_z - last_target_gyro_z;
                 }
-                --opposing_gyro_recovery_frames;
             } else if (!s_curve_active) {
-                opposing_gyro_recovery_frames = 0;
+                opposing_gyro_recovery_until_ms = 0;
             }
             last_target_gyro_z = target_gyro_z;
             last_steer_error = steer_error;
@@ -773,7 +780,7 @@ void speed_dif_cascade()
         dbg_target_delta = delta_target;
 
         // Compute active differential limits and effective min wheel
-        max_diff = Speed_Goal * MAX_DIFF_RATIO;
+        max_diff = speed_to_plan * MAX_DIFF_RATIO;
         if (s_curve_active && max_diff < car_config::kSCurveMinDiff) {
             max_diff = car_config::kSCurveMinDiff;
         }
@@ -876,7 +883,7 @@ void speed_dif_cascade()
                 cmd_target_gyro_z *= car_config::kGyroTargetNegativeGain;
             }
 
-            diff_speed = cascade_ctrl.calc_diff_speed_bypass_angle(cmd_target_gyro_z, imu_data, 0.005f);
+            diff_speed = cascade_ctrl.calc_diff_speed_bypass_angle(cmd_target_gyro_z, imu_data, inner_dt);
             dbg_cmd_target_gyro_z = cmd_target_gyro_z;
             dbg_real_gyro_z = imu_data.gyro_z;
             dbg_filtered_gyro_z = cascade_ctrl.last_filtered_gyro_z();
@@ -977,22 +984,17 @@ void speed_dif_cascade()
 // ===============================================================================
 
 //编码器记录路�?
-void Car_distance(void)
+void Car_distance(float dt)
 {
-    //记录保护编码�?
-    Record_encoder=(speed_encoder_L+speed_encoder_R)/2;
-    SystemData.SpeedData.Length+=Record_encoder;
+    Record_encoder = 0.5f * (speed_encoder_L + speed_encoder_R);
+    SystemData.SpeedData.Length += Record_encoder * dt;
 
-    if(SystemData.Stop==2)
+    if (SystemData.Stop == 2)
     {
-        ImageStatus.Stop_lenth+=Record_encoder;
+        ImageStatus.Stop_lenth += Record_encoder * dt;
     }
     else
-        ImageStatus.Stop_lenth=0;
-
-
-
-
+        ImageStatus.Stop_lenth = 0.0f;
 }
 
 // ===============================================================================
@@ -1107,9 +1109,6 @@ void Speed_BiHuan(void)
     speed_encoder_L = speed_encoder_raw_L;
     speed_encoder_R = speed_encoder_raw_R;
 
-    Car_distance();         // 编码器记录路�?
-    Car_Speed_Contrl();     // 变速控制，更新基础速度Speed_Goal
-
     static float ramped_speed_goal = 0.0f;
     static auto last_speed_ramp_time = std::chrono::steady_clock::now();
     auto speed_ramp_now = std::chrono::steady_clock::now();
@@ -1120,7 +1119,17 @@ void Speed_BiHuan(void)
         speed_ramp_dt = 0.005f;
     }
 
-    const float desired_speed_goal = Speed_Goal;
+    float inner_dt = speed_ramp_dt;
+    if (inner_dt < 0.003f) inner_dt = 0.003f;
+    if (inner_dt > 0.012f) inner_dt = 0.012f;
+
+    Car_distance(inner_dt);
+
+    if (SystemData.Stop == 1) {
+        planned_speed_goal = 0.0f;
+    }
+
+    const float desired_speed_goal = planned_speed_goal;
     if (desired_speed_goal <= 0.0f) {
         ramped_speed_goal = 0.0f;
         Speed_Goal = 0.0f;
@@ -1142,8 +1151,7 @@ void Speed_BiHuan(void)
         Speed_Goal = ramped_speed_goal;
     }
 
-    // 【替换为】：基于陀螺仪的角�?角速度/速度的三串级差速控�?
-    speed_dif_cascade();     
+    speed_dif_cascade(inner_dt);     
 
     // 外环弯道/丢线保护可能�?speed_dif_cascade() 内把目标速度直接压低�?
     // 同步斜坡状态，避免保护解除时从旧的高速记忆值瞬间跳回去�?
