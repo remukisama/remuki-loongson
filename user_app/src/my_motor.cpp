@@ -1037,8 +1037,25 @@ void Speed_BiHuan(void)
 {
     const long long last_vision_ms =
         g_control_last_vision_frame_ms.load(std::memory_order_acquire);
-    const long long vision_age_ms = (last_vision_ms > 0) ? (control_now_ms() - last_vision_ms) : 1000000;
-    if (last_vision_ms <= 0 || vision_age_ms > kVisionFreshTimeoutMs) {
+    
+    // Waiting for first frame on startup: keep output at 0 but do NOT exit
+    if (last_vision_ms <= 0) {
+        Speed_Goal = 0.0f;
+        Speed_Goal_l = 0.0f;
+        Speed_Goal_r = 0.0f;
+        speed_out_l = 0.0f;
+        speed_out_r = 0.0f;
+        speed_last_erro_L = 0.0f;
+        speed_last_erro_R = 0.0f;
+        if (motor_L && motor_R) {
+            motor_Duty_L(0);
+            motor_Duty_R(0);
+        }
+        return;
+    }
+
+    const long long vision_age_ms = control_now_ms() - last_vision_ms;
+    if (vision_age_ms > kVisionFreshTimeoutMs) {
         static int vision_guard_warn_count = 0;
         Speed_Goal = 0.0f;
         Speed_Goal_l = 0.0f;
@@ -1053,7 +1070,7 @@ void Speed_BiHuan(void)
         }
         if (vision_guard_warn_count < 8) {
             ++vision_guard_warn_count;
-            printf("[VISION_GUARD] stale/no frame age=%lldms; stop output, lock out (restart required)\n",
+            printf("[VISION_GUARD] stale frame age=%lldms; stop output, lock out (exit required)\n",
                    vision_age_ms);
         }
         exit_flag.store(true, std::memory_order_relaxed);
@@ -1171,6 +1188,8 @@ void Speed_BiHuan(void)
         Speed_Goal_l = 0.0f;
         Speed_Goal_r = 0.0f;
         ramped_speed_goal = 0.0f;
+        planned_speed_goal = 0.0f;
+        SystemData.Stop = 1;
         speed_out_l = 0.0f;
         speed_out_r = 0.0f;
         speed_last_erro_L = 0.0f;
@@ -1181,13 +1200,14 @@ void Speed_BiHuan(void)
         }
         if (speed_guard_warn_count < 8) {
             ++speed_guard_warn_count;
-            printf("[SPEED_GUARD] reverse encoder feedback, stop output. "
+            printf("[SPEED_GUARD] reverse encoder feedback, stop output and lock exit. "
                    "goalL:%.2f goalR:%.2f encL:%.2f encR:%.2f\n",
                    guard_goal_l,
                    guard_goal_r,
                    speed_encoder_L,
                    speed_encoder_R);
         }
+        exit_flag.store(true, std::memory_order_relaxed);
         return;
     }
 
