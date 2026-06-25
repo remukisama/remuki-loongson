@@ -394,7 +394,7 @@ void speed_dif_cascade(float inner_dt)
     static bool raw_steer_initialized = false;
 
     // --- Vehicle stopped/idle state reset ---
-    if (SystemData.Stop == 1 || Speed_Goal <= 0.0f) {
+    if (SystemData.Stop == 1) {
         Speed_Goal_l = 0.0f;
         Speed_Goal_r = 0.0f;
         last_diff_speed = 0.0f;
