@@ -113,6 +113,7 @@ extern bool image_cv_zip(void);
 extern void Data_Settings(void);
 extern void imageprocess(void);
 extern void control_mark_vision_frame_ready(void);
+extern void control_reset_vision_health(void);
 extern void motor_Init(void);
 extern bool Speed_decision(void);
 extern void Speed_BiHuan(void);
@@ -1862,6 +1863,15 @@ int test_06_low_speed_visual_gyro_closed_loop(int seconds = 10) {
     init_control_for_motor_tests();
     g_enable_element_process = false;
 
+    control_reset_vision_health();
+    exit_flag.store(false, std::memory_order_relaxed);
+
+    // 先采集并发布一帧，避免控制线程读取到空/过期视觉状态
+    if (!grab_and_process()) {
+        safe_stop_and_print("T06_INIT");
+        return -1;
+    }
+
     std::thread ctrl_thread(timer_thread_1);
     RunningStat raw, filt, pd, tgt, cmd, real, gf, gerr, diff, se_l, se_r, dtmax;
     int cap_cnt = 0, imu_bad_cnt = 0, db_cnt = 0, img_bad_cnt = 0, img_warn_cnt = 0, pd_sat_cnt = 0;
@@ -2008,6 +2018,15 @@ int test_08_element_debug(int seconds = 25) {
                kElementDebugTargetIp.c_str(), kElementDebugTargetPort, kElementDebugJpegQuality);
     } else {
         printf("[T08_UDP] disabled. 使用 TFT18 + 终端日志观察元素补线。\n");
+    }
+
+    control_reset_vision_health();
+    exit_flag.store(false, std::memory_order_relaxed);
+
+    // 先采集并发布一帧，避免控制线程读取到空/过期视觉状态
+    if (!grab_and_process()) {
+        safe_stop_and_print("T08_INIT");
+        return -1;
     }
 
     std::thread ctrl_thread(timer_thread_1);
