@@ -13,7 +13,10 @@ namespace car_config
 // =====================================================================
 constexpr float kEncoderRpsToMS = 0.08870f;      // 编码器电机RPS→车轮线速度m/s换算系数
 constexpr int kMotorPwmFrequencyHz = 25000;      // 电机 PWM 频率，频率过低电机会啸叫，过高会降低有效分辨率；通常保持 20k-25kHz，除非驱动器发热或响应异常。
-constexpr int kMotorPwmStopDuty = 10000;         // 当前双路驱动板低有效：PWM保持100%高电平时停车。
+constexpr int kMotorPwmStopDuty = 10000;         // 电机停止时的占空比
+constexpr int kMotorPwmFullScale = kMotorPwmStopDuty; // 电机全速占空比数值
+constexpr int kEncoderDiagPulsePwm = 2500;        // 编码器诊断测试占空比
+constexpr int kEncoderDiagPulseMs = 200;          // 编码器诊断测试脉冲时间（ms）
 constexpr int kMotorInitialDuty = kMotorPwmStopDuty; // 上电即写停车电平，避免初始化瞬间冲车。
 constexpr int kGpioProtectHeartbeatIntervalMs = 10; // 对齐 loongson-car-system：10ms=100Hz，通过 /gpio_proj_shm 递增 heartbeat_counter。
 constexpr int kWatchdogHeartbeatStallTimeoutMs = 100; // 运行期 watchdog 活性检测：heartbeat_last_ms 超过该值未更新则认为 gpio_manager 失活，主动停车退出。
@@ -102,7 +105,10 @@ constexpr int kOpposingGyroRecoveryFrames = 18; // 反向保护触发后继续�
 constexpr float kOpposingGyroRecoveryLimitDps = 115.0f; // 反向保护解除后的短暂恢复目标上限，从115提到145加快S弯换向恢复。
 constexpr bool kSteerDebugPrintEnable = false;   // 正式基础循迹关闭实时串口打印；需要诊断时单独打开。
 constexpr int kSteerDebugPrintDivider = 20;      // 外环每 N 次刷新打印一次；20 次约400ms，降低终端输出对2K301闭环的干扰。
-constexpr float kFallbackDiffLimit = 250.0f;     // IMU 失效时纯视觉差速限幅，主要是保护值；若 IMU 偶发断联导致猛打方向，应降低。
+constexpr float kFallbackDiffLimit = 250.0f;     // IMU 失效时纯视觉差速限幅，主要是保护值
+// IMU fault-tolerance parameters
+constexpr int kImuMaxAllowedMissedFrames = 3;     // Maximum allowed transient IMU missed frames (3 frames = 30ms at 100Hz)
+constexpr float kImuFallbackSpeedGoal = 0.40f;    // Target speed under permanent IMU failure (m/s)
 
 // 姿态串级控制参数：角度环和角速度环
 constexpr float kAnglePidP = 11.0f;              // 角度环 P，将角度误差转换为目标角速度；偏航回正慢就加，来回摆就减。
@@ -302,6 +308,42 @@ constexpr int kCurveCenterFrameMaxStep = 4;       // 同一行跨帧最大接纳
 constexpr int kCurveCenterBadFrameMaxStep = 1;    // 双边都弱或宽度明显异常时跨帧更保守，避免坏图像把控制目标带飞。
 constexpr int kCurveCenterMinValidWidth = 10;     // 小于该宽度视为不可用，防止边界夹到一起后仍参与平均。
 constexpr int kCurveCenterMaxValidWidth = 72;     // 大于该宽度视为不可用，防止扫到画面边缘造成中线跳边。
+// =====================================================================
+// Speed Loop Tuning & Telemetry Diagnostics (VOFA)
+// =====================================================================
+constexpr int kEncoderLineCount = 512;            // 编码器线数（如512线）
+constexpr uint32_t kEncoderStalePeriodThreshold = 50000000U; // 编码器周期超时阈值（160MHz下约0.31s，即停止）
+constexpr char kSpeedTuneUdpHost[] = "192.168.1.100"; // UDP 调试目标主机 IP
+constexpr int kSpeedTuneUdpPort = 8081;          // UDP 调试目标端口
+constexpr int kSpeedTuneControlPeriodMs = 10;     // 速度环调试控制周期（10ms = 100Hz）
+constexpr int kSpeedTuneArmMaxMs = 5000;         // 等待起跑最大超时（5秒）
+constexpr int kSpeedTuneArmStableMs = 500;        // 起跑前静止稳定时间要求（500ms）
+constexpr int kSpeedTuneActiveMs = 1200;         // 调试正向行驶总时间（1200ms）
+constexpr int kSpeedTuneCooldownMs = 1000;       // 停止后冷却等待时间（1000ms）
+constexpr float kSpeedTuneDistanceLimitM = 1.20f; // 调试正向最大行驶位移限值（1.2米）
+constexpr int kSpeedTuneEncoderProbeMs = 500;     // 编码器极性探测阶段持续时间（500ms）
+constexpr int kSpeedTuneEncoderProbePwm = 2500;   // 编码器极性探测阶段测试PWM
+constexpr float kSpeedTuneHardMaxSpeed = 2.00f;   // 调试过程物理安全限速（2.0m/s）
+constexpr int kSpeedTuneLaunchMs = 120;          // 起步动力补偿脉冲时间（120ms）
+constexpr int kSpeedTuneLaunchPwm = 3200;         // 起步动力补偿脉冲PWM（3200）
+constexpr int kSpeedTuneLowMotionHoldMs = 500;    // 行驶中低速异常持续保护时间（500ms）
+constexpr int kSpeedTuneMaxPwm = 4200;            // 调试过程PWM上限（4200）
+constexpr float kSpeedTuneMinForwardDistanceForReturnM = 0.30f; // 触发自动返回所需的最小正向行驶位移（0.3m）
+constexpr int kSpeedTuneMismatchHoldMs = 150;     // 左右轮偏差异常持续保护时间（150ms）
+constexpr float kSpeedTuneMotionStartThreshold = 0.02f; // 运动起步检测速度阈值（0.02m/s）
+constexpr float kSpeedTuneOverspeedStop = 1.20f;  // 超速保护阈值（1.20m/s）
+constexpr float kSpeedTuneReturnStopDistanceM = 0.10f; // 返回停止保护提前量（0.1m）
+constexpr int kSpeedTuneReturnTimeoutMs = 3000;   // 自动返回过程最大超时（3000ms）
+constexpr int kSpeedTuneReverseBrakePwm = 1000;   // 倒车或刹车时的测试辅助PWM
+constexpr int kSpeedTuneSaturationHoldMs = 200;   // 占空比饱和异常持续保护时间（200ms）
+constexpr int kSpeedTuneSettleMaxMs = 1000;       // 减速静止等待的最大超时（1000ms）
+constexpr int kSpeedTuneSettleStableMs = 300;     // 判定完全静止所需的稳定时间（300ms）
+constexpr float kSpeedTuneSineMaxSpeed = 0.55f;   // 正弦扫频测试最大目标速度（0.55m/s）
+constexpr float kSpeedTuneSineMinSpeed = 0.20f;   // 正弦扫频测试最小目标速度（0.20m/s）
+constexpr float kSpeedTuneSinePeriodSec = 1.00f;  // 正弦扫频测试的扫频周期（1.0s）
+constexpr int kSpeedTuneStallHoldMs = 300;        // 电机堵转异常持续保护时间（300ms）
+constexpr float kSpeedTuneStallSpeedThreshold = 0.05f; // 电机堵转判定的速度阈值（0.05m/s）
+constexpr float kSpeedTuneWheelMismatchStop = 0.25f; // 左右车轮速度偏差保护阈值（0.25m/s）
 }
 
 #endif

@@ -74,6 +74,8 @@ public:
 
     void  encoder_reset_counter(void);          // 重置编码器计数器
     void  encoder_close_reset_counter(void);    // 关闭重置编码器计数器
+    uint32_t encoder_get_full_period(void);     // 获取当前捕获周期寄存器
+    void  encoder_clear_capture_buffer(void);   // 清除捕获缓冲，避免静止时复读旧周期
 
     ls_encoder_pwm(const ls_encoder_pwm& other);            // 拷贝构造
     ls_encoder_pwm& operator=(const ls_encoder_pwm& other); // 拷贝赋值

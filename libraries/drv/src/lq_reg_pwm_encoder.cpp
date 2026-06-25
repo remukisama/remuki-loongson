@@ -74,6 +74,29 @@ void ls_encoder_pwm::encoder_close_reset_counter(void)
 }
 
 /********************************************************************************
+ * @brief   获取 PWM 编码器当前捕获周期寄存器
+ * @param   none.
+ * @return  uint32_t 捕获到的完整周期计数；0 表示当前无有效捕获
+ ********************************************************************************/
+uint32_t ls_encoder_pwm::encoder_get_full_period(void)
+{
+    std::lock_guard<std::mutex> lock(this->mtx);
+    return ls_readl(this->enc_pwm_full_buf);
+}
+
+/********************************************************************************
+ * @brief   清除 PWM 编码器捕获缓冲
+ * @param   none.
+ * @return  none.
+ * @note    调参诊断模式使用，避免车轮静止时反复读取上一次捕获周期。
+ ********************************************************************************/
+void ls_encoder_pwm::encoder_clear_capture_buffer(void)
+{
+    std::lock_guard<std::mutex> lock(this->mtx);
+    ls_writel(this->enc_pwm_low_buf, 0);
+    ls_writel(this->enc_pwm_full_buf, 0);
+}
+/********************************************************************************
  * @brief   获取编码器值
  * @param   none.
  * @return  float 编码器值
