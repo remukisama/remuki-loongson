@@ -16,6 +16,9 @@ struct VisionSnapshot {
     int Road_type;
     int image_element_rings;
     int image_element_rings_flag;
+    int Left_Line;
+    int Right_Line;
+    int straight_acc;
     uint32_t seq;
 };
 
@@ -106,6 +109,9 @@ void control_mark_vision_frame_ready(void)
         g_vision_snapshot.Road_type = ImageStatus.Road_type;
         g_vision_snapshot.image_element_rings = ImageFlag.image_element_rings;
         g_vision_snapshot.image_element_rings_flag = ImageFlag.image_element_rings_flag;
+        g_vision_snapshot.Left_Line = ImageStatus.Left_Line;
+        g_vision_snapshot.Right_Line = ImageStatus.Right_Line;
+        g_vision_snapshot.straight_acc = ImageStatus.straight_acc;
         g_vision_snapshot.seq = g_control_vision_frame_seq.load(std::memory_order_relaxed) + 1;
     }
     g_control_last_vision_frame_ms.store(control_now_ms(), std::memory_order_release);
@@ -335,6 +341,23 @@ static void distribute_wheel_speeds(float speed_goal, float diff_speed, bool u_t
     dbg_speed_err_r = Speed_Goal_r - speed_encoder_R;
 }
 
+static void distribute_wheel_speeds(float speed_goal, float diff_speed, float effective_min_wheel) {
+    Speed_Goal_l = speed_goal - diff_speed;
+    Speed_Goal_r = speed_goal + diff_speed;
+
+    if (speed_goal <= 0.0f) {
+        Speed_Goal_l = 0.0f;
+        Speed_Goal_r = 0.0f;
+    } else {
+        if (Speed_Goal_l < effective_min_wheel) Speed_Goal_l = effective_min_wheel;
+        if (Speed_Goal_r < effective_min_wheel) Speed_Goal_r = effective_min_wheel;
+        if (Speed_Goal_l > car_config::kMaxWheelSpeedGoal) Speed_Goal_l = car_config::kMaxWheelSpeedGoal;
+        if (Speed_Goal_r > car_config::kMaxWheelSpeedGoal) Speed_Goal_r = car_config::kMaxWheelSpeedGoal;
+    }
+    dbg_speed_err_l = Speed_Goal_l - speed_encoder_L;
+    dbg_speed_err_r = Speed_Goal_r - speed_encoder_R;
+}
+
 void speed_dif_cascade()
 {
     // --- Status and time variables ---
@@ -354,8 +377,17 @@ void speed_dif_cascade()
     static int consecutive_imu_failures = 0;
     static bool imu_in_fallback = false;
 
-    static int s_curve_hold_frames = 0;
-    static int curve_entry_brake_frames = 0;
+    // --- Time-based holding limits ---
+    static long long s_curve_hold_until_ms = 0;
+    static long long curve_entry_brake_until_ms = 0;
+    static long long u_turn_hold_until_ms = 0;
+
+    // --- planned control parameters from outer loop to inner loop ---
+    static float target_gyro_z = 0.0f;
+    static float fallback_diff = 0.0f;
+    static float max_diff = 0.0f;
+    static float effective_min_wheel = MIN_SPEED;
+
     static bool was_in_ring = false;
     static float last_control_raw_steer_error = 0.0f;
     static bool raw_steer_initialized = false;
@@ -374,8 +406,13 @@ void speed_dif_cascade()
         consecutive_imu_successes = 0;
         consecutive_imu_failures = 0;
         imu_in_fallback = false;
-        s_curve_hold_frames = 0;
-        curve_entry_brake_frames = 0;
+        s_curve_hold_until_ms = 0;
+        curve_entry_brake_until_ms = 0;
+        u_turn_hold_until_ms = 0;
+        target_gyro_z = 0.0f;
+        fallback_diff = 0.0f;
+        max_diff = 0.0f;
+        effective_min_wheel = MIN_SPEED;
         raw_steer_initialized = false;
 
         dbg_diff_speed = 0.0f;
@@ -400,6 +437,7 @@ void speed_dif_cascade()
     // --- 1. Dual-rate architecture - visual outer loop (event-driven) ---
     uint32_t current_seq = g_control_vision_frame_seq.load(std::memory_order_acquire);
     bool new_frame_arrived = (current_seq != last_processed_seq);
+    long long now = control_now_ms();
 
     if (new_frame_arrived) {
         // A. Lock and copy latest vision snapshot to prevent race conditions
@@ -437,9 +475,9 @@ void speed_dif_cascade()
             control_raw_steer_error = 0.0f;
             raw_steer_initialized = false;
             last_diff_speed = 0.0f;
-            last_target_gyro_z = 0.0f;
-            s_curve_hold_frames = 0;
-            curve_entry_brake_frames = 0;
+            target_gyro_z = 0.0f;
+            s_curve_hold_until_ms = 0;
+            curve_entry_brake_until_ms = 0;
             cascade_ctrl.reset_runtime_state();
         }
 
@@ -492,11 +530,9 @@ void speed_dif_cascade()
              std::fabs(diff_steer_normalized) >= car_config::kSCurveDerivativeThreshold) ||
             (std::fabs(control_raw_steer_error) >= car_config::kSCurveSharpRawThreshold);
         if (s_curve_active_raw && !ring_now) {
-            s_curve_hold_frames = car_config::kSCurveHoldFrames;
-        } else if (s_curve_hold_frames > 0) {
-            --s_curve_hold_frames;
+            s_curve_hold_until_ms = now + 80; // 8 frames * 10ms = 80ms
         }
-        bool s_curve_active = s_curve_hold_frames > 0;
+        bool s_curve_active = (now < s_curve_hold_until_ms);
 
         const bool extreme_turn_active =
             !ring_now &&
@@ -508,38 +544,44 @@ void speed_dif_cascade()
             (std::fabs(control_raw_steer_error) <= car_config::kExtremeTurnExitRawThreshold) &&
             (std::fabs(steer_error) <= car_config::kExtremeTurnExitFiltThreshold);
 
-        bool u_turn_prepare = false;
-        static int u_turn_hold_frames = 0;
-        const bool u_turn_early_risk =
-            (local_vision.OFFLine >= car_config::kUTurnEarlyLossThreshold) &&
-            (local_vision.Road_type == Straight || local_vision.Road_type == Normol);
-        const bool u_turn_forced_active =
-            (local_vision.OFFLine >= car_config::kUTurnSingleSideLossThreshold) &&
-            (local_vision.Road_type == Straight || local_vision.Road_type == Normol);
-        if (u_turn_forced_active) {
-            u_turn_prepare = true;
-        }
-        if (u_turn_prepare) {
-            u_turn_hold_frames = car_config::kUTurnHoldFrames;
-        } else if (u_turn_hold_frames > 0) {
-            --u_turn_hold_frames;
-        }
-        u_turn_risk = u_turn_prepare || (u_turn_hold_frames > 0);
-
-        if (u_turn_risk) {
-            if (u_turn_forced_dir == 0) {
-                u_turn_forced_dir = (steer_error >= 0.0f) ? 1 : -1;
-            }
-        } else {
-            u_turn_forced_dir = 0;
-        }
+        // U-turn line loss detection logic
+        const int single_side_loss = std::max(local_vision.Left_Line, local_vision.Right_Line);
+        const int side_loss_delta = local_vision.Left_Line - local_vision.Right_Line;
 
         const bool u_turn_raw_filt_conflict =
-            u_turn_risk &&
             (std::fabs(control_raw_steer_error) >= car_config::kUTurnRawFiltConflictRawThreshold) &&
             (std::fabs(steer_error) >= car_config::kUTurnRawFiltConflictFiltThreshold) &&
-            ((control_raw_steer_error > 0.0f && steer_error < 0.0f) ||
-             (control_raw_steer_error < 0.0f && steer_error > 0.0f));
+            (control_raw_steer_error * steer_error < 0.0f);
+
+        bool u_turn_prepare =
+            !ring_now &&
+            (local_vision.Road_type == Normol || local_vision.Road_type == Straight) &&
+            !u_turn_raw_filt_conflict &&
+            single_side_loss >= car_config::kUTurnSingleSideLossThreshold &&
+            (std::fabs(raw_steer_error) >= car_config::kUTurnRawThreshold ||
+             std::fabs(steer_error) >= car_config::kUTurnRawThreshold);
+
+        const bool u_turn_exit_centered =
+            !u_turn_prepare &&
+            u_turn_forced_dir != 0 &&
+            single_side_loss <= car_config::kUTurnReleaseSingleSideLossMax &&
+            std::fabs(control_raw_steer_error) <= car_config::kUTurnReleaseRawThreshold &&
+            std::fabs(steer_error) <= car_config::kUTurnReleaseFiltThreshold;
+
+        if (u_turn_exit_centered) {
+            u_turn_hold_until_ms = 0;
+            u_turn_forced_dir = 0;
+        } else if (u_turn_prepare) {
+            u_turn_hold_until_ms = now + 150; // 15 frames * 10ms = 150ms
+            if (side_loss_delta >= car_config::kUTurnSideLossDominance) {
+                u_turn_forced_dir = 1;
+            } else if (side_loss_delta <= -car_config::kUTurnSideLossDominance) {
+                u_turn_forced_dir = -1;
+            } else if (u_turn_forced_dir == 0 && std::fabs(control_raw_steer_error) > 0.1f) {
+                u_turn_forced_dir = (control_raw_steer_error > 0.0f) ? 1 : -1;
+            }
+        }
+        u_turn_risk = u_turn_prepare || (now < u_turn_hold_until_ms);
 
         const bool extreme_turn_active_final = extreme_turn_active || u_turn_risk;
 
@@ -553,17 +595,17 @@ void speed_dif_cascade()
             (std::fabs(steer_error) >= car_config::kCurveEntryBrakeFiltThreshold) &&
             (control_raw_steer_error * diff_steer_normalized >= 0.0f) &&
             (std::fabs(diff_steer_normalized) >= car_config::kCurveEntryBrakeDerivativeThreshold);
+
         if (curve_entry_brake_prepare) {
-            curve_entry_brake_frames = car_config::kCurveEntryBrakeHoldFrames;
-        } else if (curve_entry_brake_frames > 0) {
-            --curve_entry_brake_frames;
+            curve_entry_brake_until_ms = now + 120; // 12 frames * 10ms = 120ms
         }
+        bool curve_entry_brake_active = (now < curve_entry_brake_until_ms);
 
         // G. Basic target speed reduction planning
         if (std::fabs(steer_error) > car_config::kSharpTurnSteerError) {
-            Speed_Goal = ZD_Speed_Goal;
+            Speed_Goal = std::min(Speed_Goal, WD_Speed_Goal); // FIXED: WD_Speed_Goal instead of ZD_Speed_Goal
         }
-        if (Speed_Goal > car_config::kCurveEntryBrakeSpeedGoal && curve_entry_brake_frames > 0) {
+        if (Speed_Goal > car_config::kCurveEntryBrakeSpeedGoal && curve_entry_brake_active) {
             Speed_Goal = car_config::kCurveEntryBrakeSpeedGoal;
         }
         if (Speed_Goal > car_config::kSCurveSpeedGoal && s_curve_active) {
@@ -575,6 +617,10 @@ void speed_dif_cascade()
         if (Speed_Goal > car_config::kUTurnSpeedGoal && u_turn_risk) {
             Speed_Goal = car_config::kUTurnSpeedGoal;
         }
+        const bool u_turn_early_risk =
+            !ring_now &&
+            (local_vision.Road_type == Normol || local_vision.Road_type == Straight) &&
+            single_side_loss >= car_config::kUTurnEarlyLossThreshold;
         if (!u_turn_risk && u_turn_early_risk && Speed_Goal > car_config::kUTurnEarlySpeedGoal) {
             Speed_Goal = car_config::kUTurnEarlySpeedGoal;
         }
@@ -586,231 +632,148 @@ void speed_dif_cascade()
         }
         last_effective_speed_goal = Speed_Goal;
 
-        // --- H. Fault tolerance state machine and visual outer loop PID calculation ---
-        Mpu6050Data imu_data;
-        bool imu_ok = imu.read_processed_data(imu_data);
+        // H. Visual outer loop PID calculation for target_gyro_z
+        float visual_pd_out = 0.0f;
+        float delta_target = 0.0f;
+        static int opposing_gyro_recovery_frames = 0;
 
-        if (imu_ok) {
-            consecutive_imu_successes++;
-            consecutive_imu_failures = 0;
+        const float DEAD_BAND = (local_vision.Road_type == Straight || local_vision.Road_type == Normol) ? 
+            (float)car_config::kSteerDeadBandStraight : (float)car_config::kSteerDeadBandCurve;
 
-            if (imu_in_fallback) {
-                // 5 consecutive successes, bumpless recovery
-                if (consecutive_imu_successes >= car_config::kImuRecoveryMinFrames) {
-                    imu_in_fallback = false;
-                    cascade_ctrl.initialize_recovery_state(imu_data.gyro_z, last_diff_speed);
-                }
-            }
-        } else {
-            consecutive_imu_failures++;
-            consecutive_imu_successes = 0;
-
-            if (consecutive_imu_failures > car_config::kImuMaxAllowedMissedFrames) {
-                imu_in_fallback = true;
-            }
-        }
-
-        float diff_speed = 0.0f;
-        float target_gyro_z = 0.0f;
-
-        if (!imu_in_fallback) {
-            // IMU normal or in transient failure hold period
-            dbg_imu_ok = 1;
-
-            if (consecutive_imu_failures > 0) {
-                // 1. Transient failure: freeze state, hold previous frame
-                diff_speed = last_diff_speed;
-                target_gyro_z = last_target_gyro_z;
+        if (std::fabs(steer_error) < DEAD_BAND) {
+            const float filtered_gyro_before_update = cascade_ctrl.last_filtered_gyro_z();
+            const bool straight_gyro_damping =
+                !ring_now &&
+                local_vision.image_element_rings == 0 &&
+                (local_vision.Road_type == Normol ||
+                 local_vision.Road_type == Straight ||
+                 local_vision.Road_type == Cross) &&
+                std::fabs(control_raw_steer_error) <= car_config::kSteerDeadBandStraight &&
+                std::fabs(steer_error) <= car_config::kSteerDeadBandStraight &&
+                std::fabs(filtered_gyro_before_update) >= car_config::kStraightGyroDampingThresholdDps;
+            if (straight_gyro_damping) {
+                target_gyro_z = -filtered_gyro_before_update * car_config::kStraightGyroDampingGain;
+                target_gyro_z = clamp_float(target_gyro_z, -car_config::kStraightGyroDampingLimitDps, car_config::kStraightGyroDampingLimitDps);
+                delta_target = target_gyro_z - last_target_gyro_z;
+                delta_target = clamp_float(delta_target, -car_config::kStraightGyroDampingMaxDeltaDps, car_config::kStraightGyroDampingMaxDeltaDps);
+                target_gyro_z = last_target_gyro_z + delta_target;
             } else {
-                // 2. Normal operation: calculate target gyro rate
-                const float filtered_gyro_before_update = cascade_ctrl.last_filtered_gyro_z();
-                float visual_pd_out = 0.0f;
-                float delta_target = 0.0f;
-                static int opposing_gyro_recovery_frames = 0;
-
-                const float DEAD_BAND = (local_vision.Road_type == Straight || local_vision.Road_type == Normol) ? 
-                    (float)car_config::kSteerDeadBandStraight : (float)car_config::kSteerDeadBandCurve;
-
-                if (std::fabs(steer_error) < DEAD_BAND) {
-                    const bool straight_gyro_damping =
-                        !ring_now &&
-                        local_vision.image_element_rings == 0 &&
-                        (local_vision.Road_type == Normol ||
-                         local_vision.Road_type == Straight ||
-                         local_vision.Road_type == Cross) &&
-                        std::fabs(control_raw_steer_error) <= car_config::kSteerDeadBandStraight &&
-                        std::fabs(steer_error) <= car_config::kSteerDeadBandStraight &&
-                        std::fabs(filtered_gyro_before_update) >= car_config::kStraightGyroDampingThresholdDps;
-                    if (straight_gyro_damping) {
-                        target_gyro_z = -filtered_gyro_before_update * car_config::kStraightGyroDampingGain;
-                        target_gyro_z = clamp_float(target_gyro_z, -car_config::kStraightGyroDampingLimitDps, car_config::kStraightGyroDampingLimitDps);
-                        delta_target = target_gyro_z - last_target_gyro_z;
-                        delta_target = clamp_float(delta_target, -car_config::kStraightGyroDampingMaxDeltaDps, car_config::kStraightGyroDampingMaxDeltaDps);
-                        target_gyro_z = last_target_gyro_z + delta_target;
-                    } else {
-                        delta_target = -last_target_gyro_z;
-                        delta_target = clamp_float(delta_target, -car_config::kTargetGyroDeadbandReturnDeltaDps, car_config::kTargetGyroDeadbandReturnDeltaDps);
-                        target_gyro_z = last_target_gyro_z + delta_target;
-                    }
-                    if (std::fabs(target_gyro_z) < car_config::kGyroDeadBandDps) {
-                        target_gyro_z = 0.0f;
-                        delta_target = -last_target_gyro_z;
-                        opposing_gyro_recovery_frames = 0;
-                    } else if (opposing_gyro_recovery_frames > 0) {
-                        --opposing_gyro_recovery_frames;
-                    }
-                    last_target_gyro_z = target_gyro_z;
-                    last_steer_error = steer_error;
-                } else {
-                    visual_pd_out = steer_error * STEER_KP + diff_steer_normalized * STEER_KD;
-                    if (u_turn_raw_filt_conflict) {
-                        visual_pd_out = control_raw_steer_error * STEER_KP + diff_steer_normalized * STEER_KD;
-                    }
-
-                    visual_pd_out = clamp_float(visual_pd_out, -car_config::kVisualGyroLimitDps, car_config::kVisualGyroLimitDps);
-
-                    if ((local_vision.Road_type == LeftCirque || local_vision.Road_type == RightCirque) &&
-                         std::fabs(visual_pd_out) > car_config::kRingSceneGyroLimitDps) {
-                        visual_pd_out = std::copysign(car_config::kRingSceneGyroLimitDps, visual_pd_out);
-                    }
-                    if (ring_entry_phase && std::fabs(visual_pd_out) > car_config::kRingEntryGyroLimitDps) {
-                        visual_pd_out = std::copysign(car_config::kRingEntryGyroLimitDps, visual_pd_out);
-                    }
-
-                    const bool unclassified_extreme_turn =
-                        (extreme_turn_active ||
-                         std::fabs(control_raw_steer_error) >= car_config::kUnclassifiedTurnTriggerError ||
-                         std::fabs(steer_error) >= car_config::kUnclassifiedTurnTriggerError) &&
-                        local_vision.image_element_rings == 0 &&
-                        (local_vision.Road_type == Normol || local_vision.Road_type == Straight);
-                    if (!u_turn_risk && unclassified_extreme_turn && std::fabs(visual_pd_out) > car_config::kUnclassifiedTurnGyroLimitDps) {
-                        visual_pd_out = std::copysign(car_config::kUnclassifiedTurnGyroLimitDps, visual_pd_out);
-                    }
-                    if (u_turn_risk && std::fabs(visual_pd_out) > car_config::kUTurnGyroLimitDps) {
-                        visual_pd_out = std::copysign(car_config::kUTurnGyroLimitDps, visual_pd_out);
-                    }
-                    if (u_turn_risk && u_turn_forced_dir != 0) {
-                        float forced_abs = std::fabs(visual_pd_out);
-                        forced_abs = clamp_float(forced_abs, car_config::kUTurnForcedGyroDps, car_config::kUTurnGyroLimitDps);
-                        visual_pd_out = std::copysign(forced_abs, (float)u_turn_forced_dir);
-                    } else if (u_turn_risk && !u_turn_raw_filt_conflict && std::fabs(visual_pd_out) < car_config::kUTurnForcedGyroDps) {
-                        const float u_turn_sign_source = (std::fabs(visual_pd_out) > 0.1f) ? visual_pd_out :
-                            ((std::fabs(steer_error) > 0.1f) ? steer_error : control_raw_steer_error);
-                        if (std::fabs(u_turn_sign_source) > 0.1f) {
-                            visual_pd_out = std::copysign(car_config::kUTurnForcedGyroDps, u_turn_sign_source);
-                        }
-                    }
-                    const bool near_straight_centered =
-                        !ring_now &&
-                        (local_vision.Road_type == Straight || local_vision.Road_type == Normol) &&
-                        std::fabs(control_raw_steer_error) <= car_config::kSteerDeadBandStraight &&
-                        std::fabs(steer_error) <= car_config::kSteerDeadBandStraight;
-                    if (near_straight_centered && std::fabs(visual_pd_out) > car_config::kStraightSmallErrorGyroLimitDps) {
-                        visual_pd_out = std::copysign(car_config::kStraightSmallErrorGyroLimitDps, visual_pd_out);
-                    }
-                    if (bad_vision && !ring_now && !u_turn_risk && std::fabs(visual_pd_out) > car_config::kBadVisionGyroLimitDps) {
-                        visual_pd_out = std::copysign(car_config::kBadVisionGyroLimitDps, visual_pd_out);
-                    }
-
-                    // Time-variant rate limiting (fixed rate per second)
-                    float max_delta_target = car_config::kTargetGyroMaxDeltaDps;
-                    if (s_curve_active) {
-                        max_delta_target = car_config::kTargetGyroSCurveMaxDeltaDps;
-                    }
-                    if ((visual_pd_out > 0.0f && last_target_gyro_z < 0.0f) ||
-                        (visual_pd_out < 0.0f && last_target_gyro_z > 0.0f)) {
-                        max_delta_target = car_config::kTargetGyroSignFlipMaxDeltaDps;
-                    }
-                    if (extreme_exit_unwind && max_delta_target < car_config::kExtremeTurnExitTargetDeltaDps) {
-                        max_delta_target = car_config::kExtremeTurnExitTargetDeltaDps;
-                    }
-                    float max_delta_target_scaled = max_delta_target * normalized_dt_ratio;
-
-                    delta_target = visual_pd_out - last_target_gyro_z;
-                    delta_target = clamp_float(delta_target, -max_delta_target_scaled, max_delta_target_scaled);
-                    target_gyro_z = last_target_gyro_z + delta_target;
-
-                    bool opposing_gyro_limited = false;
-                    if (s_curve_active &&
-                        target_gyro_z * filtered_gyro_before_update < 0.0f &&
-                        std::fabs(filtered_gyro_before_update) > car_config::kOpposingGyroHoldDps &&
-                        std::fabs(target_gyro_z) > car_config::kOpposingGyroTargetLimitDps) {
-                        target_gyro_z = std::copysign(car_config::kOpposingGyroTargetLimitDps, target_gyro_z);
-                        delta_target = target_gyro_z - last_target_gyro_z;
-                        opposing_gyro_recovery_frames = car_config::kOpposingGyroRecoveryFrames;
-                        opposing_gyro_limited = true;
-                    }
-                    if (!opposing_gyro_limited && s_curve_active && opposing_gyro_recovery_frames > 0) {
-                        if (std::fabs(target_gyro_z) > car_config::kOpposingGyroRecoveryLimitDps) {
-                            target_gyro_z = std::copysign(car_config::kOpposingGyroRecoveryLimitDps, target_gyro_z);
-                            delta_target = target_gyro_z - last_target_gyro_z;
-                        }
-                        --opposing_gyro_recovery_frames;
-                    } else if (!s_curve_active) {
-                        opposing_gyro_recovery_frames = 0;
-                    }
-                    last_target_gyro_z = target_gyro_z;
-                    last_steer_error = steer_error;
-                }
-                dbg_visual_pd_out = visual_pd_out;
-                dbg_target_delta = delta_target;
+                delta_target = -last_target_gyro_z;
+                delta_target = clamp_float(delta_target, -car_config::kTargetGyroDeadbandReturnDeltaDps, car_config::kTargetGyroDeadbandReturnDeltaDps);
+                target_gyro_z = last_target_gyro_z + delta_target;
             }
-            dbg_target_gyro_z = target_gyro_z;
-
-            // --- 2. Dual-rate architecture - inner gyro PID (runs at 5ms fixed period) ---
-            // Only run MPU6050 closed loop when IMU is not in fallback
-            if (consecutive_imu_failures == 0) {
-                float cmd_target_gyro_z = target_gyro_z;
-                if (cmd_target_gyro_z > 0.0f) {
-                    cmd_target_gyro_z *= car_config::kGyroTargetPositiveGain;
-                } else if (cmd_target_gyro_z < 0.0f) {
-                    cmd_target_gyro_z *= car_config::kGyroTargetNegativeGain;
-                }
-
-                // Fixed control period 5ms (0.005s)
-                float inner_dt = 0.005f;
-                diff_speed = cascade_ctrl.calc_diff_speed_bypass_angle(cmd_target_gyro_z, imu_data, inner_dt);
-                dbg_cmd_target_gyro_z = cmd_target_gyro_z;
-                dbg_filtered_gyro_z = cascade_ctrl.last_filtered_gyro_z();
-                dbg_gyro_error = cascade_ctrl.gyro_pid.err;
-                dbg_diff_before_limit = diff_speed;
+            if (std::fabs(target_gyro_z) < car_config::kGyroDeadBandDps) {
+                target_gyro_z = 0.0f;
+                delta_target = -last_target_gyro_z;
+                opposing_gyro_recovery_frames = 0;
+            } else if (opposing_gyro_recovery_frames > 0) {
+                --opposing_gyro_recovery_frames;
             }
+            last_target_gyro_z = target_gyro_z;
+            last_steer_error = steer_error;
         } else {
-            // IMU permanently failed, fallback to pure visual closed loop
-            dbg_imu_ok = 0;
-            dbg_real_gyro_z = 0.0f;
-            dbg_filtered_gyro_z = 0.0f;
-            dbg_gyro_error = 0.0f;
-            dbg_cmd_target_gyro_z = 0.0f;
-            dbg_target_delta = 0.0f;
-            dbg_target_gyro_z = 0.0f;
-            last_target_gyro_z = 0.0f; // Clear old target gyro during fallback
-
-            if (Speed_Goal > car_config::kImuFallbackSpeedGoal) {
-                Speed_Goal = car_config::kImuFallbackSpeedGoal;
+            visual_pd_out = steer_error * STEER_KP + diff_steer_normalized * STEER_KD;
+            const bool u_turn_raw_filt_conflict_steer =
+                u_turn_risk &&
+                (std::fabs(control_raw_steer_error) >= car_config::kUTurnRawFiltConflictRawThreshold) &&
+                (std::fabs(steer_error) >= car_config::kUTurnRawFiltConflictFiltThreshold) &&
+                ((control_raw_steer_error > 0.0f && steer_error < 0.0f) ||
+                 (control_raw_steer_error < 0.0f && steer_error > 0.0f));
+            if (u_turn_raw_filt_conflict_steer) {
+                visual_pd_out = control_raw_steer_error * STEER_KP + diff_steer_normalized * STEER_KD;
             }
 
-            const float DEAD_BAND = (local_vision.Road_type == Straight || local_vision.Road_type == Normol) ? 
-                (float)car_config::kSteerDeadBandStraight : (float)car_config::kSteerDeadBandCurve;
+            visual_pd_out = clamp_float(visual_pd_out, -car_config::kVisualGyroLimitDps, car_config::kVisualGyroLimitDps);
 
-            if (std::fabs(steer_error) < DEAD_BAND) {
-                diff_speed = 0.0f;
-                dbg_visual_pd_out = 0.0f;
-                dbg_diff_before_limit = 0.0f;
-                last_steer_error = steer_error;
-            } else {
-                float fallback_diff = steer_error * STEER_KP + diff_steer_normalized * STEER_KD;
-                dbg_visual_pd_out = fallback_diff;
-                dbg_diff_before_limit = fallback_diff;
-
-                fallback_diff = clamp_float(fallback_diff, -car_config::kFallbackDiffLimit, car_config::kFallbackDiffLimit);
-                last_steer_error = steer_error;
-                diff_speed = fallback_diff;
+            if ((local_vision.Road_type == LeftCirque || local_vision.Road_type == RightCirque) &&
+                 std::fabs(visual_pd_out) > car_config::kRingSceneGyroLimitDps) {
+                visual_pd_out = std::copysign(car_config::kRingSceneGyroLimitDps, visual_pd_out);
             }
+            if (ring_entry_phase && std::fabs(visual_pd_out) > car_config::kRingEntryGyroLimitDps) {
+                visual_pd_out = std::copysign(car_config::kRingEntryGyroLimitDps, visual_pd_out);
+            }
+
+            const bool unclassified_extreme_turn =
+                (extreme_turn_active ||
+                 std::fabs(control_raw_steer_error) >= car_config::kUnclassifiedTurnTriggerError ||
+                 std::fabs(steer_error) >= car_config::kUnclassifiedTurnTriggerError) &&
+                local_vision.image_element_rings == 0 &&
+                (local_vision.Road_type == Normol || local_vision.Road_type == Straight);
+            if (!u_turn_risk && unclassified_extreme_turn && std::fabs(visual_pd_out) > car_config::kUnclassifiedTurnGyroLimitDps) {
+                visual_pd_out = std::copysign(car_config::kUnclassifiedTurnGyroLimitDps, visual_pd_out);
+            }
+            if (u_turn_risk && std::fabs(visual_pd_out) > car_config::kUTurnGyroLimitDps) {
+                visual_pd_out = std::copysign(car_config::kUTurnGyroLimitDps, visual_pd_out);
+            }
+            if (u_turn_risk && u_turn_forced_dir != 0) {
+                float forced_abs = std::fabs(visual_pd_out);
+                forced_abs = clamp_float(forced_abs, car_config::kUTurnForcedGyroDps, car_config::kUTurnGyroLimitDps);
+                visual_pd_out = std::copysign(forced_abs, (float)u_turn_forced_dir);
+            } else if (u_turn_risk && !u_turn_raw_filt_conflict && std::fabs(visual_pd_out) < car_config::kUTurnForcedGyroDps) {
+                const float u_turn_sign_source = (std::fabs(visual_pd_out) > 0.1f) ? visual_pd_out :
+                    ((std::fabs(steer_error) > 0.1f) ? steer_error : control_raw_steer_error);
+                if (std::fabs(u_turn_sign_source) > 0.1f) {
+                    visual_pd_out = std::copysign(car_config::kUTurnForcedGyroDps, u_turn_sign_source);
+                }
+            }
+            const bool near_straight_centered =
+                !ring_now &&
+                (local_vision.Road_type == Straight || local_vision.Road_type == Normol) &&
+                std::fabs(control_raw_steer_error) <= car_config::kSteerDeadBandStraight &&
+                std::fabs(steer_error) <= car_config::kSteerDeadBandStraight;
+            if (near_straight_centered && std::fabs(visual_pd_out) > car_config::kStraightSmallErrorGyroLimitDps) {
+                visual_pd_out = std::copysign(car_config::kStraightSmallErrorGyroLimitDps, visual_pd_out);
+            }
+            if (bad_vision && !ring_now && !u_turn_risk && std::fabs(visual_pd_out) > car_config::kBadVisionGyroLimitDps) {
+                visual_pd_out = std::copysign(car_config::kBadVisionGyroLimitDps, visual_pd_out);
+            }
+
+            // Time-variant rate limiting (fixed rate per second)
+            float max_delta_target = car_config::kTargetGyroMaxDeltaDps;
+            if (s_curve_active) {
+                max_delta_target = car_config::kTargetGyroSCurveMaxDeltaDps;
+            }
+            if ((visual_pd_out > 0.0f && last_target_gyro_z < 0.0f) ||
+                (visual_pd_out < 0.0f && last_target_gyro_z > 0.0f)) {
+                max_delta_target = car_config::kTargetGyroSignFlipMaxDeltaDps;
+            }
+            if (extreme_exit_unwind && max_delta_target < car_config::kExtremeTurnExitTargetDeltaDps) {
+                max_delta_target = car_config::kExtremeTurnExitTargetDeltaDps;
+            }
+            float max_delta_target_scaled = max_delta_target * normalized_dt_ratio;
+
+            delta_target = visual_pd_out - last_target_gyro_z;
+            delta_target = clamp_float(delta_target, -max_delta_target_scaled, max_delta_target_scaled);
+            target_gyro_z = last_target_gyro_z + delta_target;
+
+            const float filtered_gyro_before_update = cascade_ctrl.last_filtered_gyro_z();
+            bool opposing_gyro_limited = false;
+            if (s_curve_active &&
+                target_gyro_z * filtered_gyro_before_update < 0.0f &&
+                std::fabs(filtered_gyro_before_update) > car_config::kOpposingGyroHoldDps &&
+                std::fabs(target_gyro_z) > car_config::kOpposingGyroTargetLimitDps) {
+                target_gyro_z = std::copysign(car_config::kOpposingGyroTargetLimitDps, target_gyro_z);
+                delta_target = target_gyro_z - last_target_gyro_z;
+                opposing_gyro_recovery_frames = car_config::kOpposingGyroRecoveryFrames;
+                opposing_gyro_limited = true;
+            }
+            if (!opposing_gyro_limited && s_curve_active && opposing_gyro_recovery_frames > 0) {
+                if (std::fabs(target_gyro_z) > car_config::kOpposingGyroRecoveryLimitDps) {
+                    target_gyro_z = std::copysign(car_config::kOpposingGyroRecoveryLimitDps, target_gyro_z);
+                    delta_target = target_gyro_z - last_target_gyro_z;
+                }
+                --opposing_gyro_recovery_frames;
+            } else if (!s_curve_active) {
+                opposing_gyro_recovery_frames = 0;
+            }
+            last_target_gyro_z = target_gyro_z;
+            last_steer_error = steer_error;
         }
+        dbg_visual_pd_out = visual_pd_out;
+        dbg_target_delta = delta_target;
 
-        // --- I. Unified diff speed limit and speed clamping strategy ---
-        float max_diff = Speed_Goal * MAX_DIFF_RATIO;
+        // Compute active differential limits and effective min wheel
+        max_diff = Speed_Goal * MAX_DIFF_RATIO;
         if (s_curve_active && max_diff < car_config::kSCurveMinDiff) {
             max_diff = car_config::kSCurveMinDiff;
         }
@@ -854,45 +817,118 @@ void speed_dif_cascade()
                 max_diff = straight_limit;
             }
         }
-        dbg_max_diff = max_diff;
-        dbg_diff_limited = 0;
-        if (diff_speed > max_diff)  {
-            diff_speed = max_diff;
-            dbg_diff_limited = 1;
-        }
-        if (diff_speed < -max_diff) {
-            diff_speed = -max_diff;
-            dbg_diff_limited = 1;
-        }
 
-        // Bottom speed limit: allow inner wheel minimum goal to scale down in sharp curves
         const float base_min_wheel = u_turn_risk ? car_config::kUTurnMinWheelSpeedGoal : MIN_SPEED;
-        float effective_min_wheel = base_min_wheel;
+        effective_min_wheel = base_min_wheel;
         if (std::fabs(steer_error) > 6.0f) {
             float reduction = 0.02f * (std::fabs(steer_error) - 6.0f);
             effective_min_wheel = std::max(u_turn_risk ? 0.10f : 0.15f, base_min_wheel - reduction);
         }
 
-        // Key protection: clamp diff speed to prevent average speed from rising
-        float max_allowed_diff = Speed_Goal - effective_min_wheel;
-        if (max_allowed_diff < 0.0f) {
-            max_allowed_diff = 0.0f;
+        // Under fallback, pre-compute pure visual diff_speed
+        if (imu_in_fallback) {
+            if (std::fabs(steer_error) < DEAD_BAND) {
+                fallback_diff = 0.0f;
+            } else {
+                fallback_diff = steer_error * STEER_KP + diff_steer_normalized * STEER_KD;
+                fallback_diff = clamp_float(fallback_diff, -car_config::kFallbackDiffLimit, car_config::kFallbackDiffLimit);
+            }
         }
-        if (std::fabs(diff_speed) > max_allowed_diff) {
-            diff_speed = std::copysign(max_allowed_diff, diff_speed);
-        }
-
-        dbg_diff_speed = diff_speed;
-        last_diff_speed = diff_speed;
-
-        // Unified left/right speed distribution
-        distribute_wheel_speeds(Speed_Goal, diff_speed, u_turn_risk);
-    } else {
-        // --- J. Reuse visual outer loop results on fast inner loop ticks ---
-        // Directly reuse last_diff_speed for wheel speed distribution
-        float reuse_speed_goal = (last_effective_speed_goal > 0.0f) ? last_effective_speed_goal : Speed_Goal;
-        distribute_wheel_speeds(reuse_speed_goal, last_diff_speed, u_turn_risk);
     }
+
+    // --- 2. Dual-rate architecture - inner loop (Runs unconditionally every 5ms) ---
+    Mpu6050Data imu_data;
+    bool imu_ok = imu.read_processed_data(imu_data);
+
+    if (imu_ok) {
+        consecutive_imu_successes++;
+        consecutive_imu_failures = 0;
+
+        if (imu_in_fallback) {
+            if (consecutive_imu_successes >= car_config::kImuRecoveryMinFrames) {
+                imu_in_fallback = false;
+                cascade_ctrl.initialize_recovery_state(imu_data.gyro_z, last_diff_speed);
+            }
+        }
+    } else {
+        consecutive_imu_failures++;
+        consecutive_imu_successes = 0;
+
+        if (consecutive_imu_failures > car_config::kImuMaxAllowedMissedFrames) {
+            imu_in_fallback = true;
+        }
+    }
+
+    float diff_speed = 0.0f;
+
+    if (!imu_in_fallback) {
+        dbg_imu_ok = 1;
+
+        if (consecutive_imu_failures > 0) {
+            // Transient failure: freeze control action, hold previous frame
+            diff_speed = last_diff_speed;
+        } else {
+            // Normal: execute gyro rate PID loop at 5ms (0.005s)
+            float cmd_target_gyro_z = target_gyro_z;
+            if (cmd_target_gyro_z > 0.0f) {
+                cmd_target_gyro_z *= car_config::kGyroTargetPositiveGain;
+            } else if (cmd_target_gyro_z < 0.0f) {
+                cmd_target_gyro_z *= car_config::kGyroTargetNegativeGain;
+            }
+
+            diff_speed = cascade_ctrl.calc_diff_speed_bypass_angle(cmd_target_gyro_z, imu_data, 0.005f);
+            dbg_cmd_target_gyro_z = cmd_target_gyro_z;
+            dbg_real_gyro_z = imu_data.gyro_z;
+            dbg_filtered_gyro_z = cascade_ctrl.last_filtered_gyro_z();
+            dbg_gyro_error = cascade_ctrl.gyro_pid.err;
+            dbg_diff_before_limit = diff_speed;
+        }
+    } else {
+        // Fallback: execute pure visual closed loop using pre-computed fallback_diff
+        dbg_imu_ok = 0;
+        dbg_real_gyro_z = 0.0f;
+        dbg_filtered_gyro_z = 0.0f;
+        dbg_gyro_error = 0.0f;
+        dbg_cmd_target_gyro_z = 0.0f;
+        dbg_target_delta = 0.0f;
+        dbg_target_gyro_z = 0.0f;
+        last_target_gyro_z = 0.0f;
+
+        if (Speed_Goal > car_config::kImuFallbackSpeedGoal) {
+            Speed_Goal = car_config::kImuFallbackSpeedGoal;
+        }
+
+        diff_speed = fallback_diff;
+        dbg_visual_pd_out = fallback_diff;
+        dbg_diff_before_limit = fallback_diff;
+    }
+
+    // --- 3. Unified clamping and speed distribution ---
+    dbg_max_diff = max_diff;
+    dbg_diff_limited = 0;
+    if (diff_speed > max_diff) {
+        diff_speed = max_diff;
+        dbg_diff_limited = 1;
+    }
+    if (diff_speed < -max_diff) {
+        diff_speed = -max_diff;
+        dbg_diff_limited = 1;
+    }
+
+    // Average speed conservation: clamp diff_speed to prevent inner wheel speed from rising
+    float max_allowed_diff = Speed_Goal - effective_min_wheel;
+    if (max_allowed_diff < 0.0f) {
+        max_allowed_diff = 0.0f;
+    }
+    if (std::fabs(diff_speed) > max_allowed_diff) {
+        diff_speed = std::copysign(max_allowed_diff, diff_speed);
+    }
+
+    dbg_diff_speed = diff_speed;
+    last_diff_speed = diff_speed;
+
+    // Distribute speed targets to left and right wheels using the matching effective_min_wheel
+    distribute_wheel_speeds(Speed_Goal, diff_speed, effective_min_wheel);
     if (car_config::kSteerDebugPrintEnable) {
         static int debug_print_count = 0;
         debug_print_count++;

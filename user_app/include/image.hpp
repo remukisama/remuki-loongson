@@ -11,7 +11,7 @@
 #define int16 int16_t
 #define int32 int32_t
 
-#define OX  (50/ 3000.0)  //标度变换
+#define OX  ((50.0 / 3000.0) * 200.0)  //标度变换 (以米为单位的距离积分修正)
 
 #define ImageSensorMid 39 
 #define LimitL(L) (L = ((L < 1) ? 1 : L))    //限制幅度
@@ -122,7 +122,7 @@ typedef struct
   int sanchaju;
 
   //保护
-  int Stop_lenth;  //出界保护放误判距离
+  float Stop_lenth;  //出界保护放误判距离
   //坡道减速
   int Ramp_lenth;
 
@@ -234,7 +234,7 @@ typedef struct
   int sanchaju;
 
   //保护
-  int Stop_lenth;  //出界保护放误判距离
+  float Stop_lenth;  //出界保护放误判距离
   //坡道减速
   int Ramp_lenth;
 
