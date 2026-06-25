@@ -22,6 +22,7 @@ public:
     AttitudeCascade();
     void init();
     void reset_runtime_state();
+    void initialize_recovery_state(float current_gyro_z, float current_diff_speed);
 
     /**
      * @brief 级联PID计算函数

@@ -30,7 +30,7 @@ static float g_raw_last_R = 0.0f;
 static int g_invalid_count_L = 0;
 static int g_invalid_count_R = 0;
 static const float kFilterAlpha = 0.8f;
-static const float kMaxValidSpeed = 3.0f;    // 垃圾值阈值
+static const float kMaxValidSpeed = 5.0f;    // 垃圾值阈值
 static const float kSpikeThreshold = 2.0f;   // 尖峰检测阈值
 static const int kEncoderInvalidTripCount = 20; // 约100ms@5ms闭环，持续无效则禁止实车闭环。
 
@@ -55,6 +55,15 @@ static float filter_encoder(float raw, float filtered, bool &initialized) {
 
 float encoder_num_L(void)
 {
+    uint32_t period = encoder_L.encoder_get_full_period();
+    if (period >= car_config::kEncoderStalePeriodThreshold) {
+        encoder_L.encoder_clear_capture_buffer();
+        g_raw_last_L = 0.0f;
+        g_filtered_L = 0.0f;
+        g_invalid_count_L = 0;
+        return 0.0f;
+    }
+
     // 取反：落地后 DIR=LOW=前进，编码器原始值为负，取反后为正
     float raw = -encoder_L.encoder_get_count() * car_config::kEncoderRpsToMS;
     g_raw_last_L = raw;
@@ -69,6 +78,15 @@ float encoder_num_L(void)
 
 float encoder_num_R(void)
 {
+    uint32_t period = encoder_R.encoder_get_full_period();
+    if (period >= car_config::kEncoderStalePeriodThreshold) {
+        encoder_R.encoder_clear_capture_buffer();
+        g_raw_last_R = 0.0f;
+        g_filtered_R = 0.0f;
+        g_invalid_count_R = 0;
+        return 0.0f;
+    }
+
     // 取反：落地后 DIR=LOW=前进，编码器原始值为负，取反后为正
     float raw = encoder_R.encoder_get_count() * car_config::kEncoderRpsToMS;
     g_raw_last_R = raw;

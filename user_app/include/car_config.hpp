@@ -109,6 +109,7 @@ constexpr float kFallbackDiffLimit = 250.0f;     // IMU 失效时纯视觉差速
 // IMU fault-tolerance parameters
 constexpr int kImuMaxAllowedMissedFrames = 3;     // Maximum allowed transient IMU missed frames (3 frames = 30ms at 100Hz)
 constexpr float kImuFallbackSpeedGoal = 0.40f;    // Target speed under permanent IMU failure (m/s)
+constexpr int kImuRecoveryMinFrames = 5;          // Minimum stable IMU frames required before recovery
 
 // 姿态串级控制参数：角度环和角速度环
 constexpr float kAnglePidP = 11.0f;              // 角度环 P，将角度误差转换为目标角速度；偏航回正慢就加，来回摆就减。

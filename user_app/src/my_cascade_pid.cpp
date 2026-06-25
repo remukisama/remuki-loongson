@@ -58,6 +58,29 @@ void AttitudeCascade::reset_runtime_state() {
     last_gyro_output_ = 0.0f;
 }
 
+void AttitudeCascade::initialize_recovery_state(float current_gyro_z, float current_diff_speed) {
+    gyro_z_filtered_ = current_gyro_z;
+    last_gyro_z_measurement_ = current_gyro_z;
+    last_gyro_output_ = current_diff_speed;
+
+    gyro_pid.err = 0.0f;
+    gyro_pid.last_err = 0.0f;
+    if (gyro_pid.I > 0.0001f) {
+        gyro_pid.integral = current_diff_speed / gyro_pid.I;
+        if (gyro_pid.integral > gyro_pid.int_max) gyro_pid.integral = gyro_pid.int_max;
+        if (gyro_pid.integral < -gyro_pid.int_max) gyro_pid.integral = -gyro_pid.int_max;
+    } else {
+        gyro_pid.integral = 0.0f;
+    }
+    gyro_pid.output = current_diff_speed;
+
+    angle_pid.err = 0.0f;
+    angle_pid.last_err = 0.0f;
+    angle_pid.integral = 0.0f;
+    angle_pid.output = 0.0f;
+    current_yaw = 0.0f;
+}
+
 float AttitudeCascade::calc_diff_speed(float target_angle,
                                        const Mpu6050Data& imu_data,
                                        float dt) {
