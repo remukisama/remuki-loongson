@@ -1038,7 +1038,7 @@ void Speed_BiHuan(void)
     const long long last_vision_ms =
         g_control_last_vision_frame_ms.load(std::memory_order_acquire);
     
-    // Waiting for first frame on startup: keep output at 0 but do NOT exit
+    // Waiting for first frame on startup: keep output at 0 but do NOT exit unless timeout exceeded
     if (last_vision_ms <= 0) {
         Speed_Goal = 0.0f;
         Speed_Goal_l = 0.0f;
@@ -1050,6 +1050,16 @@ void Speed_BiHuan(void)
         if (motor_L && motor_R) {
             motor_Duty_L(0);
             motor_Duty_R(0);
+        }
+
+        static long long control_start_ms = 0;
+        if (control_start_ms == 0) {
+            control_start_ms = control_now_ms();
+        }
+        long long wait_time_ms = control_now_ms() - control_start_ms;
+        if (wait_time_ms > 2000) { // 2 seconds timeout
+            printf("[VISION_GUARD] Timeout waiting for first vision frame (2000ms exceeded). Exiting.\n");
+            exit_flag.store(true, std::memory_order_relaxed);
         }
         return;
     }
