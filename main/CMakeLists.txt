@@ -27,6 +27,15 @@ aux_source_directory(${PROJECT_SOURCE_DIR}/../libraries/drv/src SRC)
 aux_source_directory(${PROJECT_SOURCE_DIR}/../example/src SRC)
 aux_source_directory(${PROJECT_SOURCE_DIR}/../user_app/src SRC)
 
+# 运行时安全层以 #include "my_motor.cpp" 的方式复用既有控制律。
+# 因此必须从独立编译单元中移除原始 my_motor.cpp，避免同一符号定义两次。
+set(LQ_RUNTIME_SAFETY_WRAPPER "${PROJECT_SOURCE_DIR}/../user_app/src/my_motor_runtime_patch.cpp")
+if (EXISTS "${LQ_RUNTIME_SAFETY_WRAPPER}")
+    list(REMOVE_ITEM SRC "${PROJECT_SOURCE_DIR}/../user_app/src/my_motor.cpp")
+    message(STATUS "Runtime safety wrapper enabled: ${LQ_RUNTIME_SAFETY_WRAPPER}")
+endif()
+
+# 指定所用的头文件路径
 include_directories(
     ${PROJECT_SOURCE_DIR}/
     ${PROJECT_SOURCE_DIR}/../libraries/app/
