@@ -1,8 +1,11 @@
-// Runtime-safety overlay for my_motor.cpp.
+// Runtime-safety and competition-turn-authority overlay for my_motor.cpp.
 //
-// This file is intentionally compiled instead of my_motor.cpp (see main/CMakeLists.txt).
-// It includes the existing tuned controller once, then adds fail-closed lifecycle guards
-// without retuning the vision, gyro, differential-speed or wheel-speed control law.
+// This translation unit is compiled instead of my_motor.cpp (see CMake).  The
+// original tuned control law is included once and remains the source of truth;
+// the wrappers below only add lifecycle fail-safes and a bounded low-speed
+// curve-authority release.  No vision/gyro PID gains are changed here.
+
+#include "competition_tuning_config.hpp"
 
 #define Speed_BiHuan lq_speed_bihuan_impl
 #define Speed_decision lq_speed_decision_impl
@@ -60,8 +63,9 @@ bool direct_drive_watchdog_ready()
 
 void reset_control_runtime_once()
 {
-    // The existing SystemData.Stop branch is the source of truth for clearing the
-    // controller's function-local filter, scene-hold, fallback and PID state.
+    // The existing SystemData.Stop branch clears the controller's function-local
+    // filter, scene-hold, fallback and PID state.  Reuse it instead of copying
+    // the current control law into a second reset implementation.
     const int saved_stop = SystemData.Stop;
     planned_speed_goal = 0.0f;
     apply_zero_motor_output();
@@ -94,7 +98,6 @@ bool control_timing_healthy()
         std::printf("[CONTROL_TIMING] delayed control tick gap=%lldms streak=%d/%d\n",
                     gap_ms, streak, kControlOverrunConsecutiveLimit);
     }
-
     if (streak < kControlOverrunConsecutiveLimit) {
         return true;
     }
@@ -102,7 +105,33 @@ bool control_timing_healthy()
     std::printf("[CONTROL_TIMING_GUARD] repeated control overruns; stop output and exit.\n");
     return false;
 }
-} // namespace
+
+bool should_release_curve_inner_wheel()
+{
+    // Do not use a stale/lost visual scene to lower the inner wheel.  The base
+    // controller owns the final lost-line safety behavior; this guard merely
+    // releases authority for a confirmed, already-low-speed ordinary curve.
+    if (Speed_Goal <= 0.0f ||
+        Speed_Goal > competition_tuning::kTurnAuthorityMaxSpeedGoal ||
+        ImageStatus.OFFLine >= car_config::kBadVisionOfflineThreshold) {
+        return false;
+    }
+
+    return std::fabs(dbg_raw_steer_error) >= competition_tuning::kTurnAuthorityRawErrorThreshold ||
+           std::fabs(dbg_steer_error) >= competition_tuning::kTurnAuthorityFilteredErrorThreshold ||
+           std::fabs(dbg_diff_steer) >= competition_tuning::kTurnAuthorityDerivativeThreshold;
+}
+
+void update_turn_authority_log(bool enabled)
+{
+    static bool last_enabled = false;
+    if (enabled == last_enabled) return;
+    last_enabled = enabled;
+    std::printf("[TURN_AUTHORITY] inner_min=%.2f enabled=%d speed_goal=%.2f raw=%.1f filt=%.1f dE=%.1f\n",
+                enabled ? competition_tuning::kCurveMinWheelSpeedGoal : car_config::kMinWheelSpeedGoal,
+                enabled ? 1 : 0, Speed_Goal, dbg_raw_steer_error, dbg_steer_error, dbg_diff_steer);
+}
+}  // namespace
 
 bool Speed_decision(void)
 {
@@ -117,8 +146,8 @@ bool Speed_decision(void)
 
 void control_reset_vision_health(void)
 {
-    // Keep the previous generation so the first frame after a reset can never be
-    // mistaken for an already-consumed frame by speed_dif_cascade().
+    // Advance the sequence generation so the first frame after a reset cannot
+    // be confused with a frame consumed by the previous T06/T08 run.
     const uint32_t previous_seq = g_control_vision_frame_seq.load(std::memory_order_acquire);
     lq_control_reset_vision_health_impl();
     g_control_vision_frame_seq.store(previous_seq + 1U, std::memory_order_release);
@@ -155,7 +184,21 @@ void Speed_BiHuan(void)
         return;
     }
 
+    // The original T06 controller conserves average speed and clamps its
+    // differential to Speed_Goal - MIN_SPEED.  At 0.44 m/s with MIN_SPEED=0.36,
+    // this leaves only 0.08 m/s of differential authority.  Release the inner
+    // wheel only after the speed plan is already low and a valid curve demand is
+    // present; normal straight speed and bad-vision behavior remain unchanged.
+    const bool turn_authority = should_release_curve_inner_wheel();
+    const float saved_min_speed = MIN_SPEED;
+    if (turn_authority) {
+        MIN_SPEED = std::min(saved_min_speed, competition_tuning::kCurveMinWheelSpeedGoal);
+    }
+    update_turn_authority_log(turn_authority);
+
     lq_speed_bihuan_impl();
+
+    MIN_SPEED = saved_min_speed;
 }
 
 void motor_Duty_L(int duty)
