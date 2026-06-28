@@ -49,7 +49,6 @@ void timer_thread_1()
 {
     while (!exit_flag.load(std::memory_order_relaxed)) {
         Speed_BiHuan();
-        // This reads control state only from the same control thread that writes it.
         motion_feedback_guard_tick();
         std::this_thread::sleep_for(timer_interval_1);
     }
@@ -151,10 +150,12 @@ int main(int argc, char **argv)
     while (!exit_flag.load(std::memory_order_relaxed)) {
         image_flag = image_cv_zip();
         if (!image_flag) {
-            motor_Duty_R(0);
-            motor_Duty_L(0);
-            emergency_stop();
+            // Do not race the control thread by writing PWM from this thread.
+            // The thread exits within one 5 ms period; shutdown below owns final PWM writes.
             exit_flag.store(true, std::memory_order_relaxed);
+            break;
+        }
+        if (exit_flag.load(std::memory_order_relaxed)) {
             break;
         }
 
