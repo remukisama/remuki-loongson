@@ -1,5 +1,4 @@
 #include "gpio_protect_heartbeat.hpp"
-
 #include "car_config.hpp"
 
 #include <atomic>
@@ -13,10 +12,9 @@
 #include <thread>
 #include <unistd.h>
 
-namespace
-{
-static const char *kShmName = "/gpio_proj_shm";
-static const uint32_t kShmVersion = 3;
+namespace {
+constexpr const char *kShmName = "/gpio_proj_shm";
+constexpr uint32_t kShmVersion = 3;
 
 struct GpioWatchdogShmLayout {
     uint32_t version;
@@ -28,7 +26,7 @@ struct GpioWatchdogShmLayout {
     uint32_t watchdog_started_ms;
 };
 
-static const size_t kShmSize = sizeof(GpioWatchdogShmLayout);
+constexpr size_t kShmSize = sizeof(GpioWatchdogShmLayout);
 
 std::atomic<bool> g_heartbeat_enabled{true};
 std::atomic<long long> g_last_pulse_ms{0};
@@ -37,14 +35,12 @@ std::atomic<uint32_t> g_heartbeat_counter{0};
 int g_shm_fd = -1;
 GpioWatchdogShmLayout *g_shm = nullptr;
 
-long long now_ms()
-{
-    using namespace std::chrono;
-    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+long long now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-bool heartbeat_disabled_by_env()
-{
+bool heartbeat_disabled_by_env() {
     const char *env_enable = std::getenv("LQ_GPIO_PROTECT_HEARTBEAT_ENABLE");
     return env_enable != nullptr &&
            (std::strcmp(env_enable, "0") == 0 ||
@@ -52,8 +48,7 @@ bool heartbeat_disabled_by_env()
             std::strcmp(env_enable, "FALSE") == 0);
 }
 
-void close_watchdog_shm()
-{
+void close_watchdog_shm() {
     if (g_shm && g_shm != MAP_FAILED) {
         munmap(g_shm, kShmSize);
         g_shm = nullptr;
@@ -64,11 +59,10 @@ void close_watchdog_shm()
     }
 }
 
-int open_watchdog_shm()
-{
+int open_watchdog_shm() {
     if (g_shm) return 0;
 
-    long long stamp_ms = now_ms();
+    const long long stamp_ms = now_ms();
     long long last_attempt_ms = g_last_open_attempt_ms.load();
     if (stamp_ms - last_attempt_ms < 1000) return -1;
     if (!g_last_open_attempt_ms.compare_exchange_strong(last_attempt_ms, stamp_ms)) return -1;
@@ -99,10 +93,9 @@ int open_watchdog_shm()
                 kShmName, car_config::kGpioProtectHeartbeatIntervalMs);
     return 0;
 }
-}
+}  // namespace
 
-void gpio_protect_heartbeat_init(void)
-{
+void gpio_protect_heartbeat_init(void) {
     if (heartbeat_disabled_by_env()) {
         g_heartbeat_enabled.store(false);
         std::printf("[GPIO_PROTECT] heartbeat disabled by LQ_GPIO_PROTECT_HEARTBEAT_ENABLE\n");
@@ -116,22 +109,20 @@ void gpio_protect_heartbeat_init(void)
     gpio_protect_heartbeat_pulse();
 }
 
-void gpio_protect_heartbeat_pulse(void)
-{
+void gpio_protect_heartbeat_pulse(void) {
     if (!g_heartbeat_enabled.load()) return;
     if (!g_shm && open_watchdog_shm() != 0) return;
 
-    long long stamp_ms = now_ms();
+    const long long stamp_ms = now_ms();
     long long last_ms = g_last_pulse_ms.load();
     if (stamp_ms - last_ms < car_config::kGpioProtectHeartbeatIntervalMs) return;
     if (!g_last_pulse_ms.compare_exchange_strong(last_ms, stamp_ms)) return;
 
-    uint32_t counter = g_heartbeat_counter.fetch_add(1) + 1;
+    const uint32_t counter = g_heartbeat_counter.fetch_add(1) + 1;
     g_shm->heartbeat_counter = counter;
 }
 
-bool gpio_protect_heartbeat_require_ready(int timeout_ms)
-{
+bool gpio_protect_heartbeat_require_ready(int timeout_ms) {
     if (heartbeat_disabled_by_env()) {
         std::printf("[GPIO_PROTECT][FATAL] heartbeat disabled by env; car mode requires gpio_manager\n");
         return false;
@@ -144,14 +135,11 @@ bool gpio_protect_heartbeat_require_ready(int timeout_ms)
     int check_count = 0;
     while (now_ms() < deadline_ms) {
         if (g_shm || open_watchdog_shm() == 0) {
-            // 持续喂狗：每 10ms 发送一次，避免 watchdog 超时进入安全模式
             g_last_pulse_ms.store(0);
             gpio_protect_heartbeat_pulse();
 
             const uint32_t cur_watchdog_ms = g_shm->heartbeat_last_ms;
             const uint32_t cur_heartbeat = g_shm->heartbeat_counter;
-
-            // 至少完成两轮心跳+watchdog确认后才判定就绪
             if (check_count >= 2 &&
                 g_shm->watchdog_started_ms != 0 &&
                 g_shm->heartbeat_alive == 1 &&
@@ -175,8 +163,7 @@ bool gpio_protect_heartbeat_require_ready(int timeout_ms)
     return false;
 }
 
-void gpio_protect_heartbeat_deinit(void)
-{
+void gpio_protect_heartbeat_deinit(void) {
     if (g_shm && g_shm != MAP_FAILED) {
         g_shm->heartbeat_counter = 0;
     }
@@ -184,22 +171,17 @@ void gpio_protect_heartbeat_deinit(void)
     g_heartbeat_enabled.store(false);
 }
 
-bool gpio_protect_heartbeat_is_wd_alive(int timeout_ms)
-{
-    if (!g_heartbeat_enabled.load()) {
-        return true;
-    }
-    if (!g_shm && open_watchdog_shm() != 0) {
-        return false;
-    }
-    if (!g_shm) {
-        return false;
-    }
+bool gpio_protect_heartbeat_is_wd_alive(int timeout_ms) {
+    if (!g_heartbeat_enabled.load()) return true;
+    if (!g_shm && open_watchdog_shm() != 0) return false;
+    if (!g_shm) return false;
+
     const uint32_t last_ms = g_shm->heartbeat_last_ms;
-    if (last_ms == 0) {
-        return false;
-    }
-    const long long now = now_ms();
-    const long long age = now - static_cast<long long>(last_ms);
-    return age <= timeout_ms;
+    if (last_ms == 0) return false;
+
+    // Both processes use the system monotonic time base.  Do arithmetic in
+    // uint32_t so an uptime wrap remains a small elapsed interval.
+    const uint32_t now32 = static_cast<uint32_t>(now_ms());
+    const uint32_t age_ms = now32 - last_ms;
+    return age_ms <= static_cast<uint32_t>(timeout_ms);
 }
