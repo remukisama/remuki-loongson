@@ -390,8 +390,19 @@ void speed_dif_cascade(float inner_dt)
     static float last_control_raw_steer_error = 0.0f;
     static bool raw_steer_initialized = false;
 
+    static bool full_loss_stop_latched = false;
+
+    // 单侧丢线预判只在“入弯阶段”生效一次。
+    // 一旦视觉误差已经明显进入弯道，就不允许它在出弯阶段重新介入。
+    static int preview_turn_sign = 0;
+    static bool preview_committed = false;
+
     // --- Vehicle stopped/idle state reset ---
     if (SystemData.Stop == 1) {
+        full_loss_stop_latched = false;
+        preview_turn_sign = 0;
+        preview_committed = false;
+
         Speed_Goal_l = 0.0f;
         Speed_Goal_r = 0.0f;
         last_diff_speed = 0.0f;
@@ -472,24 +483,52 @@ void speed_dif_cascade(float inner_dt)
         const int dominant_loss = std::max(left_loss, right_loss);
         const int loss_delta = left_loss - right_loss;
 
-        // Raw 还在中心附近时允许直接预判；
-        // 已明显偏离时，要求预判方向与视觉偏差方向一致。
+        const int preview_sign =
+            (loss_delta > 0) ? 1 :
+            (loss_delta < 0) ? -1 : 0;
+
         const bool preview_direction_consistent =
             (std::fabs(raw_steer_error) <= 2.0f) ||
             ((raw_steer_error > 0.0f) == (loss_delta > 0));
 
-        const bool preview_valid =
+        const bool preview_candidate =
             !ring_now &&
             local_vision.Road_type == Normol &&
             local_vision.OFFLine <= 10 &&
+            preview_sign != 0 &&
             dominant_loss >= car_config::kCurvePreviewLossStart &&
             std::abs(loss_delta) >= car_config::kCurvePreviewLossStart &&
             preview_direction_consistent;
 
+        // 两条边重新稳定后，允许下一次弯道重新使用预判。
+        if (!preview_candidate ||
+            dominant_loss <= car_config::kCurvePreviewResetLoss) {
+            preview_turn_sign = 0;
+            preview_committed = false;
+        } else {
+            // 单侧丢线方向切换，视为新弯道。
+            if (preview_turn_sign != preview_sign) {
+                preview_turn_sign = preview_sign;
+                preview_committed = false;
+            }
+
+            // 视觉已经明确进入弯道后，关闭预判。
+            // 后续完全交给视觉误差 + 陀螺仪闭环，避免出弯仍被旧方向预判拖住。
+            if (std::fabs(raw_steer_error) >=
+                car_config::kCurvePreviewCommitRawError) {
+                preview_committed = true;
+            }
+        }
+
+        const bool preview_valid =
+            preview_candidate &&
+            !preview_committed;
+
         if (preview_valid) {
             const float loss_level =
                 static_cast<float>(
-                    dominant_loss - car_config::kCurvePreviewLossStart + 1);
+                    dominant_loss -
+                    car_config::kCurvePreviewLossStart + 1);
 
             const float magnitude = clamp_float(
                 car_config::kCurvePreviewGyroBaseDps +
@@ -497,8 +536,6 @@ void speed_dif_cascade(float inner_dt)
                 0.0f,
                 car_config::kCurvePreviewGyroMaxDps);
 
-            // 右边先丢线 -> loss_delta 为负 -> 给负角速度；
-            // 左边先丢线 -> 自动给正角速度。
             preview_gyro_bias = std::copysign(
                 magnitude,
                 static_cast<float>(loss_delta));
@@ -507,11 +544,38 @@ void speed_dif_cascade(float inner_dt)
         const bool preview_turn_active =
             std::fabs(preview_gyro_bias) > 0.01f;
 
-        if (full_loss_non_ring || ring_just_finished) {
+        if (full_loss_non_ring) {
+            control_raw_steer_error = 0.0f;
+
+            raw_steer_initialized = false;
+            last_control_raw_steer_error = 0.0f;
+
+            last_steer_error = 0.0f;
+            last_target_gyro_z = 0.0f;
+            target_gyro_z = 0.0f;
+
+            last_diff_speed = 0.0f;
+            fallback_diff = 0.0f;
+            max_diff = 0.0f;
+
+            preview_turn_sign = 0;
+            preview_committed = false;
+
+            cascade_ctrl.reset_runtime_state();
+
+            if (car_config::kFullLossStopLatchEnable) {
+                full_loss_stop_latched = true;
+            }
+        } else if (ring_just_finished) {
             control_raw_steer_error = 0.0f;
             raw_steer_initialized = false;
-            last_diff_speed = 0.0f;
+            last_control_raw_steer_error = 0.0f;
+
+            last_steer_error = 0.0f;
+            last_target_gyro_z = 0.0f;
             target_gyro_z = 0.0f;
+
+            last_diff_speed = 0.0f;
             cascade_ctrl.reset_runtime_state();
         }
 
@@ -678,6 +742,29 @@ void speed_dif_cascade(float inner_dt)
                 fallback_diff = clamp_float(fallback_diff, -car_config::kFallbackDiffLimit, car_config::kFallbackDiffLimit);
             }
         }
+    }
+
+    if (full_loss_stop_latched) {
+        planned_speed_goal = 0.0f;
+
+        Speed_Goal = 0.0f;
+        Speed_Goal_l = 0.0f;
+        Speed_Goal_r = 0.0f;
+
+        speed_out_l = 0.0f;
+        speed_out_r = 0.0f;
+        speed_last_erro_L = 0.0f;
+        speed_last_erro_R = 0.0f;
+
+        dbg_diff_speed = 0.0f;
+        dbg_target_gyro_z = 0.0f;
+        dbg_visual_pd_out = 0.0f;
+        dbg_cmd_target_gyro_z = 0.0f;
+        dbg_diff_before_limit = 0.0f;
+        dbg_max_diff = 0.0f;
+        dbg_diff_limited = 0;
+
+        return;
     }
 
     // --- 2. Dual-rate architecture - inner loop (Runs unconditionally every 5ms) ---
