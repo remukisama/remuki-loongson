@@ -37,7 +37,7 @@ constexpr float kMaxWheelSpeedGoal = 4.0f;       // 单轮目标速度上限 m/s
 // 视觉外环与差速分配参数
 constexpr float kSteerKp = 2.55f;                 // 外环先恢复基准，避免修复制动后突然过猛
 constexpr float kSteerKd = 1.50f;                 // 增大D项抑制振荡，从1.00提到1.50。
-constexpr float kMaxDiffRatio = 1.25f;           // 0.82 实车转向不足丢线；回到中间值，在不过分刹内轮的前提下给足弯道差速。
+constexpr float kMaxDiffRatio = 1.65f;           // 从 1.25 提高到 1.65，增大弯道外轮分配上限，增强转向轮速差。
 constexpr int kSteerDeadBandDefault = 2;          // T06 S弯换向死区吞2帧致出界，降到2让Raw=-2时也产生转向。
 constexpr int kSteerDeadBandStraight = 2;        // 直道Raw=2~3时也参与回中，只吞掉1列内的小噪声，避免回中太慢。
 constexpr int kSteerDeadBandCurve = 1;            // T06 S弯换向关键帧落在死区内，弯道死区进一步降到1。
