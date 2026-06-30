@@ -433,6 +433,44 @@ void speed_dif_cascade(float inner_dt)
         const bool full_loss_non_ring = !ring_now && local_vision.OFFLine >= car_config::kBadVisionCenterHoldOfflineThreshold;
 
         float control_raw_steer_error = raw_steer_error;
+
+        // 单侧边线先丢失时，说明弯道已进入视野；
+        // 在中线误差变大前提前建立减速和转向。
+        float preview_error = 0.0f;
+
+        const int left_loss  = local_vision.Left_Line;
+        const int right_loss = local_vision.Right_Line;
+
+        const int dominant_loss = std::max(left_loss, right_loss);
+        const int loss_delta = left_loss - right_loss;
+
+        const bool preview_valid =
+            !ring_now &&
+            local_vision.Road_type == Normol &&
+            local_vision.OFFLine <= 10 &&
+            dominant_loss >= car_config::kCurvePreviewLossStart &&
+            dominant_loss <= car_config::kCurvePreviewLossStop &&
+            std::abs(loss_delta) >= car_config::kCurvePreviewLossStart;
+
+        if (preview_valid) {
+            float magnitude =
+                (dominant_loss - car_config::kCurvePreviewLossStart) *
+                car_config::kCurvePreviewLossGain;
+
+            magnitude = clamp_float(
+                magnitude,
+                0.0f,
+                car_config::kCurvePreviewErrorMax);
+
+            // 右边线先丢：loss_delta 为负，和当前日志中的负向入弯一致；
+            // 左边线先丢：自动对称处理。
+            preview_error = std::copysign(
+                magnitude,
+                static_cast<float>(loss_delta));
+
+            control_raw_steer_error += preview_error;
+        }
+
         if (full_loss_non_ring || ring_just_finished) {
             control_raw_steer_error = 0.0f;
             raw_steer_initialized = false;
@@ -525,7 +563,7 @@ void speed_dif_cascade(float inner_dt)
         const float DEAD_BAND = (local_vision.Road_type == Straight || local_vision.Road_type == Normol) ? 
             (float)car_config::kSteerDeadBandStraight : (float)car_config::kSteerDeadBandCurve;
 
-        if (std::fabs(steer_error) < DEAD_BAND) {
+        if (std::fabs(steer_error) <= DEAD_BAND) {
             delta_target = -last_target_gyro_z;
             delta_target = clamp_float(
                 delta_target,
@@ -587,7 +625,7 @@ void speed_dif_cascade(float inner_dt)
 
         // Under fallback, pre-compute pure visual diff_speed
         if (imu_in_fallback) {
-            if (std::fabs(steer_error) < DEAD_BAND) {
+            if (std::fabs(steer_error) <= DEAD_BAND) {
                 fallback_diff = 0.0f;
             } else {
                 fallback_diff = steer_error * STEER_KP + diff_steer_normalized * STEER_KD;
@@ -660,9 +698,28 @@ void speed_dif_cascade(float inner_dt)
 
     // --- 3. Unified clamping and speed distribution ---
     float effective_max_diff = max_diff;
+
+    const bool need_curve_turn_authority =
+        simple_curve_active &&
+        std::fabs(target_gyro_z) >= car_config::kCurveMinDiffGyroDps;
+
+    if (need_curve_turn_authority) {
+        effective_max_diff = std::max(
+            effective_max_diff,
+            car_config::kCurveMinDiff);
+    }
+
     if (Speed_Goal > 0.0f) {
         const float current_diff_ratio = simple_curve_active ? MAX_DIFF_RATIO : 1.0f;
-        const float ramp_limited_max_diff = Speed_Goal * current_diff_ratio;
+        float ramp_limited_max_diff =
+            Speed_Goal * current_diff_ratio;
+
+        if (need_curve_turn_authority) {
+            ramp_limited_max_diff = std::max(
+                ramp_limited_max_diff,
+                car_config::kCurveMinDiff);
+        }
+
         if (effective_max_diff > ramp_limited_max_diff) {
             effective_max_diff = ramp_limited_max_diff;
         }

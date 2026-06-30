@@ -62,12 +62,23 @@ constexpr float kSteerFastFlipRawThreshold = 8.0f;  // 触发快速换向的 Raw
 constexpr float kSteerFastFlipGap = 15.0f;        // Raw 与 Filt 差值换向判定，从 18 降到 15 让中等换向也能触发。
 constexpr float kSharpTurnSteerError = 4.0f;     // 提前减速，低偏即进弯道速度
 constexpr float kCurveSpeedExitSteerError = 3.0f; // 弯道档退出阈值
+
+// 单侧丢线提前预判弯道
+constexpr int kCurvePreviewLossStart = 4;
+constexpr int kCurvePreviewLossStop = 14;
+constexpr float kCurvePreviewLossGain = 0.70f;
+constexpr float kCurvePreviewErrorMax = 5.0f;
+
+// 弯道时不能因基础速度降到 0.3 而把转向能力一起压得过低
+constexpr float kCurveMinDiff = 0.52f;
+constexpr float kCurveMinDiffGyroDps = 12.0f;
+
 constexpr float kVisualGyroLimitDps = 45.0f;     // 防止继续要求底盘做不到的 -100~-120 dps 转向
 constexpr float kTargetGyroMaxDeltaDps = 38.0f;  // T06 追踪弱：从26提到38，目标角速度更快爬升，弯道转向不拖沓。
 constexpr float kTargetGyroSignFlipMaxDeltaDps = 210.0f; // 目标角速度换向时的变化率限制，只在正负号切换时放宽；确保大幅换向先跨过零，不继续朝旧方向打。
 constexpr float kTargetGyroDeadbandReturnDeltaDps = 72.0f; // 视觉进入死区后目标角速度回零速度，调大出弯姿态收得更快，过大则直道可能有回正抽动。
 constexpr bool kSteerDebugPrintEnable = true;    // 临时落地诊断：打印速度/视觉/编码器闭环状态。
-constexpr int kSteerDebugPrintDivider = 10;      // 降低板端日志写入频率，保留诊断同时减少闭环抖动来源。
+constexpr int kSteerDebugPrintDivider = 30;      // 降低板端日志写入频率，保留诊断同时减少闭环抖动来源。
 constexpr float kFallbackDiffLimit = 250.0f;     // IMU 失效时纯视觉差速限幅，主要是保护值
 // IMU fault-tolerance parameters
 constexpr int kImuMaxAllowedMissedFrames = 3;     // Maximum allowed transient IMU missed frames (3 frames = 30ms at 100Hz)
@@ -98,7 +109,7 @@ constexpr float kGyroDeadBandDps = 3.0f;         // T06：从5.0降到3.0，减�
 constexpr float kGyroMeasurementLimitDps = 260.0f; // 陀螺仪测量限幅，需高于视觉目标角速度上限，否则 220dps 急弯会被内部截断成假误差。
 constexpr float kGyroLpfAlpha = 0.70f;           // 减小陀螺仪滤波延迟，从0.50提到0.70。
 constexpr float kGyroFeedforwardGain = 0.0055f;  // 轻微恢复前馈，弯道初段更早建立角速度。
-constexpr float kDiffOutputMaxDelta = 0.08f;     // 每 5ms 差速变化限幅，降到 0.08 使输出更连续。
+constexpr float kDiffOutputMaxDelta = 0.10f;     // 每 5ms 差速变化限幅，降到 0.10 恢复一部分入弯响应。
 constexpr float kGyroRawSpikeRejectDps = 260.0f; // 原始陀螺仪单帧尖峰过滤阈值；静止实测偶发-359dps，需在进入角速度环前拒绝。
 
 // MPU6050 量程换算与零偏标定参数
