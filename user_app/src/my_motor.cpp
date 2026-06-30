@@ -464,9 +464,7 @@ void speed_dif_cascade(float inner_dt)
 
         float control_raw_steer_error = raw_steer_error;
 
-        // 单侧边线先丢失时，说明弯道已进入视野；
-        // 在中线误差变大前提前建立减速和转向。
-        float preview_error = 0.0f;
+        float preview_gyro_bias = 0.0f;
 
         const int left_loss  = local_vision.Left_Line;
         const int right_loss = local_vision.Right_Line;
@@ -474,6 +472,8 @@ void speed_dif_cascade(float inner_dt)
         const int dominant_loss = std::max(left_loss, right_loss);
         const int loss_delta = left_loss - right_loss;
 
+        // Raw 还在中心附近时允许直接预判；
+        // 已明显偏离时，要求预判方向与视觉偏差方向一致。
         const bool preview_direction_consistent =
             (std::fabs(raw_steer_error) <= 2.0f) ||
             ((raw_steer_error > 0.0f) == (loss_delta > 0));
@@ -487,23 +487,25 @@ void speed_dif_cascade(float inner_dt)
             preview_direction_consistent;
 
         if (preview_valid) {
-            float magnitude =
-                (dominant_loss - car_config::kCurvePreviewLossStart) *
-                car_config::kCurvePreviewLossGain;
+            const float loss_level =
+                static_cast<float>(
+                    dominant_loss - car_config::kCurvePreviewLossStart + 1);
 
-            magnitude = clamp_float(
-                magnitude,
+            const float magnitude = clamp_float(
+                car_config::kCurvePreviewGyroBaseDps +
+                loss_level * car_config::kCurvePreviewGyroPerLossDps,
                 0.0f,
-                car_config::kCurvePreviewErrorMax);
+                car_config::kCurvePreviewGyroMaxDps);
 
-            // 右边线先丢：loss_delta 为负，和当前日志中的负向入弯一致；
-            // 左边线先丢：自动对称处理。
-            preview_error = std::copysign(
+            // 右边先丢线 -> loss_delta 为负 -> 给负角速度；
+            // 左边先丢线 -> 自动给正角速度。
+            preview_gyro_bias = std::copysign(
                 magnitude,
                 static_cast<float>(loss_delta));
-
-            control_raw_steer_error += preview_error;
         }
+
+        const bool preview_turn_active =
+            std::fabs(preview_gyro_bias) > 0.01f;
 
         if (full_loss_non_ring || ring_just_finished) {
             control_raw_steer_error = 0.0f;
@@ -579,7 +581,13 @@ void speed_dif_cascade(float inner_dt)
         float speed_to_plan =
             ZD_Speed_Goal + (WD_Speed_Goal - ZD_Speed_Goal) * u;
 
-        simple_curve_active = (u > 0.15f);
+        if (preview_turn_active) {
+            speed_to_plan = std::min(
+                speed_to_plan,
+                car_config::kCurveSpeedGoal);
+        }
+
+        simple_curve_active = (u > 0.15f) || preview_turn_active;
         if (SystemData.Stop == 1) {
             speed_to_plan = 0.0f;
         }
@@ -597,7 +605,8 @@ void speed_dif_cascade(float inner_dt)
         const float DEAD_BAND = (local_vision.Road_type == Straight || local_vision.Road_type == Normol) ? 
             (float)car_config::kSteerDeadBandStraight : (float)car_config::kSteerDeadBandCurve;
 
-        if (std::fabs(steer_error) <= DEAD_BAND) {
+        if (std::fabs(steer_error) <= DEAD_BAND &&
+            !preview_turn_active) {
             delta_target = -last_target_gyro_z;
             delta_target = clamp_float(
                 delta_target,
@@ -611,7 +620,9 @@ void speed_dif_cascade(float inner_dt)
             last_target_gyro_z = target_gyro_z;
             last_steer_error = steer_error;
         } else {
-            visual_pd_out = steer_error * STEER_KP + diff_steer_normalized * STEER_KD;
+            visual_pd_out = steer_error * STEER_KP +
+                            diff_steer_normalized * STEER_KD +
+                            preview_gyro_bias;
             visual_pd_out = clamp_float(
                 visual_pd_out,
                 -car_config::kVisualGyroLimitDps,
@@ -659,7 +670,8 @@ void speed_dif_cascade(float inner_dt)
 
         // Under fallback, pre-compute pure visual diff_speed
         if (imu_in_fallback) {
-            if (std::fabs(steer_error) <= DEAD_BAND) {
+            if (std::fabs(steer_error) <= DEAD_BAND &&
+            !preview_turn_active) {
                 fallback_diff = 0.0f;
             } else {
                 fallback_diff = steer_error * STEER_KP + diff_steer_normalized * STEER_KD;
