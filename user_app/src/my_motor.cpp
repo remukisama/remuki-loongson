@@ -275,6 +275,13 @@ void Speed_PID_L(void)
         return;
     }
 
+    // If starting from zero, pre-charge the integrator with feedforward to overcome static friction and speed delay
+    if (std::fabs(speed_out_l) < 500.0f) {
+        speed_out_l = std::copysign(
+            car_config::kMotorStartBasePwm + std::fabs(Speed_Goal_l) * car_config::kSpeedFeedforwardGain,
+            Speed_Goal_l);
+    }
+
     // Incremental PI speed loop. With no minimum wheel speed, positive targets do not reverse-drive.
     speed_out_l += speed_I_l * speed_erro_L + speed_P_l * (speed_erro_L - speed_last_erro_L);
     speed_last_erro_L = speed_erro_L;
@@ -294,6 +301,13 @@ void Speed_PID_R(void)
         speed_out_r = 0.0f;
         speed_last_erro_R = 0.0f;
         return;
+    }
+
+    // If starting from zero, pre-charge the integrator with feedforward to overcome static friction and speed delay
+    if (std::fabs(speed_out_r) < 500.0f) {
+        speed_out_r = std::copysign(
+            car_config::kMotorStartBasePwm + std::fabs(Speed_Goal_r) * car_config::kSpeedFeedforwardGain,
+            Speed_Goal_r);
     }
 
     // Incremental PI speed loop. With no minimum wheel speed, positive targets do not reverse-drive.

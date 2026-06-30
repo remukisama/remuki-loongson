@@ -40,6 +40,10 @@ constexpr int kInnerBrakePulsePwm = 0;
 constexpr int kInnerBrakePulseOnTicks = 0;
 constexpr int kInnerBrakePulseOffTicks = 0;
 constexpr float kStraightSpeedGoal = 0.55f;     // 低速落地验证档，先让中线跟踪稳定，再逐步加速。
+
+// 电机起步与速度前馈参数
+constexpr float kMotorStartBasePwm = 3200.0f;      // 起步克服静摩擦的基础 PWM
+constexpr float kSpeedFeedforwardGain = 2000.0f;    // 目标速度前馈系数 (PWM per m/s)
 constexpr float kMaxWheelSpeedGoal = 4.0f;       // 单轮目标速度上限 m/s (原100RPS×0.0887≈8.9)
 
 // 视觉外环与差速分配参数
