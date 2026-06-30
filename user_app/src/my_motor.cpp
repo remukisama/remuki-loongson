@@ -268,17 +268,8 @@ void Speed_PID_L(void)
     speed_erro_L = Speed_Goal_l - speed_encoder_L;
 
     if (Speed_Goal_l <= 0.0f) {
-        if (Speed_Goal > 0.0f && speed_encoder_L > car_config::kInnerWheelZeroTargetBrakeSpeed) {
-            const float excess_speed = speed_encoder_L - car_config::kInnerWheelZeroTargetBrakeSpeed;
-            speed_out_l = -clamp_float(
-                excess_speed * car_config::kInnerWheelZeroTargetBrakeGain,
-                0.0f,
-                car_config::kInnerWheelZeroTargetBrakePwm);
-            speed_last_erro_L = speed_erro_L;
-        } else {
-            speed_out_l = 0.0f;
-            speed_last_erro_L = 0.0f;
-        }
+        speed_out_l = 0.0f;
+        speed_last_erro_L = 0.0f;
         return;
     }
 
@@ -298,17 +289,8 @@ void Speed_PID_R(void)
     speed_erro_R = Speed_Goal_r - speed_encoder_R;
 
     if (Speed_Goal_r <= 0.0f) {
-        if (Speed_Goal > 0.0f && speed_encoder_R > car_config::kInnerWheelZeroTargetBrakeSpeed) {
-            const float excess_speed = speed_encoder_R - car_config::kInnerWheelZeroTargetBrakeSpeed;
-            speed_out_r = -clamp_float(
-                excess_speed * car_config::kInnerWheelZeroTargetBrakeGain,
-                0.0f,
-                car_config::kInnerWheelZeroTargetBrakePwm);
-            speed_last_erro_R = speed_erro_R;
-        } else {
-            speed_out_r = 0.0f;
-            speed_last_erro_R = 0.0f;
-        }
+        speed_out_r = 0.0f;
+        speed_last_erro_R = 0.0f;
         return;
     }
 
