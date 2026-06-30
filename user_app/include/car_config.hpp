@@ -27,15 +27,15 @@ constexpr float kSpeedTargetAccelLimit = 1.8f;    // 轮速目标上升限幅 m/
 constexpr float kSpeedTargetDecelLimit = 4.0f;    // T06弯道入弯减速太慢致丢边，从2.0提到4.0，0.6→0.44仅需39ms。
 constexpr int kMotorMaxPwm = 8000;               // PWM 输出限幅，调大动力更强但更容易打滑和烧驱动；先确保满电、空载和上赛道都不发热再提高。
 constexpr float kSpeedPidBrakePwm = 0.0f;        // 循迹中不主动反拖车轮；弯道放开最小正速度到 0，但不允许负轮速目标造成倒拖。
-constexpr float kInnerWheelZeroTargetBrakeSpeed = 0.70f; // 仅保留异常高速空转兜底；正常弯道不再靠刹内轮调参。
-constexpr float kInnerWheelZeroTargetBrakeGain = 250.0f; // 零目标内轮兜底比例，弱化到只处理明显空转。
-constexpr float kInnerWheelZeroTargetBrakePwm = 0.0f;    // 实车 260/500 均有顿挫，先完全撤掉主动内轮制动。
+constexpr float kInnerWheelZeroTargetBrakeSpeed = 0.25f; // 弯道内轮零目标制动：先启用“轻制动”
+constexpr float kInnerWheelZeroTargetBrakeGain  = 600.0f;
+constexpr float kInnerWheelZeroTargetBrakePwm   = 220.0f;
 constexpr float kCurveSpeedGoal = 0.38f;        // 弯道目标略抬高，避免 0.3m/s 附近静摩擦和差速拖拽导致车身不走。
 constexpr float kStraightSpeedGoal = 0.55f;     // 低速落地验证档，先让中线跟踪稳定，再逐步加速。
 constexpr float kMaxWheelSpeedGoal = 4.0f;       // 单轮目标速度上限 m/s (原100RPS×0.0887≈8.9)
 
 // 视觉外环与差速分配参数
-constexpr float kSteerKp = 2.55f;                 // 方向锁已撤掉后小幅提高位置外环P，让右直角入口更早向中线收敛。
+constexpr float kSteerKp = 2.55f;                 // 外环先恢复基准，避免修复制动后突然过猛
 constexpr float kSteerKd = 1.50f;                 // 增大D项抑制振荡，从1.00提到1.50。
 constexpr float kMaxDiffRatio = 1.25f;           // 0.82 实车转向不足丢线；回到中间值，在不过分刹内轮的前提下给足弯道差速。
 constexpr int kSteerDeadBandDefault = 2;          // T06 S弯换向死区吞2帧致出界，降到2让Raw=-2时也产生转向。
@@ -54,7 +54,7 @@ constexpr float kSteerFastFlipRawThreshold = 8.0f;  // 触发快速换向的 Raw
 constexpr float kSteerFastFlipGap = 15.0f;        // Raw 与 Filt 差值换向判定，从 18 降到 15 让中等换向也能触发。
 constexpr float kSharpTurnSteerError = 7.0f;     // 中等偏差即进入统一弯道速度，避免U弯中raw 8~10反复切档产生顿挫和内切。
 constexpr float kCurveSpeedExitSteerError = 5.0f; // 统一弯道档退出阈值，低于进入阈值形成滞回，减少弯中速度档抖动。
-constexpr float kVisualGyroLimitDps = 120.0f;     // T06当前重点是抑制直道蛇形，先降低全局视觉目标上限，避免图像跳变把车甩出。
+constexpr float kVisualGyroLimitDps = 45.0f;     // 防止继续要求底盘做不到的 -100~-120 dps 转向
 constexpr float kTargetGyroMaxDeltaDps = 38.0f;  // T06 追踪弱：从26提到38，目标角速度更快爬升，弯道转向不拖沓。
 constexpr float kTargetGyroSignFlipMaxDeltaDps = 210.0f; // 目标角速度换向时的变化率限制，只在正负号切换时放宽；确保大幅换向先跨过零，不继续朝旧方向打。
 constexpr float kTargetGyroDeadbandReturnDeltaDps = 72.0f; // 视觉进入死区后目标角速度回零速度，调大出弯姿态收得更快，过大则直道可能有回正抽动。
