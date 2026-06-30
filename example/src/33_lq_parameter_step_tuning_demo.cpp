@@ -1618,8 +1618,9 @@ int test_05_speed_loop_airborne(float /*unused_target*/ = 1.0f, int /*unused_sec
     printf("=== 实地速度环跟随测试 ===\n");
     printf("公式: target = min + (max - min) * 0.5 * (1 - cos(2π * t / period))\n");
     printf("格式: <最低速度(m/s)> <最高速度(m/s)> <周期(s)> <运行时长(ms)> [Kp] [Ki]\n");
-    printf("短场地示例: 0.9 1.3 2.0 4000 2000 40   (0.9~1.3 m/s，2s周期，跑2周期)\n");
-    printf("常规示例:   1.0 1.5 3.0 6000 2000 40   (1.0~1.5 m/s，3s周期，跑2周期)\n");
+    printf("恒定速度示例: 0.3 0.3 2.0 4000 1800 35   (最低与最高速度相同即可测试恒定速度)\n");
+    printf("短场地示例:   0.9 1.3 2.0 4000 2000 40   (0.9~1.3 m/s，2s周期，跑2周期)\n");
+    printf("常规示例:     1.0 1.5 3.0 6000 2000 40   (1.0~1.5 m/s，3s周期，跑2周期)\n");
     printf("输入 q 退出\n");
     printf("========================================\n");
     printf("注意: Kp/Ki热改对主PID有效(speed_P_l/r是全局变量); 测试结束后自动恢复car_config默认值。\n\n");
@@ -2876,20 +2877,17 @@ int test_10_gyro_static_noise(int seconds = 10) {
 // 返回值：0=角速度环可用；1=差速限幅瓶颈；2=角速度跟踪弱；3=轮速跟不上；4=IMU读取失败；5=方向响应异常。
 // -----------------------------------------------------------------------------
 int test_11_gyro_loop_step_response(float base_speed = 0.5f, int hold_ms = 900) {
-    printf("\n========== TEST 11 gyro_loop_step_response 角速度环阶跃响应 ==========" "\n");
+    printf("\n========== TEST 11 gyro_loop_step_response 角速度环阶跃响应 ==========\n");
     print_stage_card("T11 gyro_loop_step_response",
                      "绕开图像外环，直接给角速度环左右阶跃目标，判断角速度环、差速限幅、轮速环谁在限制转向力度。",
                      "kGyroPidP/I/D、kGyroFeedforwardGain、kDiffOutputMaxDelta、kGyroPidOutputLimit，以及差速限幅。",
                      "不要在本测试里改摄像头中线、视觉Kp/Kd、元素补线或提速参数；本测试只判断角速度环和差速执行能力。",
                      "T11左右响应都健康后，再回到T06/T07判断视觉外环和提速回归。");
-    printf("[安全] 小车会低速左右摆动，不使用摄像头。请放在普通地面/赛道空旷处，手边准备Ctrl+C。base_speed=%.1f hold_ms=%d\n",
-           base_speed, hold_ms);
-    printf("[参数快照] gyro(P/I/D=%.3f/%.4f/%.4f ff=%.3f out=%.1f dOut=%.1f dead=%.1f lpf=%.2f maxDiffRatio=%.2f)\n",
-           car_config::kGyroPidP, car_config::kGyroPidI, car_config::kGyroPidD,
-           car_config::kGyroFeedforwardGain, car_config::kGyroPidOutputLimit,
-           car_config::kDiffOutputMaxDelta,
-           car_config::kGyroDeadBandDps, car_config::kGyroLpfAlpha,
-           car_config::kMaxDiffRatio);
+    printf("[安全] 小车会低速左右摆动，不使用摄像头。请放在普通地面/赛道空旷处，手边准备Ctrl+C。\n");
+    printf("格式: <基准速度(m/s)> <阶跃目标(dps)> <维持时间(ms)> [Kp] [Kd]\n");
+    printf("示例: 0.35 20.0 900\n");
+    printf("输入 q 退出\n");
+    printf("========================================\n\n");
 
     g_enable_element_process = false;
     init_control_for_motor_tests();
@@ -2912,6 +2910,10 @@ int test_11_gyro_loop_step_response(float base_speed = 0.5f, int hold_ms = 900) 
     speed_last_erro_L = 0.0f;
     speed_last_erro_R = 0.0f;
 
+    // 保存原始 PID 参数
+    float orig_gyro_P = local_cascade.gyro_pid.P;
+    float orig_gyro_D = local_cascade.gyro_pid.D;
+
     struct StepSummary {
         float target = 0.0f;
         float cmd = 0.0f;
@@ -2930,171 +2932,231 @@ int test_11_gyro_loop_step_response(float base_speed = 0.5f, int hold_ms = 900) 
         RunningStat se_r;
     };
 
-    const float targets[] = {0.0f, 35.0f, 70.0f, 0.0f, -35.0f, -70.0f, 0.0f};
-    const int target_count = sizeof(targets) / sizeof(targets[0]);
-    std::vector<StepSummary> summaries(target_count);
-    int total_samples = 0;
-    int total_read_fail = 0;
-    int total_cap = 0;
-    int total_reverse = 0;
-    int print_divider = 0;
-    auto last_time = std::chrono::steady_clock::now();
+    float current_base_speed = base_speed;
+    float current_step_target = 35.0f;
+    int current_hold_ms = hold_ms;
 
-    for (int s = 0; s < target_count && !exit_flag; ++s) {
-        StepSummary &st = summaries[s];
-        st.target = targets[s];
-        st.cmd = st.target;
+    // --- 终端输入缓冲区 ---
+    std::string input_buf;
+    bool need_prompt = true;
 
-        printf("[T11_STEP_BEGIN] idx=%d/%d target=%.1f cmd=%.1f hold_ms=%d\n",
-               s + 1, target_count, st.target, st.cmd, hold_ms);
-
-        auto step_start = std::chrono::steady_clock::now();
-        while (!exit_flag) {
-            auto now = std::chrono::steady_clock::now();
-            int elapsed_ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - step_start).count();
-            if (elapsed_ms >= hold_ms) break;
-
-            std::chrono::duration<float> dt_span = now - last_time;
-            float dt = dt_span.count();
-            last_time = now;
-            if (dt <= 0.0001f || dt > 0.1f) dt = car_config::kOuterLoopFallbackPeriodSec;
-
-            Mpu6050Data data;
-            if (!local_imu.read_processed_data(data)) {
-                st.read_fail++;
-                total_read_fail++;
-                usleep(5 * 1000);
-                continue;
-            }
-
-            float diff_speed = local_cascade.calc_diff_speed_bypass_angle(st.cmd, data, dt);
-            float diff_before_limit = diff_speed;
-            float max_diff = std::max(base_speed * car_config::kMaxDiffRatio, 6.0f);
-            int cap = 0;
-            if (diff_speed > max_diff) {
-                diff_speed = max_diff;
-                cap = 1;
-            }
-            if (diff_speed < -max_diff) {
-                diff_speed = -max_diff;
-                cap = 1;
-            }
-
-            Speed_Goal = base_speed;
-            Speed_Goal_l = base_speed - diff_speed;
-            Speed_Goal_r = base_speed + diff_speed;
-            if (Speed_Goal_l < car_config::kMinWheelSpeedGoal) Speed_Goal_l = car_config::kMinWheelSpeedGoal;
-            if (Speed_Goal_r < car_config::kMinWheelSpeedGoal) Speed_Goal_r = car_config::kMinWheelSpeedGoal;
-            if (Speed_Goal_l > car_config::kMaxWheelSpeedGoal) Speed_Goal_l = car_config::kMaxWheelSpeedGoal;
-            if (Speed_Goal_r > car_config::kMaxWheelSpeedGoal) Speed_Goal_r = car_config::kMaxWheelSpeedGoal;
-
-            speed_encoder_L = encoder_num_L();
-            speed_encoder_R = encoder_num_R();
-            Speed_PID_L();
-            Speed_PID_R();
-            motor_Duty_L(speed_out_l);
-            motor_Duty_R(speed_out_r);
-
-            const float gf = local_cascade.last_filtered_gyro_z();
-            const float gerr = local_cascade.gyro_pid.err;
-            const bool reverse = (std::fabs(st.cmd) > 20.0f &&
-                                  st.cmd * gf < -car_config::kGyroDeadBandDps);
-
-            st.samples++;
-            total_samples++;
-            if (cap) {
-                st.cap_cnt++;
-                total_cap++;
-            }
-            if (reverse) {
-                st.reverse_cnt++;
-                total_reverse++;
-            }
-            st.real.add(data.gyro_z);
-            st.gf.add(gf);
-            st.err.add(gerr);
-            st.diff.add(diff_speed);
-            st.speed_l.add(speed_encoder_L);
-            st.speed_r.add(speed_encoder_R);
-            st.se_l.add(Speed_Goal_l - speed_encoder_L);
-            st.se_r.add(Speed_Goal_r - speed_encoder_R);
-            if (elapsed_ms > hold_ms / 3) st.late_err.add(gerr);
-
-            if (++print_divider >= 12) {
-                print_divider = 0;
-                printf("[T11] idx=%d t=%.2f target=%6.1f cmd=%6.1f real=%6.1f gf=%6.1f err=%6.1f diff0=%6.1f diff=%6.1f cap=%d max=%4.1f goalL/R=%5.1f/%5.1f encL/R=%5.1f/%5.1f se=%5.1f/%5.1f out=%5.0f/%5.0f\n",
-                       s + 1, elapsed_ms / 1000.0,
-                       st.target, st.cmd, data.gyro_z, gf, gerr,
-                       diff_before_limit, diff_speed, cap, max_diff,
-                       Speed_Goal_l, Speed_Goal_r, speed_encoder_L, speed_encoder_R,
-                       Speed_Goal_l - speed_encoder_L, Speed_Goal_r - speed_encoder_R,
-                       speed_out_l, speed_out_r);
-            }
-
-            usleep(5 * 1000);
+    auto show_prompt = [&]() {
+        if (need_prompt) {
+            printf(">>> [T11] 当前 Kp=%.4f Kd=%.6f | 输入 基准速度 阶跃目标 维持时间 [Kp] [Kd]: ",
+                   local_cascade.gyro_pid.P, local_cascade.gyro_pid.D);
+            fflush(stdout);
+            need_prompt = false;
         }
+    };
+    show_prompt();
+
+    int run_task_trigger = 0; // 0=idle, 1=trigger test
+
+    while (!exit_flag) {
+        // ==========================================
+        // 非阻塞终端输入
+        // ==========================================
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(STDIN_FILENO, &fds);
+        struct timeval tv = {0, 0};
+        if (select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0) {
+            char c;
+            if (read(STDIN_FILENO, &c, 1) > 0) {
+                if (c == '\n' || c == '\r') {
+                    if (!input_buf.empty()) {
+                        while (!input_buf.empty() && (input_buf.back() == '\r' || input_buf.back() == ' '))
+                            input_buf.pop_back();
+
+                        if (input_buf == "q") {
+                            printf("\n>>> [T11] 退出。\n");
+                            exit_flag = true;
+                            input_buf.clear();
+                            continue;
+                        }
+
+                        std::istringstream iss(input_buf);
+                        float in_base = 0, in_target = 0;
+                        int in_hold = 0;
+                        float in_Kp = 0, in_Kd = 0;
+
+                        if (iss >> in_base >> in_target >> in_hold) {
+                            if (in_base < 0.1f) in_base = 0.1f;
+                            if (in_hold < 100) in_hold = 100;
+
+                            current_base_speed = in_base;
+                            current_step_target = in_target;
+                            current_hold_ms = in_hold;
+
+                            // 可选 Kp/Kd 热改
+                            if (iss >> in_Kp) {
+                                local_cascade.gyro_pid.P = in_Kp;
+                                if (iss >> in_Kd) {
+                                    local_cascade.gyro_pid.D = in_Kd;
+                                }
+                            }
+
+                            run_task_trigger = 1;
+                            need_prompt = true;
+                        } else {
+                            printf("\n>>> [错误] 无法解析: %s\n", input_buf.c_str());
+                        }
+                        input_buf.clear();
+                    }
+                } else {
+                    input_buf += c;
+                }
+            }
+        }
+
+        // ==========================================
+        // 执行阶跃阶梯测试
+        // ==========================================
+        if (run_task_trigger == 1) {
+            run_task_trigger = 0;
+
+            const float targets[] = {0.0f, current_step_target, 0.0f, -current_step_target, 0.0f};
+            const int target_count = sizeof(targets) / sizeof(targets[0]);
+            std::vector<StepSummary> summaries(target_count);
+            int total_samples = 0;
+            int total_read_fail = 0;
+            int total_cap = 0;
+            int total_reverse = 0;
+            int print_divider = 0;
+            auto last_time = std::chrono::steady_clock::now();
+
+            printf("\n>>> [执行阶跃] base_speed=%.2f target=%.1f hold_ms=%d Kp=%.4f Kd=%.6f\n",
+                   current_base_speed, current_step_target, current_hold_ms,
+                   local_cascade.gyro_pid.P, local_cascade.gyro_pid.D);
+
+            for (int s = 0; s < target_count && !exit_flag; ++s) {
+                StepSummary &st = summaries[s];
+                st.target = targets[s];
+                st.cmd = st.target;
+
+                printf("[T11_STEP_BEGIN] idx=%d/%d target=%.1f cmd=%.1f hold_ms=%d\n",
+                       s + 1, target_count, st.target, st.cmd, current_hold_ms);
+
+                auto step_start = std::chrono::steady_clock::now();
+                while (!exit_flag) {
+                    auto now = std::chrono::steady_clock::now();
+                    int elapsed_ms = (int)std::chrono::duration_cast<std::chrono::milliseconds>(now - step_start).count();
+                    if (elapsed_ms >= current_hold_ms) break;
+
+                    std::chrono::duration<float> dt_span = now - last_time;
+                    float dt = dt_span.count();
+                    last_time = now;
+                    if (dt <= 0.0001f || dt > 0.1f) dt = car_config::kOuterLoopFallbackPeriodSec;
+
+                    Mpu6050Data data;
+                    if (!local_imu.read_processed_data(data)) {
+                        st.read_fail++;
+                        total_read_fail++;
+                        usleep(5 * 1000);
+                        continue;
+                    }
+
+                    float diff_speed = local_cascade.calc_diff_speed_bypass_angle(st.cmd, data, dt);
+                    float diff_before_limit = diff_speed;
+                    float max_diff = std::max(current_base_speed * car_config::kMaxDiffRatio, 6.0f);
+                    int cap = 0;
+                    if (diff_speed > max_diff) {
+                        diff_speed = max_diff;
+                        cap = 1;
+                    }
+                    if (diff_speed < -max_diff) {
+                        diff_speed = -max_diff;
+                        cap = 1;
+                    }
+
+                    Speed_Goal = current_base_speed;
+                    Speed_Goal_l = current_base_speed - diff_speed;
+                    Speed_Goal_r = current_base_speed + diff_speed;
+                    if (Speed_Goal_l < car_config::kMinWheelSpeedGoal) Speed_Goal_l = car_config::kMinWheelSpeedGoal;
+                    if (Speed_Goal_r < car_config::kMinWheelSpeedGoal) Speed_Goal_r = car_config::kMinWheelSpeedGoal;
+                    if (Speed_Goal_l > car_config::kMaxWheelSpeedGoal) Speed_Goal_l = car_config::kMaxWheelSpeedGoal;
+                    if (Speed_Goal_r > car_config::kMaxWheelSpeedGoal) Speed_Goal_r = car_config::kMaxWheelSpeedGoal;
+
+                    speed_encoder_L = encoder_num_L();
+                    speed_encoder_R = encoder_num_R();
+                    Speed_PID_L();
+                    Speed_PID_R();
+                    motor_Duty_L(speed_out_l);
+                    motor_Duty_R(speed_out_r);
+
+                    const float gf = local_cascade.last_filtered_gyro_z();
+                    const float gerr = local_cascade.gyro_pid.err;
+                    const bool reverse = (std::fabs(st.cmd) > 20.0f &&
+                                          st.cmd * gf < -car_config::kGyroDeadBandDps);
+
+                    st.samples++;
+                    total_samples++;
+                    if (cap) {
+                        st.cap_cnt++;
+                        total_cap++;
+                    }
+                    if (reverse) {
+                        st.reverse_cnt++;
+                        total_reverse++;
+                    }
+                    st.real.add(data.gyro_z);
+                    st.gf.add(gf);
+                    st.err.add(gerr);
+                    st.diff.add(diff_speed);
+                    st.speed_l.add(speed_encoder_L);
+                    st.speed_r.add(speed_encoder_R);
+                    st.se_l.add(Speed_Goal_l - speed_encoder_L);
+                    st.se_r.add(Speed_Goal_r - speed_encoder_R);
+                    if (elapsed_ms > current_hold_ms / 3) st.late_err.add(gerr);
+
+                    if (++print_divider >= 12) {
+                        print_divider = 0;
+                        printf("[T11] idx=%d t=%.2f target=%6.1f cmd=%6.1f real=%6.1f gf=%6.1f err=%6.1f diff0=%6.1f diff=%6.1f cap=%d max=%4.1f goalL/R=%5.1f/%5.1f encL/R=%5.1f/%5.1f se=%5.1f/%5.1f out=%5.0f/%5.0f\n",
+                               s + 1, elapsed_ms / 1000.0,
+                               st.target, st.cmd, data.gyro_z, gf, gerr,
+                               diff_before_limit, diff_speed, cap, max_diff,
+                               Speed_Goal_l, Speed_Goal_r, speed_encoder_L, speed_encoder_R,
+                               Speed_Goal_l - speed_encoder_L, Speed_Goal_r - speed_encoder_R,
+                               speed_out_l, speed_out_r);
+                    }
+                    usleep(10 * 1000); // 10ms control period
+                }
+            }
+
+            safe_stop_and_print("T11");
+
+            // 输出本次阶跃的统计摘要
+            printf("\n====== [阶跃测试摘要] ======\n");
+            for (int s = 0; s < target_count; ++s) {
+                StepSummary &st = summaries[s];
+                if (st.samples > 0) {
+                    printf("[T11_STEP_SUMMARY] idx=%d target=%.1f cmd=%.1f samples=%d read_fail=%d gf_mean=%.2f gf_abs=%.2f real_abs=%.2f err_abs=%.2f late_err_abs=%.2f diff_abs=%.2f cap_rate=%.2f reverse_rate=%.2f speed_err_abs=%.2f/%.2f enc_abs=%.2f/%.2f\n",
+                           s + 1, st.target, st.cmd, st.samples, st.read_fail,
+                           st.gf.mean(), st.gf.mean_abs(), st.real.mean_abs(), st.err.mean_abs(),
+                           st.late_err.mean_abs(), st.diff.mean_abs(),
+                           (float)st.cap_cnt / st.samples, (float)st.reverse_cnt / st.samples,
+                           st.se_l.mean_abs(), st.se_r.mean_abs(),
+                           st.speed_l.mean_abs(), st.speed_r.mean_abs());
+                }
+            }
+            printf("[T11_SUMMARY] samples=%d read_fail=%d fail_rate=%.3f cap_rate=%.2f reverse_rate=%.2f base_speed=%.1f hold_ms=%d\n",
+                   total_samples, total_read_fail, (float)total_read_fail / (total_samples + total_read_fail + 0.001f),
+                   (float)total_cap / (total_samples + 0.001f), (float)total_reverse / (total_samples + 0.001f),
+                   current_base_speed, current_hold_ms);
+            printf("============================\n\n");
+            show_prompt();
+        }
+
+        usleep(20 * 1000); // 50Hz idle sleep
     }
 
+    // 恢复原始 PID
+    local_cascade.gyro_pid.P = orig_gyro_P;
+    local_cascade.gyro_pid.D = orig_gyro_D;
     safe_stop_and_print("T11");
-    Speed_Goal = 0;
-
-    double total_cap_rate = total_samples ? (double)total_cap / total_samples : 0.0;
-    double total_fail_rate = (total_samples + total_read_fail) ?
-                             (double)total_read_fail / (total_samples + total_read_fail) : 0.0;
-    double total_reverse_rate = total_samples ? (double)total_reverse / total_samples : 0.0;
-    int weak_track_steps = 0;
-    int cap_steps = 0;
-    int speed_weak_steps = 0;
-    int reverse_steps = 0;
-
-    for (int s = 0; s < target_count; ++s) {
-        const StepSummary &st = summaries[s];
-        if (st.samples == 0) continue;
-        double cap_rate = (double)st.cap_cnt / st.samples;
-        double reverse_rate = (double)st.reverse_cnt / st.samples;
-        double late_abs_err = st.late_err.mean_abs();
-        double speed_err_abs = std::max(st.se_l.mean_abs(), st.se_r.mean_abs());
-        double target_abs = std::fabs(st.cmd);
-        bool active_step = target_abs > 1.0;
-        if (active_step && cap_rate > 0.35) cap_steps++;
-        if (active_step && cap_rate <= 0.35 && late_abs_err > std::max(18.0, target_abs * 0.45)) weak_track_steps++;
-        if (active_step && speed_err_abs > 6.0) speed_weak_steps++;
-        if (active_step && reverse_rate > 0.20) reverse_steps++;
-        printf("[T11_STEP_SUMMARY] idx=%d target=%.1f cmd=%.1f samples=%d read_fail=%d gf_mean=%.2f gf_abs=%.2f real_abs=%.2f err_abs=%.2f late_err_abs=%.2f diff_abs=%.2f cap_rate=%.2f reverse_rate=%.2f speed_err_abs=%.2f/%2.2f enc_abs=%.2f/%2.2f\n",
-               s + 1, st.target, st.cmd, st.samples, st.read_fail,
-               st.gf.mean(), st.gf.mean_abs(), st.real.mean_abs(),
-               st.err.mean_abs(), late_abs_err, st.diff.mean_abs(),
-               cap_rate, reverse_rate, st.se_l.mean_abs(), st.se_r.mean_abs(),
-               st.speed_l.mean_abs(), st.speed_r.mean_abs());
-    }
-
-    printf("[T11_SUMMARY] samples=%d read_fail=%d fail_rate=%.3f cap_rate=%.2f reverse_rate=%.2f weak_track_steps=%d cap_steps=%d speed_weak_steps=%d reverse_steps=%d base_speed=%.1f hold_ms=%d\n",
-           total_samples, total_read_fail, total_fail_rate, total_cap_rate, total_reverse_rate,
-           weak_track_steps, cap_steps, speed_weak_steps, reverse_steps, base_speed, hold_ms);
-    printf("[T11_RECOMMEND] ");
-    if (total_fail_rate > 0.10) {
-        printf("先修IMU读取/I2C/供电；角速度环没有稳定输入，不能继续调PID。\n");
-    } else if (reverse_steps > 0) {
-        printf("目标角速度与实际角速度长期反向：优先检查左右电机差速方向、陀螺仪Z轴符号或正负方向补偿，不要直接加P。\n");
-    } else if (cap_steps > 0) {
-        printf("差速限幅经常压住输出：这更像maxDiff/速度目标/输出限幅瓶颈；先看diff0与diff、goalL/R是否被截断，再决定是否小幅放宽kGyroPidOutputLimit或kMaxDiffRatio。\n");
-    } else if (speed_weak_steps > 0) {
-        printf("角速度环给了差速但轮速跟不上：优先回T05调速度环/电机输出/PWM限幅，不要把问题全推给角速度P。\n");
-    } else if (weak_track_steps > 0) {
-        printf("无明显限幅但GF跟目标差距大：可小幅增加kGyroFeedforwardGain或kGyroPidP；若GF抖动/过冲再增D或降低kGyroLpfAlpha。\n");
-    } else {
-        printf("角速度环左右阶跃基本可用；若T06/T07仍觉得转向不够，下一步重点看视觉外环目标、目标变化率和提速保护。\n");
-    }
-    printf("[调参意义] T11只隔离角速度内环；T11正常但T07转不过，优先查Tgt是否太小/变化率太慢/提速保护；T11也弱，才动角速度环参数。\n");
-    printf("[RETURN] 0=角速度环可继续；1=差速限幅瓶颈；2=角速度跟踪弱；3=轮速跟不上；4=IMU读取失败；5=方向响应异常。\n");
-
-    if (total_fail_rate > 0.10) return 4;
-    if (reverse_steps > 0) return 5;
-    if (cap_steps > 0) return 1;
-    if (speed_weak_steps > 0) return 3;
-    if (weak_track_steps > 0) return 2;
     return 0;
 }
+
 
 static int run_flow_step(const char *label,
                          const std::function<int()> &fn,
