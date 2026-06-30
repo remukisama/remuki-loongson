@@ -474,13 +474,17 @@ void speed_dif_cascade(float inner_dt)
         const int dominant_loss = std::max(left_loss, right_loss);
         const int loss_delta = left_loss - right_loss;
 
+        const bool preview_direction_consistent =
+            (std::fabs(raw_steer_error) <= 2.0f) ||
+            ((raw_steer_error > 0.0f) == (loss_delta > 0));
+
         const bool preview_valid =
             !ring_now &&
             local_vision.Road_type == Normol &&
             local_vision.OFFLine <= 10 &&
             dominant_loss >= car_config::kCurvePreviewLossStart &&
-            dominant_loss <= car_config::kCurvePreviewLossStop &&
-            std::abs(loss_delta) >= car_config::kCurvePreviewLossStart;
+            std::abs(loss_delta) >= car_config::kCurvePreviewLossStart &&
+            preview_direction_consistent;
 
         if (preview_valid) {
             float magnitude =
@@ -775,6 +779,28 @@ void speed_dif_cascade(float inner_dt)
 
     // Distribute speed targets to left and right wheels using the matching effective_min_wheel
     distribute_wheel_speeds(Speed_Goal, diff_speed, effective_min_wheel);
+
+    const bool one_wheel_released =
+        (Speed_Goal_l <= 0.02f) ||
+        (Speed_Goal_r <= 0.02f);
+
+    if (simple_curve_active &&
+        one_wheel_released &&
+        Speed_Goal > 0.0f) {
+
+        Speed_Goal_l = std::min(
+            Speed_Goal_l,
+            car_config::kCurveOuterWheelMax);
+
+        Speed_Goal_r = std::min(
+            Speed_Goal_r,
+            car_config::kCurveOuterWheelMax);
+
+        // 限速后重新记录速度误差，保证日志正确
+        dbg_speed_err_l = Speed_Goal_l - speed_encoder_L;
+        dbg_speed_err_r = Speed_Goal_r - speed_encoder_R;
+    }
+
     if (car_config::kSteerDebugPrintEnable) {
         static int debug_print_count = 0;
         debug_print_count++;
