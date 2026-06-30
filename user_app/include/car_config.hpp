@@ -30,14 +30,22 @@ constexpr float kSpeedPidBrakePwm = 0.0f;        // 循迹中不主动反拖车�
 constexpr float kInnerWheelZeroTargetBrakeSpeed = 0.25f; // 禁止将负 PWM 当作内轮制动：当前硬件负PWM会反转电机
 constexpr float kInnerWheelZeroTargetBrakeGain  = 0.0f;
 constexpr float kInnerWheelZeroTargetBrakePwm   = 0.0f;
-constexpr float kCurveSpeedGoal = 0.38f;        // 弯道目标略抬高，避免 0.3m/s 附近静摩擦和差速拖拽导致车身不走。
+constexpr float kCurveSpeedGoal = 0.34f;        // 提前减速，减小弯中惯性。
+
+// 内轮脉冲反拖制动参数
+constexpr float kInnerBrakeEnableBaseSpeed = 0.25f;
+constexpr float kInnerBrakeEnterSpeed = 0.55f;
+constexpr float kInnerBrakeReleaseSpeed = 0.40f;
+constexpr int kInnerBrakePulsePwm = 70;
+constexpr int kInnerBrakePulseOnTicks = 1;
+constexpr int kInnerBrakePulseOffTicks = 5;
 constexpr float kStraightSpeedGoal = 0.55f;     // 低速落地验证档，先让中线跟踪稳定，再逐步加速。
 constexpr float kMaxWheelSpeedGoal = 4.0f;       // 单轮目标速度上限 m/s (原100RPS×0.0887≈8.9)
 
 // 视觉外环与差速分配参数
 constexpr float kSteerKp = 2.55f;                 // 外环先恢复基准，避免修复制动后突然过猛
 constexpr float kSteerKd = 1.50f;                 // 增大D项抑制振荡，从1.00提到1.50。
-constexpr float kMaxDiffRatio = 1.65f;           // 从 1.25 提高到 1.65，增大弯道外轮分配上限，增强转向轮速差。
+constexpr float kMaxDiffRatio = 1.25f;           // 恢复差速比为 1.25，避免外轮抬速过猛。
 constexpr int kSteerDeadBandDefault = 2;          // T06 S弯换向死区吞2帧致出界，降到2让Raw=-2时也产生转向。
 constexpr int kSteerDeadBandStraight = 2;        // 直道Raw=2~3时也参与回中，只吞掉1列内的小噪声，避免回中太慢。
 constexpr int kSteerDeadBandCurve = 1;            // T06 S弯换向关键帧落在死区内，弯道死区进一步降到1。
@@ -52,8 +60,8 @@ constexpr float kSteerFilterSignFlipMaxStepPerFrame = 1.8f; // Filt跨符号换�
 constexpr float kSteerFastFlipAlpha = 0.78f;     // S 弯大幅换向时的快速滤波系数，让 Filt 尽快跟上 Raw，避免继续朝旧方向打。
 constexpr float kSteerFastFlipRawThreshold = 8.0f;  // 触发快速换向的 Raw 最小幅度，从 10 降到 8 让 S 弯更早触发快速跟踪。
 constexpr float kSteerFastFlipGap = 15.0f;        // Raw 与 Filt 差值换向判定，从 18 降到 15 让中等换向也能触发。
-constexpr float kSharpTurnSteerError = 7.0f;     // 中等偏差即进入统一弯道速度，避免U弯中raw 8~10反复切档产生顿挫和内切。
-constexpr float kCurveSpeedExitSteerError = 5.0f; // 统一弯道档退出阈值，低于进入阈值形成滞回，减少弯中速度档抖动。
+constexpr float kSharpTurnSteerError = 4.0f;     // 提前减速，低偏即进弯道速度
+constexpr float kCurveSpeedExitSteerError = 3.0f; // 弯道档退出阈值
 constexpr float kVisualGyroLimitDps = 45.0f;     // 防止继续要求底盘做不到的 -100~-120 dps 转向
 constexpr float kTargetGyroMaxDeltaDps = 38.0f;  // T06 追踪弱：从26提到38，目标角速度更快爬升，弯道转向不拖沓。
 constexpr float kTargetGyroSignFlipMaxDeltaDps = 210.0f; // 目标角速度换向时的变化率限制，只在正负号切换时放宽；确保大幅换向先跨过零，不继续朝旧方向打。

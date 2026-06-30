@@ -9,6 +9,51 @@ static inline float clamp_float(float value, float min_value, float max_value) {
     return value;
 }
 
+struct InnerBrakePulseState {
+    int phase = 0;
+    bool active = false;
+};
+
+static float inner_wheel_pulse_brake(
+    float base_speed_goal,
+    float wheel_goal,
+    float wheel_speed,
+    InnerBrakePulseState& state)
+{
+    // 非弯道、内轮仍有正向目标、或内轮已经足够慢：不反拖。
+    if (base_speed_goal < car_config::kInnerBrakeEnableBaseSpeed ||
+        wheel_goal > 0.02f ||
+        wheel_speed <= car_config::kInnerBrakeReleaseSpeed) {
+        state.phase = 0;
+        state.active = false;
+        return 0.0f;
+    }
+
+    // 只有内轮仍明显滑行时，才启动脉冲反拖。
+    if (!state.active &&
+        wheel_speed >= car_config::kInnerBrakeEnterSpeed) {
+        state.active = true;
+        state.phase = 0;
+    }
+
+    if (!state.active) {
+        return 0.0f;
+    }
+
+    const int period =
+        car_config::kInnerBrakePulseOnTicks +
+        car_config::kInnerBrakePulseOffTicks;
+
+    const bool brake_now =
+        state.phase < car_config::kInnerBrakePulseOnTicks;
+
+    state.phase = (state.phase + 1) % period;
+
+    return brake_now
+        ? -static_cast<float>(car_config::kInnerBrakePulsePwm)
+        : 0.0f;
+}
+
 struct VisionSnapshot {
     int MiddleLine;
     int Det_True;
@@ -267,11 +312,21 @@ void Speed_PID_L(void)
 {
     speed_erro_L = Speed_Goal_l - speed_encoder_L;
 
-    if (Speed_Goal_l <= 0.0f) {
-        speed_out_l = 0.0f;
+    static InnerBrakePulseState left_brake_state;
+
+    if (Speed_Goal_l <= 0.02f) {
+        speed_out_l = inner_wheel_pulse_brake(
+            Speed_Goal,
+            Speed_Goal_l,
+            speed_encoder_L,
+            left_brake_state);
+
         speed_last_erro_L = 0.0f;
         return;
     }
+
+    left_brake_state.active = false;
+    left_brake_state.phase = 0;
 
     // Incremental PI speed loop. With no minimum wheel speed, positive targets do not reverse-drive.
     speed_out_l += speed_I_l * speed_erro_L + speed_P_l * (speed_erro_L - speed_last_erro_L);
@@ -288,11 +343,21 @@ void Speed_PID_R(void)
 {
     speed_erro_R = Speed_Goal_r - speed_encoder_R;
 
-    if (Speed_Goal_r <= 0.0f) {
-        speed_out_r = 0.0f;
+    static InnerBrakePulseState right_brake_state;
+
+    if (Speed_Goal_r <= 0.02f) {
+        speed_out_r = inner_wheel_pulse_brake(
+            Speed_Goal,
+            Speed_Goal_r,
+            speed_encoder_R,
+            right_brake_state);
+
         speed_last_erro_R = 0.0f;
         return;
     }
+
+    right_brake_state.active = false;
+    right_brake_state.phase = 0;
 
     // Incremental PI speed loop. With no minimum wheel speed, positive targets do not reverse-drive.
     speed_out_r += speed_I_r * speed_erro_R + speed_P_r * (speed_erro_R - speed_last_erro_R);
