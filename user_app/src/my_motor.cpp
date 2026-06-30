@@ -9,50 +9,7 @@ static inline float clamp_float(float value, float min_value, float max_value) {
     return value;
 }
 
-struct InnerBrakePulseState {
-    int phase = 0;
-    bool active = false;
-};
 
-static float inner_wheel_pulse_brake(
-    float base_speed_goal,
-    float wheel_goal,
-    float wheel_speed,
-    InnerBrakePulseState& state)
-{
-    // 非弯道、内轮仍有正向目标、或内轮已经足够慢：不反拖。
-    if (base_speed_goal < car_config::kInnerBrakeEnableBaseSpeed ||
-        wheel_goal > 0.02f ||
-        wheel_speed <= car_config::kInnerBrakeReleaseSpeed) {
-        state.phase = 0;
-        state.active = false;
-        return 0.0f;
-    }
-
-    // 只有内轮仍明显滑行时，才启动脉冲反拖。
-    if (!state.active &&
-        wheel_speed >= car_config::kInnerBrakeEnterSpeed) {
-        state.active = true;
-        state.phase = 0;
-    }
-
-    if (!state.active) {
-        return 0.0f;
-    }
-
-    const int period =
-        car_config::kInnerBrakePulseOnTicks +
-        car_config::kInnerBrakePulseOffTicks;
-
-    const bool brake_now =
-        state.phase < car_config::kInnerBrakePulseOnTicks;
-
-    state.phase = (state.phase + 1) % period;
-
-    return brake_now
-        ? -static_cast<float>(car_config::kInnerBrakePulsePwm)
-        : 0.0f;
-}
 
 struct VisionSnapshot {
     int MiddleLine;
@@ -312,21 +269,11 @@ void Speed_PID_L(void)
 {
     speed_erro_L = Speed_Goal_l - speed_encoder_L;
 
-    static InnerBrakePulseState left_brake_state;
-
     if (Speed_Goal_l <= 0.02f) {
-        speed_out_l = inner_wheel_pulse_brake(
-            Speed_Goal,
-            Speed_Goal_l,
-            speed_encoder_L,
-            left_brake_state);
-
+        speed_out_l = 0.0f;
         speed_last_erro_L = 0.0f;
         return;
     }
-
-    left_brake_state.active = false;
-    left_brake_state.phase = 0;
 
     // Incremental PI speed loop. With no minimum wheel speed, positive targets do not reverse-drive.
     speed_out_l += speed_I_l * speed_erro_L + speed_P_l * (speed_erro_L - speed_last_erro_L);
@@ -343,21 +290,11 @@ void Speed_PID_R(void)
 {
     speed_erro_R = Speed_Goal_r - speed_encoder_R;
 
-    static InnerBrakePulseState right_brake_state;
-
     if (Speed_Goal_r <= 0.02f) {
-        speed_out_r = inner_wheel_pulse_brake(
-            Speed_Goal,
-            Speed_Goal_r,
-            speed_encoder_R,
-            right_brake_state);
-
+        speed_out_r = 0.0f;
         speed_last_erro_R = 0.0f;
         return;
     }
-
-    right_brake_state.active = false;
-    right_brake_state.phase = 0;
 
     // Incremental PI speed loop. With no minimum wheel speed, positive targets do not reverse-drive.
     speed_out_r += speed_I_r * speed_erro_R + speed_P_r * (speed_erro_R - speed_last_erro_R);
@@ -547,17 +484,30 @@ void speed_dif_cascade(float inner_dt)
         float diff_steer_normalized = diff_steer / normalized_dt_ratio;
         dbg_diff_steer = diff_steer_normalized;
 
-        // F. Simple speed planning with hysteresis; all non-element turns share one curve mode.
-        const float curve_error_abs = std::max(std::fabs(control_raw_steer_error), std::fabs(steer_error));
-        if (ring_now) {
-            simple_curve_active = false;
-        } else if (curve_error_abs >= car_config::kSharpTurnSteerError) {
-            simple_curve_active = true;
-        } else if (curve_error_abs <= car_config::kCurveSpeedExitSteerError) {
-            simple_curve_active = false;
-        }
+        // F. Continuous speed planning using raw error and error derivative
+        const float abs_err = std::max(
+            std::fabs(control_raw_steer_error),
+            std::fabs(steer_error));
 
-        float speed_to_plan = simple_curve_active ? WD_Speed_Goal : ZD_Speed_Goal;
+        // 用误差变化量提前识别入弯趋势
+        const float preview = std::min(
+            std::fabs(diff_steer_normalized),
+            8.0f);
+
+        const float curve_score = abs_err + 0.35f * preview;
+
+        // 误差约 2 开始减速，误差约 8 降至完整弯道速度
+        const float slow_start = 2.0f;
+        const float full_curve = 8.0f;
+
+        float u = (curve_score - slow_start) / (full_curve - slow_start);
+        u = clamp_float(u, 0.0f, 1.0f);
+
+        // ZD 为直道速度，WD 为弯道速度
+        float speed_to_plan =
+            ZD_Speed_Goal + (WD_Speed_Goal - ZD_Speed_Goal) * u;
+
+        simple_curve_active = (u > 0.15f);
         if (SystemData.Stop == 1) {
             speed_to_plan = 0.0f;
         }

@@ -36,9 +36,9 @@ constexpr float kCurveSpeedGoal = 0.34f;        // 提前减速，减小弯中�
 constexpr float kInnerBrakeEnableBaseSpeed = 0.25f;
 constexpr float kInnerBrakeEnterSpeed = 0.55f;
 constexpr float kInnerBrakeReleaseSpeed = 0.40f;
-constexpr int kInnerBrakePulsePwm = 70;
-constexpr int kInnerBrakePulseOnTicks = 1;
-constexpr int kInnerBrakePulseOffTicks = 5;
+constexpr int kInnerBrakePulsePwm = 0;
+constexpr int kInnerBrakePulseOnTicks = 0;
+constexpr int kInnerBrakePulseOffTicks = 0;
 constexpr float kStraightSpeedGoal = 0.55f;     // 低速落地验证档，先让中线跟踪稳定，再逐步加速。
 constexpr float kMaxWheelSpeedGoal = 4.0f;       // 单轮目标速度上限 m/s (原100RPS×0.0887≈8.9)
 
@@ -98,7 +98,7 @@ constexpr float kGyroDeadBandDps = 3.0f;         // T06：从5.0降到3.0，减�
 constexpr float kGyroMeasurementLimitDps = 260.0f; // 陀螺仪测量限幅，需高于视觉目标角速度上限，否则 220dps 急弯会被内部截断成假误差。
 constexpr float kGyroLpfAlpha = 0.70f;           // 减小陀螺仪滤波延迟，从0.50提到0.70。
 constexpr float kGyroFeedforwardGain = 0.0055f;  // 轻微恢复前馈，弯道初段更早建立角速度。
-constexpr float kDiffOutputMaxDelta = 0.12f;     // 每 5ms 差速变化限幅，介于迟滞版和突变版之间。
+constexpr float kDiffOutputMaxDelta = 0.08f;     // 每 5ms 差速变化限幅，降到 0.08 使输出更连续。
 constexpr float kGyroRawSpikeRejectDps = 260.0f; // 原始陀螺仪单帧尖峰过滤阈值；静止实测偶发-359dps，需在进入角速度环前拒绝。
 
 // MPU6050 量程换算与零偏标定参数
