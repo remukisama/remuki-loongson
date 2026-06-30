@@ -11,10 +11,8 @@ float AttitudeCascade::calc_diff_speed_bypass_angle(float t,const Mpu6050Data& d
     last_gyro_z_measurement_=g;
     float wanted=t*car_config::kGyroFeedforwardGain+gyro_pid.P*gyro_pid.err+gyro_pid.I*gyro_pid.integral+dterm;
     float step=car_config::kDiffOutputMaxDelta;
-    if((t>car_config::kReverseGyroTargetThresholdDps&&g<-car_config::kReverseGyroRealThresholdDps)||(t<-car_config::kReverseGyroTargetThresholdDps&&g>car_config::kReverseGyroRealThresholdDps))step=car_config::kDiffOutputReverseMaxDelta;
     float out=last_gyro_output_+clamp_float(wanted-last_gyro_output_,-step,step);
     out=clamp_float(out,-gyro_pid.out_max,gyro_pid.out_max);
-    if(t==0.0f&&std::fabs(g)>car_config::kStraightHighGyroLimitDps)out=clamp_float(out,-car_config::kStraightHighGyroDiffLimit,car_config::kStraightHighGyroDiffLimit);
     gyro_pid.output=out; gyro_pid.last_err=gyro_pid.err; last_gyro_output_=out;
     return out;
 }

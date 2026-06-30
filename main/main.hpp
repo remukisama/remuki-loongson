@@ -14,6 +14,7 @@
 
 // 包含所有测试程序头文件
 #include "lq_all_demo.hpp"
+#include "lq_vision_capture_demo.hpp"
 
 // 包含所有用户程序头文件
 #include "user_app.hpp"

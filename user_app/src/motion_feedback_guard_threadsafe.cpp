@@ -49,7 +49,11 @@ void motion_feedback_guard_tick() {
         return;
     }
 
-    std::printf("[MOTION_GUARD] commanded wheel has no encoder feedback; stop and exit\n");
+    std::printf("[MOTION_GUARD] commanded wheel has no encoder feedback; "
+                "L{goal=%.3f,pwm=%.1f,enc=%.3f,hold=%.3f} "
+                "R{goal=%.3f,pwm=%.1f,enc=%.3f,hold=%.3f}; stop and exit\n",
+                Speed_Goal_l, speed_out_l, speed_encoder_L, g_no_motion_l_sec,
+                Speed_Goal_r, speed_out_r, speed_encoder_R, g_no_motion_r_sec);
     reset_state();
     exit_flag.store(true, std::memory_order_relaxed);
     emergency_stop();

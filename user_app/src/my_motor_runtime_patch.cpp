@@ -52,8 +52,12 @@ bool direct_drive_watchdog_ready()
     gpio_protect_heartbeat_pulse();
     if (!gpio_protect_heartbeat_is_wd_alive(car_config::kWatchdogHeartbeatStallTimeoutMs)) {
         g_direct_drive_watchdog_ready.store(false, std::memory_order_release);
-        std::printf("[DIRECT_DRIVE_GUARD] watchdog heartbeat stalled; non-zero PWM refused.\n");
-        return false;
+        if (!gpio_protect_heartbeat_require_ready(1500)) {
+            std::printf("[DIRECT_DRIVE_GUARD] watchdog heartbeat stalled; non-zero PWM refused.\n");
+            return false;
+        }
+        g_direct_drive_watchdog_ready.store(true, std::memory_order_release);
+        gpio_protect_heartbeat_pulse();
     }
     return true;
 }

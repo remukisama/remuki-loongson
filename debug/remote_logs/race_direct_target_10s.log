@@ -1,0 +1,16 @@
+[GPIO_PROTECT] connected to gpio_manager shm=/gpio_proj_shm interval=10ms
+[GPIO_PROTECT] required watchdog ready: heartbeat 3->4 watchdog_ms 3933678->3933686
+R:OK!MPU6050 Init Success! Device ID: 0x68
+开始采样陀螺仪零偏，请保持静止...
+gyro_z_bias_raw = 0.505
+[LQ] [INFO ] [PID:2436] <lq_camera_ex.cpp:init:290> 龙邱科技图像采集已初始化完毕，愿你代码无错，开发无忧！
+[LQ] [INFO ] [PID:2436] <lq_camera_ex.cpp:start_collect:307> 采集已启动
+[LQ] [INFO ] [PID:2436] <lq_camera_ex.cpp:set_exposure_manual:480> 手动曝光设置成功，55
+[CAM] hires:320*240, patrol:160*120, fps:156.000000
+[RACE_MODE] no-element race mode: element process disabled, main loop enabled.
+[steer] det:34 mid:38 raw:4.0 filt:4.0 dE:0.0 pd:9.0 tgt:9.0 cmd:9.0 gz:6.2 gf:6.5 ge:2.5 dT:-0.0 d0:0.3 diff:0.3 cap:0 max:0.9 goal:0.1 L:-0.2 R:0.3 encL:-0.1 encR:-0.0 rawEncL:-0.12 rawEncR:-0.03 pwmL:427 pwmR:427 eL:-0.0 eR:0.4 dt:0.007 imu:1 db:0 off:2 ll:12 rl:0 curve:0
+[steer] det:34 mid:38 raw:4.0 filt:4.0 dE:0.0 pd:9.0 tgt:9.0 cmd:9.0 gz:9.6 gf:10.9 ge:-1.9 dT:0.0 d0:0.2 diff:0.2 cap:0 max:0.9 goal:0.2 L:-0.0 R:0.4 encL:-0.1 encR:-0.0 rawEncL:-0.09 rawEncR:-0.05 pwmL:717 pwmR:680 eL:0.1 eR:0.5 dt:0.006 imu:1 db:0 off:2 ll:12 rl:0 curve:0
+[steer] det:34 mid:38 raw:4.0 filt:4.0 dE:0.0 pd:9.0 tgt:9.0 cmd:9.0 gz:7.2 gf:6.0 ge:3.0 dT:0.0 d0:0.1 diff:0.1 cap:0 max:0.9 goal:0.3 L:0.2 R:0.3 encL:-0.8 encR:-0.0 rawEncL:-0.80 rawEncR:-0.04 pwmL:2445 pwmR:1327 eL:1.0 eR:0.4 dt:0.006 imu:1 db:0 off:2 ll:11 rl:0 curve:0
+[SPEED_GUARD] reverse encoder feedback, stop output and lock exit. goalL:0.24 goalR:0.35 encL:-0.80 encR:-0.04
+程序终止，电机已停止。
+[LQ] [INFO ] [PID:2436] <lq_i2c_dev.cpp:i2c_dev_close:108> i2c device /dev/lq_i2c_mpu6050 closed!

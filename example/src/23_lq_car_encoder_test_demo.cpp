@@ -1,5 +1,6 @@
 #include "lq_all_demo.hpp"
 #include "user_app.hpp"
+#include <cstdlib>
 #include <iostream>
 #include <unistd.h>
 
@@ -30,8 +31,18 @@ void lq_car_encoder_test_demo(void)
     printf("-> [3/3] 即将给左右轮施加微弱动力正转，并开始打印测速数据...\n\n");
     usleep(1000 * 1000); // 停顿 1 秒给用户准备时间
 
-    // 测试占空比（最大 10000，这里给 2500 提供足够低速扭矩）
-    int test_duty = 2500;  
+    // 测试占空比（最大 10000，默认 2500；可用 LQ_ENCODER_TEST_DUTY 临时改变扭矩/方向）
+    int test_duty = 2500;
+    if (const char *env_duty = std::getenv("LQ_ENCODER_TEST_DUTY")) {
+        int parsed = std::atoi(env_duty);
+        if (parsed >= -car_config::kMotorMaxPwm && parsed <= car_config::kMotorMaxPwm) {
+            test_duty = parsed;
+        } else {
+            printf("[ENCODER_TEST] ignore invalid LQ_ENCODER_TEST_DUTY=%s, use %d\n",
+                   env_duty, test_duty);
+        }
+    }
+    printf("[ENCODER_TEST] test_duty=%d\n", test_duty);
     
     // 给电机恒定动力（直接调用你的开环函数）
     motor_Duty_L(test_duty);
@@ -55,10 +66,13 @@ void lq_car_encoder_test_demo(void)
             motor_Duty_R(0);
         }
 
-        struct timeval tv;
-        tv.tv_sec = 0;
-        tv.tv_usec = 100000; // 延时 100ms
-        select(0, NULL, NULL, NULL, &tv); 
+        for (int i = 0; i < 5 && !exit_flag; ++i) {
+            gpio_protect_heartbeat_pulse();
+            struct timeval tv;
+            tv.tv_sec = 0;
+            tv.tv_usec = 20000; // 20ms; keep gpio_manager fed while holding PWM
+            select(0, NULL, NULL, NULL, &tv);
+        }
     }
 
     // 退出时关停电机

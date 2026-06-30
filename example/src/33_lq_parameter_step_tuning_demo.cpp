@@ -663,10 +663,10 @@ static void print_parameter_debug_plan() {
         "T11正常时不要再动角速度P/D，T06问题多半在视觉目标或速度保护。");
     print_param_plan_line(
         "T11 gyro_direction_rate_limit",
-        "kDiffOutputMaxDelta, kDiffOutputReverseMaxDelta, kReverseGyroTargetThresholdDps, kReverseGyroRealThresholdDps, kGyroTargetPositiveGain, kGyroTargetNegativeGain",
-        "T11正/负阶跃gf_mean、reverse_rate、diff变化速度；T06 S弯反打是否慢半拍。",
-        "差速输出爬升慢可小幅加DiffOutputMaxDelta；反向救车慢加ReverseMaxDelta；正负方向一边欠转就微调对应TargetGain。",
-        "目标和实际长期反向先查符号/接线；不要靠增益硬怼。");
+        "kDiffOutputMaxDelta",
+        "T11正/负阶跃gf_mean、diff变化速度；T06出弯回正是否慢半拍。",
+        "差速输出爬升慢可小幅加DiffOutputMaxDelta；出弯抽动或直道摆动则回退。",
+        "目标和实际长期反向先查符号/接线；不要用隐藏方向补偿硬怼。");
     print_param_plan_line(
         "angle_yaw_optional",
         "kAnglePidP/I/D, kAnglePidIntegralLimit, kAnglePidOutputLimit, kYawTrackKp, kYawTrackToleranceDeg, kYawTrackSettleGyroDps, kYawIntegralDeadBandDps, kYawTrackMin/FineRate*, kYawTrackDefaultMaxRateDps",
@@ -687,22 +687,16 @@ static void print_parameter_debug_plan() {
         "跳边猛打就降低max step或降低jump接纳；S弯换向迟钝就提高FastFlipAlpha或降低触发阈值；跨符号过猛则降低SignFlipMaxStep。",
         "这些是滤波/保护参数，先确认Raw本身是真的赛道趋势。");
     print_param_plan_line(
-        "T06/T07 turn_protection",
-        "kCurveEntryBrakeSpeedGoal/HoldFrames/RawThreshold/FiltThreshold/DerivativeThreshold, kSharpTurnSteerError, kExtremeTurnSpeedGoal, kExtremeTurnMinDiff, kExtremeTurnRaw/FiltThreshold, kExtremeTurnExitRaw/FiltThreshold, kExtremeTurnExitFilterAlpha",
-        "T07入弯前是否提前降速、直角弯是否转不过、出弯是否继续旧方向、goal是否被压低。",
-        "入弯晚就降低触发阈值或增加保持帧；转不过但T11健康可提高ExtremeTurnMinDiff或降低ExtremeTurnSpeedGoal；出弯拖尾就放宽Exit快收条件/提高ExitFilterAlpha。",
-        "保护过强会让车一直慢；保护过弱会高速推头，必须结合T06逐项看。");
-    print_param_plan_line(
-        "T06 s_curve_target",
-        "kSCurveSpeedGoal, kSCurveMinDiff, kSCurveHoldFrames, kSCurveRawMinError, kSCurveEarlyRawMinError, kSCurveEarlyFiltMinError, kSCurveEarlyDerivativeThreshold, kSCurveRawFiltGap, kSCurveDerivativeThreshold, kSCurveSharpRawThreshold",
-        "T06/T07 S弯换向是否慢、是否二次反冲、是否保护误触发导致过慢。",
-        "换向慢：提高SCurve目标变化率相关参数前，先确认Raw-Filt触发；二次反冲：降低MinDiff或延长Hold；误触发多：提高Raw/Filt/Derivative阈值。",
-        "S弯参数只在普通弯和直道已稳定后调。");
+        "T06 simple_curve_speed",
+        "kSharpTurnSteerError, kCurveSpeedGoal, kStraightSpeedGoal, kMinWheelSpeedGoal, kMaxDiffRatio",
+        "T06/T07入弯是否过快、直角弯是否转不过、内轮是否被最低轮速卡住。",
+        "转不过先降kMinWheelSpeedGoal或加kSteerKp；推头先降CurveSpeed；直道稳定后再加StraightSpeed。",
+        "当前非元素弯道统一按中线误差工作，不再调U/S/急弯专项状态机。");
     print_param_plan_line(
         "T06 target_gyro_limit",
-        "kVisualGyroLimitDps, kTargetGyroMaxDeltaDps, kTargetGyroSCurveMaxDeltaDps, kTargetGyroSignFlipMaxDeltaDps, kTargetGyroDeadbandReturnDeltaDps, kExtremeTurnExitTargetDeltaDps, kOpposingGyroHoldDps, kOpposingGyroTargetLimitDps, kOpposingGyroRecoveryFrames, kOpposingGyroRecoveryLimitDps",
-        "T06 PD/Tgt/Cmd/GF/GErr/dT、S弯反打、出弯目标是否长时间贴顶或回零太慢。",
-        "PD够大但Tgt小：放宽VisualGyroLimit或目标变化率；出弯回正慢：加DeadbandReturn/ExitTargetDelta；车身还旧方向转时反打过猛：收紧Opposing目标限制或延长Recovery。",
+        "kVisualGyroLimitDps, kTargetGyroMaxDeltaDps, kTargetGyroSignFlipMaxDeltaDps, kTargetGyroDeadbandReturnDeltaDps",
+        "T06 PD/Tgt/Cmd/GF/GErr/dT、出弯目标是否长时间贴顶或回零太慢。",
+        "PD够大但Tgt小：放宽VisualGyroLimit或目标变化率；出弯回正慢：加DeadbandReturn；反打过猛则降低SignFlipMaxDelta。",
         "T11弱时先修内环；T11健康但Tgt没给够，才动这些目标生成参数。");
     print_param_plan_line(
         "T06 fallback_debug",
@@ -731,10 +725,10 @@ static void print_parameter_debug_plan() {
         "必须先确认识别flag正确，再调控制参数。");
     print_param_plan_line(
         "T08 bad_vision_unclassified",
-        "kUnclassifiedTurnTriggerError, kUnclassifiedTurnGyroLimitDps, kBadVisionOfflineThreshold, kBadVisionCenterHoldOfflineThreshold, kBadVisionSpeedGoal, kBadVisionGyroLimitDps",
-        "T06/T08 OFFLine、bad vision、未识别急弯/十字/漏检环岛处Tgt是否被保护。",
-        "漏检急弯转不过可降低Trigger或提高GyroLimit；丢线时猛打出界就降低BadVisionGyroLimit/SpeedGoal或提高CenterHold门槛。",
-        "这是兜底保护，不应代替修图像和元素识别。");
+        "kBadVisionOfflineThreshold, kBadVisionCenterHoldOfflineThreshold, kBadVisionSpeedGoal, kBadVisionGyroLimitDps",
+        "T06/T08 OFFLine、bad vision、十字/漏检环岛处Tgt是否被保护。",
+        "丢线时猛打出界就降低BadVisionGyroLimit/SpeedGoal或提高CenterHold门槛；误触发过多则提高OfflineThreshold。",
+        "这是丢线兜底保护，不应代替修图像和元素识别。");
 
     printf("[PLAN_NEXT] 若现在目标是无元素提速：T05通过 -> T10通过 -> T11通过 -> T06低速闭环 -> T07提速；T07失败时按T06/T11摘要定位，不直接盲调角速度环。\n");
     printf("[PLAN_NEXT] 若目标是元素：T08H先手推确认补线/识别，再T08自动低速，最后才回T07速度回归。\n");
@@ -1275,6 +1269,7 @@ int test_01_motor_encoder_direction(int pwm = 1200, int hold_ms = 700) {
         if (left) motor_Duty_L(duty); else motor_Duty_R(duty);
         auto start = std::chrono::steady_clock::now();
         while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() < test_ms && !exit_flag) {
+            gpio_protect_heartbeat_pulse();
             float v = left ? encoder_num_L() : encoder_num_R();
             enc.add(v);
             usleep(20 * 1000);
@@ -1286,9 +1281,9 @@ int test_01_motor_encoder_direction(int pwm = 1200, int hold_ms = 700) {
         return enc;
     };
 
-    const int pwm_steps[] = {1200, 1800, 2400};
+    const int pwm_steps[] = {1200, 1800, 2400, 3200, 4000};
     const int step_count = sizeof(pwm_steps) / sizeof(pwm_steps[0]);
-    const double move_threshold = 1.0;
+    const double move_threshold = 0.15;
 
     auto probe_wheel = [&](const char *wheel_name, bool left) {
         WheelProbe result;
@@ -1989,7 +1984,7 @@ int test_08_element_debug(int seconds = 25) {
                      "不要用元素问题反推基础二值、速度环和普通弯PID一起改；若img_bad高先退回T03/T04。",
                      "单个元素稳定后再逐个增加速度或串联多个元素。");
     printf("[运行] 只在普通循迹稳定后调用。开启元素判断，低速经过十字/圆环区域，输出Road_type、Scene、ring/cooldown状态。seconds=%d\n", seconds);
-    printf("[CFG_T08] ring_confirm=%d exit_confirm=%d cooldown=%d exit_hold=%d left(Lmin=%d Rmax=%d OFFmax=%d P2<%d) right(Rmin=%d Lmax=%d OFFmax=%d P2>%d) loss_only>=%d ring_cap=%.0f unclassified_limit=%.0f@%.0f。误判多增大confirm/loss_only；漏检先降低对应min或放宽对侧max/OFFmax。\n",
+    printf("[CFG_T08] ring_confirm=%d exit_confirm=%d cooldown=%d exit_hold=%d left(Lmin=%d Rmax=%d OFFmax=%d P2<%d) right(Rmin=%d Lmax=%d OFFmax=%d P2>%d) loss_only>=%d ring_cap=%.0f。误判多增大confirm/loss_only；漏检先降低对应min或放宽对侧max/OFFmax。\n",
            car_config::kElementRingConfirmFrames,
            car_config::kElementRingExitConfirmFrames,
            car_config::kElementCooldownFrames,
@@ -2003,9 +1998,7 @@ int test_08_element_debug(int seconds = 25) {
            car_config::kRightRingOfflineBlockMax,
            car_config::kRightRingMinPoint2Y,
            car_config::kRingLossOnlyMinLost,
-           car_config::kRingSceneGyroLimitDps,
-           car_config::kUnclassifiedTurnGyroLimitDps,
-           car_config::kUnclassifiedTurnTriggerError);
+           car_config::kRingSceneGyroLimitDps);
     init_element_tft_once("T08");
     if (!ensure_camera_ready()) return -1;
     init_control_for_motor_tests();
@@ -2886,16 +2879,15 @@ int test_11_gyro_loop_step_response(float base_speed = 0.5f, int hold_ms = 900) 
     printf("\n========== TEST 11 gyro_loop_step_response 角速度环阶跃响应 ==========" "\n");
     print_stage_card("T11 gyro_loop_step_response",
                      "绕开图像外环，直接给角速度环左右阶跃目标，判断角速度环、差速限幅、轮速环谁在限制转向力度。",
-                     "kGyroPidP/I/D、kGyroFeedforwardGain、kDiffOutputMaxDelta、kGyroPidOutputLimit、kGyroTargetPositive/NegativeGain，以及差速限幅。",
+                     "kGyroPidP/I/D、kGyroFeedforwardGain、kDiffOutputMaxDelta、kGyroPidOutputLimit，以及差速限幅。",
                      "不要在本测试里改摄像头中线、视觉Kp/Kd、元素补线或提速参数；本测试只判断角速度环和差速执行能力。",
                      "T11左右响应都健康后，再回到T06/T07判断视觉外环和提速回归。");
     printf("[安全] 小车会低速左右摆动，不使用摄像头。请放在普通地面/赛道空旷处，手边准备Ctrl+C。base_speed=%.1f hold_ms=%d\n",
            base_speed, hold_ms);
-    printf("[参数快照] gyro(P/I/D=%.3f/%.4f/%.4f ff=%.3f out=%.1f dOut=%.1f/%.1f pos/neg=%.2f/%.2f dead=%.1f lpf=%.2f maxDiffRatio=%.2f)\n",
+    printf("[参数快照] gyro(P/I/D=%.3f/%.4f/%.4f ff=%.3f out=%.1f dOut=%.1f dead=%.1f lpf=%.2f maxDiffRatio=%.2f)\n",
            car_config::kGyroPidP, car_config::kGyroPidI, car_config::kGyroPidD,
            car_config::kGyroFeedforwardGain, car_config::kGyroPidOutputLimit,
-           car_config::kDiffOutputMaxDelta, car_config::kDiffOutputReverseMaxDelta,
-           car_config::kGyroTargetPositiveGain, car_config::kGyroTargetNegativeGain,
+           car_config::kDiffOutputMaxDelta,
            car_config::kGyroDeadBandDps, car_config::kGyroLpfAlpha,
            car_config::kMaxDiffRatio);
 
@@ -2952,8 +2944,6 @@ int test_11_gyro_loop_step_response(float base_speed = 0.5f, int hold_ms = 900) 
         StepSummary &st = summaries[s];
         st.target = targets[s];
         st.cmd = st.target;
-        if (st.cmd > 0.0f) st.cmd *= car_config::kGyroTargetPositiveGain;
-        if (st.cmd < 0.0f) st.cmd *= car_config::kGyroTargetNegativeGain;
 
         printf("[T11_STEP_BEGIN] idx=%d/%d target=%.1f cmd=%.1f hold_ms=%d\n",
                s + 1, target_count, st.target, st.cmd, hold_ms);

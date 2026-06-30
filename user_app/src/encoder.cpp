@@ -34,6 +34,20 @@ static const float kMaxValidSpeed = 5.0f;    // 垃圾值阈值
 static const float kSpikeThreshold = 2.0f;   // 尖峰检测阈值
 static const int kEncoderInvalidTripCount = 20; // 约100ms@5ms闭环，持续无效则禁止实车闭环。
 
+void encoder_reset_state(void)
+{
+    encoder_L.encoder_clear_capture_buffer();
+    encoder_R.encoder_clear_capture_buffer();
+    g_filtered_L = 0.0f;
+    g_filtered_R = 0.0f;
+    g_initialized_L = false;
+    g_initialized_R = false;
+    g_raw_last_L = 0.0f;
+    g_raw_last_R = 0.0f;
+    g_invalid_count_L = 0;
+    g_invalid_count_R = 0;
+}
+
 static float filter_encoder(float raw, float filtered, bool &initialized) {
     // Reject impossible encoder spikes before cold-start initialization.
     if (std::fabs(raw) > kMaxValidSpeed) {
@@ -68,7 +82,9 @@ float encoder_num_L(void)
     float raw = -encoder_L.encoder_get_count() * car_config::kEncoderRpsToMS;
     g_raw_last_L = raw;
     if (std::fabs(raw) > kMaxValidSpeed) {
-        ++g_invalid_count_L;
+        if (g_initialized_L) {
+            ++g_invalid_count_L;
+        }
         return g_filtered_L;
     }
     g_invalid_count_L = 0;
@@ -91,7 +107,9 @@ float encoder_num_R(void)
     float raw = encoder_R.encoder_get_count() * car_config::kEncoderRpsToMS;
     g_raw_last_R = raw;
     if (std::fabs(raw) > kMaxValidSpeed) {
-        ++g_invalid_count_R;
+        if (g_initialized_R) {
+            ++g_invalid_count_R;
+        }
         return g_filtered_R;
     }
     g_invalid_count_R = 0;

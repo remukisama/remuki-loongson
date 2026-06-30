@@ -1,6 +1,7 @@
 #include "lq_all_demo.hpp"
 #include "lq_udp_client.hpp"
 #include "car_config.hpp"
+#include "gpio_protect_heartbeat.hpp"
 #include <iostream>
 #include <unistd.h>
 #include <atomic>
@@ -795,6 +796,10 @@ void lq_speed_loop_track_udp_tune_demo(void)
     exit_vofa_demo = false;
     signal(SIGINT, signal_handler_vofa_tuning);
     signal(SIGTERM, signal_handler_vofa_tuning);
+    if (!gpio_protect_heartbeat_require_ready(1500)) {
+        std::cout << ">>> gpio_manager watchdog not ready; speed-tune refused." << std::endl;
+        return;
+    }
 
     constexpr float DT_SEC = (float)car_config::kSpeedTuneControlPeriodMs / 1000.0f;
     const float sine_min = std::max(0.0f, car_config::kSpeedTuneSineMinSpeed);
@@ -884,10 +889,13 @@ void lq_speed_loop_track_udp_tune_demo(void)
         raw_r = ENC_TO_MS( encoder_R.encoder_get_count());
         encoder_L.encoder_clear_capture_buffer();
         encoder_R.encoder_clear_capture_buffer();
-        bool valid = period_l > 0 && period_r > 0 &&
-                     period_l < car_config::kEncoderStalePeriodThreshold &&
-                     period_r < car_config::kEncoderStalePeriodThreshold &&
-                     std::fabs(raw_l) <= 3.0f && std::fabs(raw_r) <= 3.0f;
+        bool moving_valid = period_l > 0 && period_r > 0 &&
+                            period_l < car_config::kEncoderStalePeriodThreshold &&
+                            period_r < car_config::kEncoderStalePeriodThreshold &&
+                            std::fabs(raw_l) <= 3.0f && std::fabs(raw_r) <= 3.0f;
+        bool stationary_valid = std::fabs(raw_l) < car_config::kSpeedTuneMotionStartThreshold &&
+                                std::fabs(raw_r) < car_config::kSpeedTuneMotionStartThreshold;
+        bool valid = moving_valid || stationary_valid;
         enc_l = valid ? raw_l : 0.0f;
         enc_r = valid ? raw_r : 0.0f;
         return valid;
@@ -990,7 +998,7 @@ void lq_speed_loop_track_udp_tune_demo(void)
         }
 
         bool moving_phase = (phase == FORWARD);
-        if (encoder_invalid_ms >= 300 && phase != COOLDOWN && phase != ENCODER_PROBE) {
+        if (encoder_invalid_ms >= car_config::kSpeedTuneEncoderInvalidHoldMs && phase != COOLDOWN && phase != ENCODER_PROBE) {
             stop_reason = "encoder_unstable";
             phase = COOLDOWN;
             phase_ms = 0;
@@ -1035,6 +1043,7 @@ void lq_speed_loop_track_udp_tune_demo(void)
         } else {
             apply_motor(speed_out_l, speed_out_r, forward_pwm_limit, reverse_pwm_limit);
         }
+        gpio_protect_heartbeat_pulse();
         send_log(phase_name, t_ms, target_l, desired, enc_l, enc_r, error_l, error_r,
                  speed_out_l, speed_out_r, distance_m, forward_distance_m, return_distance_m,
                  raw_l, raw_r, encoder_valid, encoder_invalid_ms, stop_reason);
@@ -1094,6 +1103,11 @@ void lq_encoder512_udp_diagnose_demo(void)
     exit_vofa_demo = false;
     signal(SIGINT, signal_handler_vofa_tuning);
     signal(SIGTERM, signal_handler_vofa_tuning);
+
+    if (!gpio_protect_heartbeat_require_ready(1500)) {
+        std::cout << ">>> gpio_manager watchdog not ready; encoder512 refused." << std::endl;
+        return;
+    }
 
     std::cout << "========== encoder512 UDP diagnosis ==========" << std::endl;
     std::cout << ">>> UDP: " << car_config::kSpeedTuneUdpHost << ":" << car_config::kSpeedTuneUdpPort << std::endl;
@@ -1197,36 +1211,43 @@ void lq_encoder512_udp_diagnose_demo(void)
     int t_ms = 0;
     for (; !exit_vofa_demo && t_ms < 1000; t_ms += 50) {
         stop_motors();
+        gpio_protect_heartbeat_pulse();
         send_diag("rest", t_ms, 0, 0);
         usleep(50000);
     }
     for (int probe_ms = 0; !exit_vofa_demo && probe_ms < car_config::kEncoderDiagPulseMs; probe_ms += 20, t_ms += 20) {
         set_motor_pwm(car_config::kEncoderDiagPulsePwm, 0);
+        gpio_protect_heartbeat_pulse();
         send_diag("probe_left", t_ms, car_config::kEncoderDiagPulsePwm, 0);
         usleep(20000);
     }
     for (int settle_ms = 0; !exit_vofa_demo && settle_ms < 300; settle_ms += 50, t_ms += 50) {
         stop_motors();
+        gpio_protect_heartbeat_pulse();
         send_diag("settle", t_ms, 0, 0);
         usleep(50000);
     }
     for (int probe_ms = 0; !exit_vofa_demo && probe_ms < car_config::kEncoderDiagPulseMs; probe_ms += 20, t_ms += 20) {
         set_motor_pwm(0, car_config::kEncoderDiagPulsePwm);
+        gpio_protect_heartbeat_pulse();
         send_diag("probe_right", t_ms, 0, car_config::kEncoderDiagPulsePwm);
         usleep(20000);
     }
     for (int settle_ms = 0; !exit_vofa_demo && settle_ms < 300; settle_ms += 50, t_ms += 50) {
         stop_motors();
+        gpio_protect_heartbeat_pulse();
         send_diag("settle", t_ms, 0, 0);
         usleep(50000);
     }
     for (int probe_ms = 0; !exit_vofa_demo && probe_ms < car_config::kEncoderDiagPulseMs; probe_ms += 20, t_ms += 20) {
         set_motor_pwm(car_config::kEncoderDiagPulsePwm, car_config::kEncoderDiagPulsePwm);
+        gpio_protect_heartbeat_pulse();
         send_diag("probe_both", t_ms, car_config::kEncoderDiagPulsePwm, car_config::kEncoderDiagPulsePwm);
         usleep(20000);
     }
     for (int cooldown_ms = 0; !exit_vofa_demo && cooldown_ms < 1000; cooldown_ms += 50, t_ms += 50) {
         stop_motors();
+        gpio_protect_heartbeat_pulse();
         send_diag("cooldown", t_ms, 0, 0);
         usleep(50000);
     }

@@ -12,12 +12,13 @@ const auto timer_interval_1 = std::chrono::milliseconds(5);
 
 static void print_usage(const char *program)
 {
-    std::printf("Usage: %s --mode=<car|tune|encoder-test|encoder512|vision-debug|speed-tune> [--unsafe-dev-mode]\n", program);
+    std::printf("Usage: %s --mode=<car|tune|encoder-test|encoder512|vision-debug|vision-capture|speed-tune> [--unsafe-dev-mode]\n", program);
     std::printf("  --mode=car           competition control mode\n");
     std::printf("  --mode=tune          interactive parameter tuning\n");
     std::printf("  --mode=encoder-test  encoder direction test\n");
     std::printf("  --mode=encoder512    encoder UDP diagnostics\n");
     std::printf("  --mode=vision-debug  vision debug mode\n");
+    std::printf("  --mode=vision-capture save raw camera frames and patrol overlays\n");
     std::printf("  --mode=speed-tune    forward-only speed-loop tune\n");
     std::printf("  --mode=speed-return  safe-stop placeholder\n");
     std::printf("  --unsafe-dev-mode    bypass gpio_manager readiness; never use on track\n");
@@ -79,6 +80,11 @@ int main(int argc, char **argv)
         lq_line_patrol_debug_demo();
         gpio_protect_heartbeat_deinit();
         return 0;
+    }
+    if (run_mode == "vision-capture") {
+        const int ret = lq_vision_capture_demo();
+        gpio_protect_heartbeat_deinit();
+        return ret;
     }
     if (run_mode == "speed-tune") {
         lq_speed_loop_track_udp_tune_demo();
@@ -144,6 +150,8 @@ int main(int argc, char **argv)
         std::printf("[UDP_DEBUG] center-line overlay to 192.168.46.22:8080, every 5 frames\n");
     }
 
+    // Drop stale capture/filter state before the 5 ms control loop owns encoders.
+    encoder_reset_state();
     std::thread threadA(timer_thread_1);
     int udp_frame_count = 0;
 
@@ -160,6 +168,7 @@ int main(int argc, char **argv)
         }
 
         imageprocess();
+        lq_vision_capture_maybe_save_race_frame(udp_frame_count);
         control_mark_vision_frame_ready();
 
         if (car_config::kRaceUdpDebugEnable && ((udp_frame_count % 5) == 0)) {

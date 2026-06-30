@@ -101,10 +101,7 @@ void lq_gyro_loop_verify_demo(void)
                    target_idx + 1, num_targets, target_gyro_z);
         }
 
-        // 应用方向补偿
         float cmd = target_gyro_z;
-        if (cmd > 0.0f) cmd *= car_config::kGyroTargetPositiveGain;
-        else if (cmd < 0.0f) cmd *= car_config::kGyroTargetNegativeGain;
 
         // 通过标准角速度环计算差速
         float diff_speed = cascade_ctrl.calc_diff_speed_bypass_angle(cmd, imu_data, dt);
