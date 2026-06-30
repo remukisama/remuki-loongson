@@ -30,7 +30,7 @@ constexpr float kSpeedPidBrakePwm = 0.0f;        // 循迹中不主动反拖车�
 constexpr float kInnerWheelZeroTargetBrakeSpeed = 0.25f; // 禁止将负 PWM 当作内轮制动：当前硬件负PWM会反转电机
 constexpr float kInnerWheelZeroTargetBrakeGain  = 0.0f;
 constexpr float kInnerWheelZeroTargetBrakePwm   = 0.0f;
-constexpr float kCurveSpeedGoal = 0.25f;        // 提前减速，减小弯中惯性。从 0.34f 降到 0.25f。
+constexpr float kCurveSpeedGoal = 0.20f;        // 提前减速，减小弯中惯性。从 0.25f 降到 0.20f。
 constexpr float kCurveOuterWheelMax = 0.65f;     // 内轮被压到 0 时限制外轮速度，避免“想转弯却越跑越快”
 
 // 内轮脉冲反拖制动参数
@@ -75,7 +75,7 @@ constexpr float kCurvePreviewLossGain = 0.70f;
 constexpr float kCurvePreviewErrorMax = 5.0f;
 
 // 弯道时不能因基础速度降到 0.3 而把转向能力一起压得过低
-constexpr float kCurveMinDiff = 0.52f;
+constexpr float kCurveMinDiff = 0.62f;
 constexpr float kCurveMinDiffGyroDps = 12.0f;
 
 constexpr float kVisualGyroLimitDps = 45.0f;     // 防止继续要求底盘做不到的 -100~-120 dps 转向
