@@ -68,19 +68,21 @@ constexpr float kSteerFastFlipGap = 15.0f;        // Raw 与 Filt 差值换向�
 constexpr float kSharpTurnSteerError = 4.0f;     // 提前减速，低偏即进弯道速度
 constexpr float kCurveSpeedExitSteerError = 3.0f; // 弯道档退出阈值
 
-// 单侧丢线直接预转向：不再等待中线误差变大
-constexpr int   kCurvePreviewLossStart = 3;
-constexpr float kCurvePreviewGyroBaseDps = 8.0f;
-constexpr float kCurvePreviewGyroPerLossDps = 1.25f;
-constexpr float kCurvePreviewGyroMaxDps = 18.0f;
+// 单侧丢线直接预转向：只用于轻微提前带方向，不能替代视觉闭环
+constexpr int   kCurvePreviewLossStart = 5;
+constexpr float kCurvePreviewGyroBaseDps = 4.0f;
+constexpr float kCurvePreviewGyroPerLossDps = 0.80f;
+constexpr float kCurvePreviewGyroMaxDps = 10.0f;
 
 // 全丢线后锁停：禁止重新识别到其它赛道后自动恢复行驶
 constexpr bool kFullLossStopLatchEnable = true;
 
-// 单侧丢线预判只用于入弯；视觉偏差达到该值后退出预判，
-// 避免出弯时预判偏置继续把车往旧方向推。
-constexpr float kCurvePreviewCommitRawError = 8.0f;
+// Raw 达到该偏差后，预判退出，交给正常视觉闭环完成过弯
+constexpr float kCurvePreviewCommitRawError = 6.0f;
 constexpr int kCurvePreviewResetLoss = 1;
+
+// 预判阶段内轮至少保留的目标速度，禁止 Raw≈0 时单轮直接归零
+constexpr float kCurvePreviewMinInnerWheelSpeed = 0.10f;
 
 // 弯道时不能因基础速度降到 0.3 而把转向能力一起压得过低
 constexpr float kCurveMinDiff = 0.62f;

@@ -396,12 +396,14 @@ void speed_dif_cascade(float inner_dt)
     // 一旦视觉误差已经明显进入弯道，就不允许它在出弯阶段重新介入。
     static int preview_turn_sign = 0;
     static bool preview_committed = false;
+    static bool preview_entry_active = false;
 
     // --- Vehicle stopped/idle state reset ---
     if (SystemData.Stop == 1) {
         full_loss_stop_latched = false;
         preview_turn_sign = 0;
         preview_committed = false;
+        preview_entry_active = false;
 
         Speed_Goal_l = 0.0f;
         Speed_Goal_r = 0.0f;
@@ -544,6 +546,11 @@ void speed_dif_cascade(float inner_dt)
         const bool preview_turn_active =
             std::fabs(preview_gyro_bias) > 0.01f;
 
+        // 只表示“视觉还未明确进入弯道”的预判阶段。
+        preview_entry_active =
+            preview_turn_active &&
+            !preview_committed;
+
         if (full_loss_non_ring) {
             control_raw_steer_error = 0.0f;
 
@@ -560,6 +567,7 @@ void speed_dif_cascade(float inner_dt)
 
             preview_turn_sign = 0;
             preview_committed = false;
+            preview_entry_active = false;
 
             cascade_ctrl.reset_runtime_state();
 
@@ -858,6 +866,23 @@ void speed_dif_cascade(float inner_dt)
         }
     } else {
         effective_max_diff = 0.0f;
+    }
+
+    // 预判只允许“轻转向”，不能在中线还接近中心时把内轮压到 0。
+    // 一旦 Raw 已达到 kCurvePreviewCommitRawError，preview_committed=true，
+    // 此限制自动失效，正常弯道仍可使用完整差速能力。
+    if (preview_entry_active &&
+        !preview_committed &&
+        Speed_Goal > 0.0f) {
+
+        const float preview_max_diff = std::max(
+            0.0f,
+            Speed_Goal -
+            car_config::kCurvePreviewMinInnerWheelSpeed);
+
+        effective_max_diff = std::min(
+            effective_max_diff,
+            preview_max_diff);
     }
 
     dbg_max_diff = effective_max_diff;
