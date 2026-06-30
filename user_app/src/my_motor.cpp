@@ -269,9 +269,12 @@ void Speed_PID_L(void)
 {
     speed_erro_L = Speed_Goal_l - speed_encoder_L;
 
+    static float last_goal_l = 0.0f;
+
     if (Speed_Goal_l <= 0.02f) {
         speed_out_l = 0.0f;
         speed_last_erro_L = 0.0f;
+        last_goal_l = 0.0f;
         return;
     }
 
@@ -280,7 +283,12 @@ void Speed_PID_L(void)
         speed_out_l = std::copysign(
             car_config::kMotorStartBasePwm + std::fabs(Speed_Goal_l) * car_config::kSpeedFeedforwardGain,
             Speed_Goal_l);
+    } else if (last_goal_l > 0.02f) {
+        // Step change during runtime
+        float delta_goal = Speed_Goal_l - last_goal_l;
+        speed_out_l += delta_goal * car_config::kSpeedFeedforwardGain;
     }
+    last_goal_l = Speed_Goal_l;
 
     // Incremental PI speed loop. With no minimum wheel speed, positive targets do not reverse-drive.
     speed_out_l += speed_I_l * speed_erro_L + speed_P_l * (speed_erro_L - speed_last_erro_L);
@@ -297,9 +305,12 @@ void Speed_PID_R(void)
 {
     speed_erro_R = Speed_Goal_r - speed_encoder_R;
 
+    static float last_goal_r = 0.0f;
+
     if (Speed_Goal_r <= 0.02f) {
         speed_out_r = 0.0f;
         speed_last_erro_R = 0.0f;
+        last_goal_r = 0.0f;
         return;
     }
 
@@ -308,7 +319,12 @@ void Speed_PID_R(void)
         speed_out_r = std::copysign(
             car_config::kMotorStartBasePwm + std::fabs(Speed_Goal_r) * car_config::kSpeedFeedforwardGain,
             Speed_Goal_r);
+    } else if (last_goal_r > 0.02f) {
+        // Step change during runtime
+        float delta_goal = Speed_Goal_r - last_goal_r;
+        speed_out_r += delta_goal * car_config::kSpeedFeedforwardGain;
     }
+    last_goal_r = Speed_Goal_r;
 
     // Incremental PI speed loop. With no minimum wheel speed, positive targets do not reverse-drive.
     speed_out_r += speed_I_r * speed_erro_R + speed_P_r * (speed_erro_R - speed_last_erro_R);
