@@ -12,6 +12,10 @@ void lq_quadrature_encoder_demo(void);
 void lq_quadrature_encoder_kernel_demo(void);
 void lq_user_encoder_demo(void);
 void lq_car_encoder_test_demo(void);
+int lq_motor_pwm_encoder_diag(void);
+int lq_encoder_hand_push_diag(void);
+int lq_forward_pwm_sweep_diag(void);
+int lq_speed_loop_step_diag(void);
 void lq_line_patrol_debug_demo(void); // 添加巡线算法调试图传 Demo
 void lq_udp_center_line_send_one_frame(lq_udp_client &client, int quality); // 非阻塞版：发送一帧中线叠加图（供主循环调用）
 void lq_speed_pid_tuning_demo(void);  // 速度环PID调参Demo
@@ -34,6 +38,9 @@ void lq_camera_video_demo(void);   // 摄像头视频录制测试
 void lq_ncnn_infer_demo(void);     // NCNN推理验证Demo（红色标记检测模型推理）
 void lq_ncnn_image_infer_demo(void); // NCNN单图推理测试（读取test.jpg）
 void lq_llm_pid_autotune_demo(void); // LLM自动PID调参Demo（配合llm-pid-tuner使用）
+void lq_udp_llm_pid_autotune_demo(void); // UDP版LLM自动PID调参Demo（配合tuner.py --udp无线调参）
+void lq_motor_id_demo(void);              // 电机辨识：PWM阶跃扫描，采集摩擦力/负载模型
+void lq_pwm_quick_test(void);             // 快速开环PWM测试
 void lq_parameter_step_tuning_demo(void); // 33. PARAMETER_TUNING_METHODS.md 一体化分步调参Demo
 void lq_parameter_step_interactive_demo(void); // 33. 交互式分步调试入口（输入编号运行对应测试）
 int lq_left_ring_exit_recommend_demo(void); // 34. 左环岛出环防兜圈专项Demo

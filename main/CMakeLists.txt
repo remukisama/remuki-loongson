@@ -24,16 +24,31 @@ aux_source_directory(${PROJECT_SOURCE_DIR}/../libraries/app/gyro SRC)
 aux_source_directory(${PROJECT_SOURCE_DIR}/../libraries/app/display SRC)
 aux_source_directory(${PROJECT_SOURCE_DIR}/../libraries/common/src SRC)
 aux_source_directory(${PROJECT_SOURCE_DIR}/../libraries/drv/src SRC)
-aux_source_directory(${PROJECT_SOURCE_DIR}/../example/src SRC)
-aux_source_directory(${PROJECT_SOURCE_DIR}/../user_app/src SRC)
 
-# 运行时安全层以 #include "my_motor.cpp" 的方式复用既有控制律。
-# 因此必须从独立编译单元中移除原始 my_motor.cpp，避免同一符号定义两次。
-set(LQ_RUNTIME_SAFETY_WRAPPER "${PROJECT_SOURCE_DIR}/../user_app/src/my_motor_runtime_patch.cpp")
-if (EXISTS "${LQ_RUNTIME_SAFETY_WRAPPER}")
-    list(REMOVE_ITEM SRC "${PROJECT_SOURCE_DIR}/../user_app/src/my_motor.cpp")
-    message(STATUS "Runtime safety wrapper enabled: ${LQ_RUNTIME_SAFETY_WRAPPER}")
-endif()
+set(LQ_USER_APP_SOURCES
+    ${PROJECT_SOURCE_DIR}/../user_app/src/camera_config_safety.cpp
+    ${PROJECT_SOURCE_DIR}/../user_app/src/encoder.cpp
+    ${PROJECT_SOURCE_DIR}/../user_app/src/gpio_protect_heartbeat.cpp
+    ${PROJECT_SOURCE_DIR}/../user_app/src/image.cpp
+    ${PROJECT_SOURCE_DIR}/../user_app/src/image_cv.cpp
+    ${PROJECT_SOURCE_DIR}/../user_app/src/motion_feedback_guard_threadsafe.cpp
+    ${PROJECT_SOURCE_DIR}/../user_app/src/my_cascade_pid.cpp
+    ${PROJECT_SOURCE_DIR}/../user_app/src/my_motor_runtime_patch.cpp
+    ${PROJECT_SOURCE_DIR}/../user_app/src/my_mpu6050.cpp
+    ${PROJECT_SOURCE_DIR}/../user_app/src/ncnn_inference.cpp
+    ${PROJECT_SOURCE_DIR}/../user_app/src/red_marker_detect.cpp
+)
+
+set(LQ_RUNTIME_HELPER_SOURCES
+    ${PROJECT_SOURCE_DIR}/../example/src/24_lq_line_patrol_debug_demo.cpp
+    ${PROJECT_SOURCE_DIR}/../example/src/37_lq_motor_pwm_encoder_diag.cpp
+    ${PROJECT_SOURCE_DIR}/../example/src/36_lq_vision_capture_demo.cpp
+    ${PROJECT_SOURCE_DIR}/../example/src/38_lq_udp_llm_pid_autotune_demo.cpp
+    ${PROJECT_SOURCE_DIR}/../example/src/39_lq_motor_id_demo.cpp
+    ${PROJECT_SOURCE_DIR}/../example/src/40_lq_pwm_quick_test.cpp
+)
+
+list(APPEND SRC ${LQ_USER_APP_SOURCES} ${LQ_RUNTIME_HELPER_SOURCES})
 
 # 指定所用的头文件路径
 include_directories(

@@ -12,16 +12,15 @@ const auto timer_interval_1 = std::chrono::milliseconds(5);
 
 static void print_usage(const char *program)
 {
-    std::printf("Usage: %s --mode=<car|tune|encoder-test|encoder512|vision-debug|vision-capture|speed-tune> [--unsafe-dev-mode]\n", program);
-    std::printf("  --mode=car           competition control mode\n");
-    std::printf("  --mode=tune          interactive parameter tuning\n");
-    std::printf("  --mode=encoder-test  encoder direction test\n");
-    std::printf("  --mode=encoder512    encoder UDP diagnostics\n");
-    std::printf("  --mode=vision-debug  vision debug mode\n");
-    std::printf("  --mode=vision-capture save raw camera frames and patrol overlays\n");
-    std::printf("  --mode=speed-tune    forward-only speed-loop tune\n");
-    std::printf("  --mode=speed-return  safe-stop placeholder\n");
-    std::printf("  --unsafe-dev-mode    bypass gpio_manager readiness; never use on track\n");
+    std::printf("Usage: %s --mode=<car|motor-pwm-test|encoder-hand-test|forward-pwm-sweep|speed-loop-step|udp-pid-autotune|motor-id> [--unsafe-dev-mode]\n", program);
+    std::printf("  --mode=car             competition control mode\n");
+    std::printf("  --mode=motor-pwm-test   airborne PWM/encoder direction diagnostic\n");
+    std::printf("  --mode=encoder-hand-test read-only hand-push encoder diagnostic\n");
+    std::printf("  --mode=forward-pwm-sweep forward-only PWM startup sweep\n");
+    std::printf("  --mode=speed-loop-step   airborne wheel-speed PI step diagnostic\n");
+    std::printf("  --mode=udp-pid-autotune  UDP wireless LLM auto PID tuning\n");
+    std::printf("  --mode=motor-id          motor identification: PWM step sweep for load model\n");
+    std::printf("  --unsafe-dev-mode       bypass initial gpio_manager readiness; never use on track\n");
 }
 
 static std::string parse_mode(int argc, char **argv, bool &unsafe_dev_mode)
@@ -66,41 +65,130 @@ int main(int argc, char **argv)
 
     gpio_protect_heartbeat_init();
 
-    if (run_mode == "tune") {
-        lq_parameter_step_interactive_demo();
-        gpio_protect_heartbeat_deinit();
-        return 0;
-    }
-    if (run_mode == "encoder-test") {
-        lq_car_encoder_test_demo();
-        gpio_protect_heartbeat_deinit();
-        return 0;
-    }
-    if (run_mode == "vision-debug") {
-        lq_line_patrol_debug_demo();
-        gpio_protect_heartbeat_deinit();
-        return 0;
-    }
-    if (run_mode == "vision-capture") {
-        const int ret = lq_vision_capture_demo();
+    if (run_mode == "motor-pwm-test") {
+        if (!unsafe_dev_mode && !gpio_protect_heartbeat_require_ready(1500)) {
+            gpio_protect_heartbeat_deinit();
+            return 3;
+        }
+        if (unsafe_dev_mode) {
+            std::printf("[MAIN][UNSAFE] initial gpio_manager readiness check skipped. Direct-drive guard remains active.\n");
+        }
+
+        signal(SIGINT, signal_handler);
+        signal(SIGTERM, signal_handler);
+        signal(SIGHUP, signal_handler);
+        signal(SIGQUIT, signal_handler);
+        signal(SIGPIPE, SIG_IGN);
+
+        const int ret = lq_motor_pwm_encoder_diag();
         gpio_protect_heartbeat_deinit();
         return ret;
     }
-    if (run_mode == "speed-tune") {
-        lq_speed_loop_track_udp_tune_demo();
+
+    if (run_mode == "encoder-hand-test") {
+        if (!unsafe_dev_mode && !gpio_protect_heartbeat_require_ready(1500)) {
+            gpio_protect_heartbeat_deinit();
+            return 3;
+        }
+        if (unsafe_dev_mode) {
+            std::printf("[MAIN][UNSAFE] initial gpio_manager readiness check skipped. Motors stay at zero PWM.\n");
+        }
+
+        signal(SIGINT, signal_handler);
+        signal(SIGTERM, signal_handler);
+        signal(SIGHUP, signal_handler);
+        signal(SIGQUIT, signal_handler);
+        signal(SIGPIPE, SIG_IGN);
+
+        const int ret = lq_encoder_hand_push_diag();
+        gpio_protect_heartbeat_deinit();
+        return ret;
+    }
+
+    if (run_mode == "forward-pwm-sweep") {
+        if (!unsafe_dev_mode && !gpio_protect_heartbeat_require_ready(1500)) {
+            gpio_protect_heartbeat_deinit();
+            return 3;
+        }
+        if (unsafe_dev_mode) {
+            std::printf("[MAIN][UNSAFE] initial gpio_manager readiness check skipped. Direct-drive guard remains active.\n");
+        }
+
+        signal(SIGINT, signal_handler);
+        signal(SIGTERM, signal_handler);
+        signal(SIGHUP, signal_handler);
+        signal(SIGQUIT, signal_handler);
+        signal(SIGPIPE, SIG_IGN);
+
+        const int ret = lq_forward_pwm_sweep_diag();
+        gpio_protect_heartbeat_deinit();
+        return ret;
+    }
+
+    if (run_mode == "speed-loop-step") {
+        if (!unsafe_dev_mode && !gpio_protect_heartbeat_require_ready(1500)) {
+            gpio_protect_heartbeat_deinit();
+            return 3;
+        }
+        if (unsafe_dev_mode) {
+            std::printf("[MAIN][UNSAFE] initial gpio_manager readiness check skipped. Direct-drive guard remains active.\n");
+        }
+
+        signal(SIGINT, signal_handler);
+        signal(SIGTERM, signal_handler);
+        signal(SIGHUP, signal_handler);
+        signal(SIGQUIT, signal_handler);
+        signal(SIGPIPE, SIG_IGN);
+
+        const int ret = lq_speed_loop_step_diag();
+        gpio_protect_heartbeat_deinit();
+        return ret;
+    }
+
+    if (run_mode == "udp-pid-autotune") {
+        if (!unsafe_dev_mode && !gpio_protect_heartbeat_require_ready(1500)) {
+            gpio_protect_heartbeat_deinit();
+            return 3;
+        }
+        if (unsafe_dev_mode) {
+            std::printf("[MAIN][UNSAFE] initial gpio_manager readiness check skipped. Direct-drive guard remains active.\n");
+        }
+
+        signal(SIGINT, signal_handler);
+        signal(SIGTERM, signal_handler);
+        signal(SIGHUP, signal_handler);
+        signal(SIGQUIT, signal_handler);
+        signal(SIGPIPE, SIG_IGN);
+
+        lq_udp_llm_pid_autotune_demo();
         gpio_protect_heartbeat_deinit();
         return 0;
     }
-    if (run_mode == "speed-return") {
-        lq_speed_loop_recovery_return_demo();
+
+    if (run_mode == "motor-id") {
+        signal(SIGINT, signal_handler);
+        signal(SIGTERM, signal_handler);
+        signal(SIGHUP, signal_handler);
+        signal(SIGQUIT, signal_handler);
+        signal(SIGPIPE, SIG_IGN);
+
+        lq_motor_id_demo();
         gpio_protect_heartbeat_deinit();
         return 0;
     }
-    if (run_mode == "encoder512") {
-        lq_encoder512_udp_diagnose_demo();
+
+    if (run_mode == "pwm-quick-test") {
+        signal(SIGINT, signal_handler);
+        signal(SIGTERM, signal_handler);
+        signal(SIGHUP, signal_handler);
+        signal(SIGQUIT, signal_handler);
+        signal(SIGPIPE, SIG_IGN);
+
+        lq_pwm_quick_test();
         gpio_protect_heartbeat_deinit();
         return 0;
     }
+
     if (run_mode != "car") {
         std::printf("[MAIN] unsupported mode: %s\n", run_mode.c_str());
         print_usage(argv[0]);

@@ -24,7 +24,7 @@ int Zebra_num2=1000;//停车斑马线编码器计数设定值
 
 static int IntervalLow = 0, IntervalHigh = 0;      //定义高低扫描区间
 static uint8_t *PicTemp;
-static int Ysite = 0, Xsite = 0;   
+static int Ysite = 0, Xsite = 0;
 ImageDealDatatypedef ImageDeal[60]; //最终图像
 uint8 ExtenLFlag = 0;  //是否左延长标志
 uint8 ExtenRFlag = 0;  //是否右延长标志
@@ -244,7 +244,7 @@ void Data_Settings(void)           //参数赋值
 
   Circle[0]=TP_O1;
   Circle[1]=TP_O2;
-  
+
 //   SteerPIDdata.Dl = 21.07;
 //   SteerPIDdata.Dh = 5.0;
 //   Left_Speed_Co_one_minus =0.06; Right_Speed_Co_one_minus=0.06 ;   //0.06
@@ -488,7 +488,7 @@ static void DrawLinesProcess(void)  //////不用更改
     LimitH(IntervalHigh);  //确定右扫描区间并进行限制
     GetJumpPointFromDet(PicTemp, 'L', IntervalLow, IntervalHigh,&JumpPoint[0]);
 
-    
+
     if (JumpPoint[0].type =='W')                                                    //如果本行左边线不正常跳变，即这10个点都是白的
     {
       ImageDeal[Ysite].LeftBorder = predict_lost_border(Ysite, true);                 //本行左边线用下方两行预测，失败再退回上一行
@@ -515,7 +515,7 @@ static void DrawLinesProcess(void)  //////不用更改
     {
       for (Xsite = (ImageDeal[Ysite].RightBorder - 1);
             Xsite >= (ImageDeal[Ysite].LeftBorder + 1);
-            Xsite--)    
+            Xsite--)
       {
         if ((*(PicTemp + Xsite) != 0) && (*(PicTemp + Xsite + 1) == 0))
         {
@@ -531,7 +531,7 @@ static void DrawLinesProcess(void)  //////不用更改
     {
       for (Xsite = (ImageDeal[Ysite].LeftBorder + 1);
             Xsite <= (ImageDeal[Ysite].RightBorder - 1);
-            Xsite++)    
+            Xsite++)
       {
         if ((*(PicTemp + Xsite) != 0) && (*(PicTemp + Xsite - 1) == 0))
         {
@@ -543,7 +543,7 @@ static void DrawLinesProcess(void)  //////不用更改
     }
 
 
-    
+
 
     //重新确定那些大跳变的边缘
     if (( ImageDeal[Ysite].IsLeftFind == 'H'||ImageDeal[Ysite].IsRightFind == 'H'))
@@ -703,7 +703,7 @@ static void DrawLinesProcess(void)  //////不用更改
       break;
     }
 
-    else if (  ImageDeal[Ysite].RightBorder <= 10||ImageDeal[Ysite].LeftBorder >= 70) 
+    else if (  ImageDeal[Ysite].RightBorder <= 10||ImageDeal[Ysite].LeftBorder >= 70)
             {
               ImageStatus.OFFLine = Ysite + 1;
               break;
@@ -1464,7 +1464,7 @@ static bool CrossCornerRepair(void)
 // ============================================================
 
 
-static void RouteFilter(void) 
+static void RouteFilter(void)
 {
   for (Ysite = 57; Ysite >= (ImageStatus.OFFLine + 5);   //改为57，防止 Ysite+2 时发生ImageDeal[60]数组越界导致奔溃
        Ysite--)                                     //从开始位到停止位
@@ -1501,11 +1501,11 @@ static void RouteFilter(void)
     // 【重点】加强滤波，从3点平均改为5点滑动平均，减少抖动
     ImageDeal[Ysite].Center = clamp_image_x((ImageDeal[Ysite - 2].Center + 2*ImageDeal[Ysite - 1].Center + 4*ImageDeal[Ysite].Center + 2*ImageDeal[Ysite + 1].Center + ImageDeal[Ysite + 2].Center) /10);
   }
-  
+
 }
 
-void GetDet() 
-{    
+void GetDet()
+{
   float DetTemp = 0;
   int TowPoint = 0;
   float UnitAll = 0;
@@ -1527,45 +1527,45 @@ void GetDet()
   if (TowPoint >= 49)   TowPoint = 49;
 
   if ((TowPoint - 5) >= ImageStatus.OFFLine) //前瞻取设定前瞻还是可视距离  需要分情况讨论 正常前瞻（与截止行相差5行）
-  {                                          
-    for (int Ysite = (TowPoint - 5); Ysite < TowPoint; Ysite++) 
+  {
+    for (int Ysite = (TowPoint - 5); Ysite < TowPoint; Ysite++)
     {
       DetTemp = DetTemp + Weighting[TowPoint - Ysite - 1] * (ImageDeal[Ysite].Center);
       UnitAll = UnitAll + Weighting[TowPoint - Ysite - 1];
     }
-    for (Ysite = (TowPoint + 5); Ysite > TowPoint; Ysite--) 
+    for (Ysite = (TowPoint + 5); Ysite > TowPoint; Ysite--)
     {
       DetTemp += Weighting[-TowPoint + Ysite - 1] * (ImageDeal[Ysite].Center);
       UnitAll += Weighting[-TowPoint + Ysite - 1];
     }
     DetTemp = (ImageDeal[TowPoint].Center + DetTemp) / (UnitAll + 1);
 
-  } 
+  }
   else if (TowPoint > ImageStatus.OFFLine)  //正常前瞻与截止行不相差5行
   {
-    for (Ysite = ImageStatus.OFFLine; Ysite < TowPoint; Ysite++) 
+    for (Ysite = ImageStatus.OFFLine; Ysite < TowPoint; Ysite++)
     {
       DetTemp += Weighting[TowPoint - Ysite - 1] * (ImageDeal[Ysite].Center);
       UnitAll += Weighting[TowPoint - Ysite - 1];
     }
     for (Ysite = (TowPoint + TowPoint - ImageStatus.OFFLine); Ysite > TowPoint;
-         Ysite--) 
+         Ysite--)
     {
       DetTemp += Weighting[-TowPoint + Ysite - 1] * (ImageDeal[Ysite].Center);
       UnitAll += Weighting[-TowPoint + Ysite - 1];
     }
     DetTemp = (ImageDeal[TowPoint].Center + DetTemp) / (UnitAll + 1);
-  } 
+  }
   else if (ImageStatus.OFFLine < 49)  //前瞻等于截至行
   {
-    for (Ysite = (ImageStatus.OFFLine + 3); Ysite > ImageStatus.OFFLine;Ysite--) 
+    for (Ysite = (ImageStatus.OFFLine + 3); Ysite > ImageStatus.OFFLine;Ysite--)
     {
       DetTemp += Weighting[-TowPoint + Ysite - 1] * (ImageDeal[Ysite].Center);
       UnitAll += Weighting[-TowPoint + Ysite - 1];
     }
     DetTemp = (ImageDeal[ImageStatus.OFFLine].Center + DetTemp) / (UnitAll + 1);
 
-  } 
+  }
   else
   {
     if (ImageStatus.OFFLine >= car_config::kBadVisionCenterHoldOfflineThreshold) {
@@ -1608,39 +1608,39 @@ void GetDet()
   //     TowPoint = ImageParameter.OFFLine + 1;
   // if (TowPoint >= 49) TowPoint = 49;
 
-  // if ((TowPoint - 5) >= ImageParameter.OFFLine) 
+  // if ((TowPoint - 5) >= ImageParameter.OFFLine)
   // { //前瞻取设定前瞻还是可视距离  需要分情况讨论
-  //     for (int Ysite = (TowPoint - 5); Ysite < TowPoint; Ysite++) 
+  //     for (int Ysite = (TowPoint - 5); Ysite < TowPoint; Ysite++)
   //     {
   //         DetTemp = DetTemp + Weighting[TowPoint - Ysite - 1] * (ImageDeal[Ysite].Center);
   //         UnitAll = UnitAll + Weighting[TowPoint - Ysite - 1];
   //     }
-  //     for (Ysite = (TowPoint + 5); Ysite > TowPoint; Ysite--) 
+  //     for (Ysite = (TowPoint + 5); Ysite > TowPoint; Ysite--)
   //     {
   //         DetTemp += Weighting[-TowPoint + Ysite - 1] * (ImageDeal[Ysite].Center);
   //         UnitAll += Weighting[-TowPoint + Ysite - 1];
   //     }
   //     DetTemp = (ImageDeal[TowPoint].Center + DetTemp) / (UnitAll + 1);
   // }
-  // else if (TowPoint > ImageParameter.OFFLine) 
+  // else if (TowPoint > ImageParameter.OFFLine)
   // {
-  //     for (Ysite = ImageParameter.OFFLine; Ysite < TowPoint; Ysite++) 
+  //     for (Ysite = ImageParameter.OFFLine; Ysite < TowPoint; Ysite++)
   //     {
   //         DetTemp += Weighting[TowPoint - Ysite - 1] * (ImageDeal[Ysite].Center);
   //         UnitAll += Weighting[TowPoint - Ysite - 1];
   //     }
   //     for (Ysite = (TowPoint + TowPoint - ImageParameter.OFFLine); Ysite > TowPoint;
-  //         Ysite--) 
+  //         Ysite--)
   //     {
   //         DetTemp += Weighting[-TowPoint + Ysite - 1] * (ImageDeal[Ysite].Center);
   //         UnitAll += Weighting[-TowPoint + Ysite - 1];
   //     }
   //     DetTemp = (ImageDeal[Ysite].Center + DetTemp) / (UnitAll + 1);
   // }
-  // else if (ImageParameter.OFFLine < 49) 
+  // else if (ImageParameter.OFFLine < 49)
   // {
   //     for (Ysite = (ImageParameter.OFFLine + 3); Ysite > ImageParameter.OFFLine;
-  //         Ysite--) 
+  //         Ysite--)
   //     {
   //         DetTemp += Weighting[-TowPoint + Ysite - 1] * (ImageDeal[Ysite].Center);
   //         UnitAll += Weighting[-TowPoint + Ysite - 1];
@@ -1651,15 +1651,15 @@ void GetDet()
   //     DetTemp = (float)ImageParameter.Det_True;//OFFLine>50
 
   // ImageParameter.Det_True = DetTemp;
-  // ImageStatus.TowPoint_True = TowPoint;  
+  // ImageStatus.TowPoint_True = TowPoint;
 }
 
-//void GetDet() 
+//void GetDet()
 // {
 //   float DetTemp = 0;
 //   int TowPoint = 0;
 //   float UnitAll = 0;
-  
+
 //   if (ImageStatus.Road_type == RightCirque)
 //   {
 //     TowPoint = 30;
@@ -1673,45 +1673,45 @@ void GetDet()
 //   //if (TowPoint >= 49)   TowPoint = 49;
 
 //   if ((TowPoint - 5) >= ImageStatus.OFFLine) //前瞻取设定前瞻还是可视距离  需要分情况讨论
-//   {                                          
-//     for (int Ysite = (TowPoint - 5); Ysite < TowPoint; Ysite++) 
+//   {
+//     for (int Ysite = (TowPoint - 5); Ysite < TowPoint; Ysite++)
 //     {
 //       DetTemp = DetTemp + Weighting[TowPoint - Ysite - 1] * (ImageDeal[Ysite].Center);
 //       UnitAll = UnitAll + Weighting[TowPoint - Ysite - 1];
 //     }
-//     for (Ysite = (TowPoint + 5); Ysite > TowPoint; Ysite--) 
+//     for (Ysite = (TowPoint + 5); Ysite > TowPoint; Ysite--)
 //     {
 //       DetTemp += Weighting[-TowPoint + Ysite - 1] * (ImageDeal[Ysite].Center);
 //       UnitAll += Weighting[-TowPoint + Ysite - 1];
 //     }
 //     DetTemp = (ImageDeal[TowPoint].Center + DetTemp) / (UnitAll + 1);
 
-//   } 
-//   else if (TowPoint > ImageStatus.OFFLine) 
+//   }
+//   else if (TowPoint > ImageStatus.OFFLine)
 //   {
-//     for (Ysite = ImageStatus.OFFLine; Ysite < TowPoint; Ysite++) 
+//     for (Ysite = ImageStatus.OFFLine; Ysite < TowPoint; Ysite++)
 //     {
 //       DetTemp += Weighting[TowPoint - Ysite - 1] * (ImageDeal[Ysite].Center);
 //       UnitAll += Weighting[TowPoint - Ysite - 1];
 //     }
 //     for (Ysite = (TowPoint + TowPoint - ImageStatus.OFFLine); Ysite > TowPoint;
-//          Ysite--) 
+//          Ysite--)
 //     {
 //       DetTemp += Weighting[-TowPoint + Ysite - 1] * (ImageDeal[Ysite].Center);
 //       UnitAll += Weighting[-TowPoint + Ysite - 1];
 //     }
 //     DetTemp = (ImageDeal[Ysite].Center + DetTemp) / (UnitAll + 1);
-//   } 
-//   else if (ImageStatus.OFFLine < 49) 
+//   }
+//   else if (ImageStatus.OFFLine < 49)
 //   {
-//     for (Ysite = (ImageStatus.OFFLine + 3); Ysite > ImageStatus.OFFLine;Ysite--) 
+//     for (Ysite = (ImageStatus.OFFLine + 3); Ysite > ImageStatus.OFFLine;Ysite--)
 //     {
 //       DetTemp += Weighting[-TowPoint + Ysite - 1] * (ImageDeal[Ysite].Center);
 //       UnitAll += Weighting[-TowPoint + Ysite - 1];
 //     }
 //     DetTemp = (ImageDeal[ImageStatus.OFFLine].Center + DetTemp) / (UnitAll + 1);
 
-//   } 
+//   }
 //   else
 //   {
 //     DetTemp =ImageStatus.Det_True;                                                     //如果是出现OFFLine>50情况，保持上一次的偏差值
@@ -2062,7 +2062,7 @@ void Element_Judgment_Right_Rings()
 
 //左圆环判断
 void Element_Handle_Left_Rings()
-{   
+{
 
     // // 左圆环处理，进环后替换原舵机中线逻辑，改为固定差速
     // if (ImageFlag.image_element_rings_flag == 6 || ImageFlag.image_element_rings_flag ==7)
@@ -2398,7 +2398,7 @@ void Element_Handle_Left_Rings()
 //  Sample usage:   Element_Handle_Right_Rings();
 //-------------------------------------------------------------
 void Element_Handle_Right_Rings()
-{   
+{
 
     // // 右圆环同理
     // if (ImageFlag.image_element_rings_flag == 6 || ImageFlag.image_element_rings_flag ==7)
@@ -2696,7 +2696,7 @@ void Element_Handle_Zebra()//斑马线处理
             {
                 ImageFlag.Zebra_Flag = 0;
                 ImageStatus.Barn_Lenth=0;
-                
+
             }
         }
         else if(Garage_Location_Flag >= Garage_num)
@@ -2712,16 +2712,16 @@ void Element_Handle_Zebra()//斑马线处理
 }
 
 //停车
-void Stop_Test() 
+void Stop_Test()
 {
-  if (ImageStatus.Stop_lenth * OX > 50 && ImageFlag.image_element_rings == 0) 
+  if (ImageStatus.Stop_lenth * OX > 50 && ImageFlag.image_element_rings == 0)
   {
- 
+
       //      if (ImageStatus.OFFLine >= 55)           //如果电磁很小并且可视距离基本没有就表示出界
       //           SystemData.Stop = 1;
       // else SystemData.Stop = 0;
       if (ImageStatus.OFFLine >= 55 )           //如果电磁很小并且可视距离基本没有就表示出界
-      {      
+      {
             SystemData.Stop = 1;
             Speed_Goal_l = 0;
             Speed_Goal_r = 0;
@@ -2745,21 +2745,21 @@ void Stop_Test()
     SystemData.Stop = 0;
 }
 
-void Element_Handle() 
+void Element_Handle()
 {
   if (ImageFlag.image_element_rings == 1 && ImageStatus.Road_type == LeftCirque)
       Element_Handle_Left_Rings();
   else if(ImageFlag.image_element_rings == 2 && ImageStatus.Road_type == RightCirque)
       Element_Handle_Right_Rings();
- 
+
 //      Element_Handle_Zebra(); //斑马线停车处理
 }
 
 //用于加速的直道检测
-void Straightacc_Test(void) 
+void Straightacc_Test(void)
 {
   int sum = 0;
-  for (Ysite = 55; Ysite > ImageStatus.OFFLine + 1; Ysite--) 
+  for (Ysite = 55; Ysite > ImageStatus.OFFLine + 1; Ysite--)
   {
     sum += (ImageDeal[Ysite].Center - ImageStatus.MiddleLine) *(ImageDeal[Ysite].Center - ImageStatus.MiddleLine);
   }
@@ -2768,17 +2768,17 @@ void Straightacc_Test(void)
   // if ( variance_acc < ImageStatus.variance_acc
   //   && ImageStatus.OFFLine <= 15
   //   && ImageStatus.Left_Line < 10
-  //   && ImageStatus.Right_Line < 10 
-  //   ) 
+  //   && ImageStatus.Right_Line < 10
+  //   )
   // 直道判断：方差阈值更小，可视距离更短，门槛更高
   if ( variance_acc < 8  // 原阈值降低，更严格
     && ImageStatus.OFFLine <= 10 // 可视距离更近，更严格
     && ImageStatus.Left_Line < 5
-    && ImageStatus.Right_Line < 5 
+    && ImageStatus.Right_Line < 5
     )
     {
       ImageStatus.straight_acc = 1;
-    } 
+    }
     else
     ImageStatus.straight_acc = 0;
 
@@ -2786,30 +2786,24 @@ void Straightacc_Test(void)
     // if ( variance_acc < ImageStatus.variance
     //   && ImageStatus.OFFLine <= 15
     //   && ImageStatus.Left_Line < 10
-    //   && ImageStatus.Right_Line < 10 
-    //   ) 
+    //   && ImageStatus.Right_Line < 10
+    //   )
     // 直线判断同理提高门槛
     if ( variance_acc < car_config::kStraightVarianceAccThreshold
       && ImageStatus.OFFLine <= car_config::kStraightOfflineMax
       && ImageStatus.Left_Line < car_config::kStraightLeftLineMax
-      && ImageStatus.Right_Line < car_config::kStraightRightLineMax 
+      && ImageStatus.Right_Line < car_config::kStraightRightLineMax
       )
       {
         ImageStatus.straight_acc_flag=1;
 
-        // 直道增大死区，防止抖动
-        DEAD_BAND = car_config::kSteerDeadBandStraight;
-
-      } 
+      }
       else
       {
         ImageStatus.straight_acc_flag=0;
 
-        // 弯道恢复小死区，保证转向灵敏度
-        DEAD_BAND = car_config::kSteerDeadBandCurve;
-
       }
-      
+
       // 添加UI显示状态更新：当没有在特殊元素内时，实时反馈当前赛道是直道还是常规（弯道等）
       if (ImageFlag.image_element_rings == 0 && ImageStatus.Road_type != Barn_in) {
           if (ImageStatus.straight_acc_flag == 1) {
@@ -2825,18 +2819,18 @@ void Straightacc_Test(void)
 }
 
 //用于变参数的直道检测。短直线有BUG而且没必要
-void Straight_Test_2(void) 
+void Straight_Test_2(void)
 {
  float midd_k, sum;
  midd_k = (ImageDeal[55].Center - ImageDeal[ImageStatus.OFFLine + 1].Center) /(float)(55 - ImageStatus.OFFLine - 1);
- for (Ysite = 55; Ysite > ImageStatus.OFFLine + 1; Ysite--) 
+ for (Ysite = 55; Ysite > ImageStatus.OFFLine + 1; Ysite--)
  {
    ImageDeal[Ysite].mid_temp =ImageDeal[55].Center - midd_k * (55 - Ysite) + 0.5;
    sum += pow(ImageDeal[Ysite].Center - ImageDeal[Ysite].mid_temp, 2);
  }
 
  variance = sum / (54 - ImageStatus.OFFLine);
- if (variance < ImageStatus.variance && ImageStatus.OFFLine <= 9 ) 
+ if (variance < ImageStatus.variance && ImageStatus.OFFLine <= 9 )
  {
      ImageStatus.Road_type = Straight;
  }
@@ -2850,13 +2844,13 @@ void Element_Test()
 //  }
 
 
-  if (ImageStatus.Road_type != Ramp)/*&& circle_num < 2 */    //圆环检测//&& ImageStatus.Road_type != Ramp    
+  if (ImageStatus.Road_type != Ramp)/*&& circle_num < 2 */    //圆环检测//&& ImageStatus.Road_type != Ramp
   {
     Element_Judgment_Left_Rings();           //左圆环检测
     Element_Judgment_Right_Rings();          //右圆环检测
   }
 
-  
+
 }
 
 
@@ -2881,7 +2875,7 @@ static void get_imgdisplay()
     for (int Ysite = 0; Ysite < 60; Ysite++) {
         for (int Xsite = 0; Xsite < 80; Xsite++) {
             // 复制原始二值化图像（img1是二值化后的数组，0=黑，1=白）
-            imgdisplay[Ysite][Xsite] = img1[Ysite][Xsite]; 
+            imgdisplay[Ysite][Xsite] = img1[Ysite][Xsite];
         }
     }
 
@@ -2890,19 +2884,19 @@ static void get_imgdisplay()
         // 标记左边界（确保不越界）
         int left = ImageDeal[Ysite].LeftBorder;
         if (left >= 0 && left < 80) {
-            imgdisplay[Ysite][left] = PIXEL_LEFT; 
+            imgdisplay[Ysite][left] = PIXEL_LEFT;
         }
 
         // 标记右边界
         int right = ImageDeal[Ysite].RightBorder;
         if (right >= 0 && right < 80) {
-            imgdisplay[Ysite][right] = PIXEL_RIGHT; 
+            imgdisplay[Ysite][right] = PIXEL_RIGHT;
         }
 
         // 标记中线
         int center = ImageDeal[Ysite].Center;
         if (center >= 0 && center < 80) {
-            imgdisplay[Ysite][center] = PIXEL_CENTER; 
+            imgdisplay[Ysite][center] = PIXEL_CENTER;
         }
     }
 }
@@ -2928,7 +2922,7 @@ void imageprocess(void)
     ImageDeal[Ysite].RightTemp = 79;
     ImageDeal[Ysite].close_LeftBorder = 0;//靠边边界
     ImageDeal[Ysite].close_RightBorder = 79;
-    }  
+    }
 
   drawfirstline();//绘制底边
   DrawLinesProcess();//获取基本边线
@@ -2939,7 +2933,7 @@ void imageprocess(void)
   if (g_enable_element_process) {
     Element_Test();
   }
-  
+
   if(!g_enable_element_process || ImageFlag.image_element_rings == 0)
     {DrawExtensionLine(); } //绘制延长线
 

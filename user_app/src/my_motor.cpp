@@ -32,40 +32,25 @@ static std::mutex g_vision_mutex;
 #include <cmath>
 
 // ===============================================================================
-// [1] 全局变量与硬件对象定�?
+// [1] Global state and hardware objects
 // ===============================================================================
 
-// 全局退出标志与多线程安�?
+// Global exit flags.
 std::atomic<bool> g_program_exit(false);
 std::atomic<bool> exit_flag(false);
 
-// 电机与引脚配�?
-// 左电�?PWM：PIN81, 频率10000Hz, 初始占空�?000, 极性反�?
-ls_atim_pwm* motor_L = nullptr;  // 延迟初始化，避免全局构造时访问 /dev/mem 导致崩溃
-// 右电�?PWM：PIN82, 频率10000Hz, 初始占空�?000, 极性反�?
-ls_atim_pwm* motor_R = nullptr;  // 延迟初始化，避免全局构造时访问 /dev/mem 导致崩溃
-// 电机方向 GPIO 输出
-ls_gpio* motor_L_Dir = nullptr;  // 延迟初始化，避免全局构造时访问 /dev/mem 导致崩溃
-ls_gpio* motor_R_Dir = nullptr;  // 延迟初始化，避免全局构造时访问 /dev/mem 导致崩溃
+// Motor PWM and direction GPIO objects. They are constructed lazily so global
+// initialization never touches /dev/mem before main() is ready.
+ls_atim_pwm* motor_L = nullptr;
+ls_atim_pwm* motor_R = nullptr;
+ls_gpio* motor_L_Dir = nullptr;
+ls_gpio* motor_R_Dir = nullptr;
 
-// 全局控制参数
-float Left_Speed_Co = 0.0010, Right_Speed_Co =0.0010;
+// Runtime speed target.
 float Speed_Goal = 0.0f;
-float CS=0.1; // 0.55 0.57 0.58
-
-float ZD_Speed_Goal;
-float WD_Speed_Goal;
-
-// 三轮车差速转向专用参数（已完全同�?motor.cpp 验证无误的参数）
-// 最新调试参数：恢复部分死区和适中的P，但保留足够的打角能力以应付U型弯
-float STEER_KP = car_config::kSteerKp;               // 外环P，集中在 car_config.hpp 调整
-float STEER_KD = car_config::kSteerKd;               // 外环D，集中在 car_config.hpp 调整
-float MAX_DIFF_RATIO = car_config::kMaxDiffRatio;    // 差速上�?基础速度*倍率
-int DEAD_BAND = car_config::kSteerDeadBandDefault;   // 巡线偏差死区
-float MIN_SPEED = car_config::kMinWheelSpeedGoal;    // 内轮最低目标速度
-
+// Basic three-stage cascade: visual PID -> gyro PID -> wheel-speed PID.
 // ========================
-// 调试追踪专用变量
+// Debug telemetry state
 // ========================
 float dbg_steer_error = 0.0f;
 float dbg_target_gyro_z = 0.0f;
@@ -168,9 +153,9 @@ void motor_Init(void)
 
     motor_R->atim_pwm_set_active_low_duty(0);
     motor_L->atim_pwm_set_active_low_duty(0);
-    
+
     printf("R:OK!");
-    
+
     motor_R->atim_pwm_enable();
     motor_L->atim_pwm_enable();
     motor_R_Dir->gpio_level_set(GPIO_LOW);
@@ -227,31 +212,29 @@ void motor_Duty_L(int duty)
 
 
 // ===============================================================================
-// [4] 控制器初始化与PID计算
+// [4] Controller initialization and PID loops
 // ===============================================================================
 
 // ==========================
-// [4.1] 速度�?PID
+// [4.1] Wheel-speed PID
 // ==========================
 
 bool Speed_decision(void)
 {
-    // 参考demo，增量式PI控制
-    speed_P_l = car_config::kSpeedPidP;  // 对齐demo参数
-    speed_I_l = car_config::kSpeedPidI;  // 对齐demo参数
-    speed_D_l = car_config::kSpeedPidD;  // 微分D
-    
+    // Incremental PID wheel-speed loop gains.
+    speed_P_l = car_config::kSpeedPidP;
+    speed_I_l = car_config::kSpeedPidI;
+    speed_D_l = car_config::kSpeedPidD;
+
     speed_P_r = car_config::kSpeedPidP;
     speed_I_r = car_config::kSpeedPidI;
     speed_D_r = car_config::kSpeedPidD;
-    
-    MAX_PWM = car_config::kMotorMaxPwm;    // PWM最大限�?
+
+    MAX_PWM = car_config::kMotorMaxPwm;
 
     speed_out_l = 0;
     speed_out_r = 0;
 
-    WD_Speed_Goal = car_config::kCurveSpeedGoal;      // 弯道基础速度
-    ZD_Speed_Goal = car_config::kStraightSpeedGoal;   // 直道基础速度
     cascade_ctrl.init(); // 初始化姿态三串级控制器参�?
     static bool imu_inited = false;
     if (!imu_inited) {
@@ -268,82 +251,62 @@ bool Speed_decision(void)
 void Speed_PID_L(void)
 {
     speed_erro_L = Speed_Goal_l - speed_encoder_L;
-
-    static float last_goal_l = 0.0f;
+    static float speed_prev_erro_L = 0.0f;
 
     if (Speed_Goal_l <= 0.02f) {
         speed_out_l = 0.0f;
         speed_last_erro_L = 0.0f;
-        last_goal_l = 0.0f;
+        speed_prev_erro_L = 0.0f;
         return;
     }
 
-    // If starting from zero, pre-charge the integrator with feedforward to overcome static friction and speed delay
-    if (std::fabs(speed_out_l) < 500.0f) {
-        speed_out_l = std::copysign(
-            car_config::kMotorStartBasePwm + std::fabs(Speed_Goal_l) * car_config::kSpeedFeedforwardGain,
-            Speed_Goal_l);
-    } else if (last_goal_l > 0.02f) {
-        // Step change during runtime
-        float delta_goal = Speed_Goal_l - last_goal_l;
-        speed_out_l += delta_goal * car_config::kSpeedFeedforwardGain;
-    }
-    last_goal_l = Speed_Goal_l;
+    const float delta =
+        speed_P_l * (speed_erro_L - speed_last_erro_L) +
+        speed_I_l * speed_erro_L +
+        speed_D_l * (speed_erro_L - 2.0f * speed_last_erro_L + speed_prev_erro_L);
 
-    // Incremental PI speed loop. With no minimum wheel speed, positive targets do not reverse-drive.
-    speed_out_l += speed_I_l * speed_erro_L + speed_P_l * (speed_erro_L - speed_last_erro_L);
+    speed_out_l += delta;
+    speed_prev_erro_L = speed_last_erro_L;
     speed_last_erro_L = speed_erro_L;
 
     if (speed_out_l > MAX_PWM) speed_out_l = MAX_PWM;
-    if (speed_out_l < -car_config::kSpeedPidBrakePwm) {
-        speed_out_l = -car_config::kSpeedPidBrakePwm;
-    }
+    if (speed_out_l < 0.0f) speed_out_l = 0.0f;
 }
+
 
 
 void Speed_PID_R(void)
 {
     speed_erro_R = Speed_Goal_r - speed_encoder_R;
-
-    static float last_goal_r = 0.0f;
+    static float speed_prev_erro_R = 0.0f;
 
     if (Speed_Goal_r <= 0.02f) {
         speed_out_r = 0.0f;
         speed_last_erro_R = 0.0f;
-        last_goal_r = 0.0f;
+        speed_prev_erro_R = 0.0f;
         return;
     }
 
-    // If starting from zero, pre-charge the integrator with feedforward to overcome static friction and speed delay
-    if (std::fabs(speed_out_r) < 500.0f) {
-        speed_out_r = std::copysign(
-            car_config::kMotorStartBasePwm + std::fabs(Speed_Goal_r) * car_config::kSpeedFeedforwardGain,
-            Speed_Goal_r);
-    } else if (last_goal_r > 0.02f) {
-        // Step change during runtime
-        float delta_goal = Speed_Goal_r - last_goal_r;
-        speed_out_r += delta_goal * car_config::kSpeedFeedforwardGain;
-    }
-    last_goal_r = Speed_Goal_r;
+    const float delta =
+        speed_P_r * (speed_erro_R - speed_last_erro_R) +
+        speed_I_r * speed_erro_R +
+        speed_D_r * (speed_erro_R - 2.0f * speed_last_erro_R + speed_prev_erro_R);
 
-    // Incremental PI speed loop. With no minimum wheel speed, positive targets do not reverse-drive.
-    speed_out_r += speed_I_r * speed_erro_R + speed_P_r * (speed_erro_R - speed_last_erro_R);
+    speed_out_r += delta;
+    speed_prev_erro_R = speed_last_erro_R;
     speed_last_erro_R = speed_erro_R;
 
     if (speed_out_r > MAX_PWM) speed_out_r = MAX_PWM;
-    if (speed_out_r < -car_config::kSpeedPidBrakePwm) {
-        speed_out_r = -car_config::kSpeedPidBrakePwm;
-    }
+    if (speed_out_r < 0.0f) speed_out_r = 0.0f;
 }
 
 
+
 // ===============================================================================
-// [5] 高级控制与串级逻辑
+// [5] Basic cascade control
 // ===============================================================================
 
 //差�?
-// uint16_t CS_LM=50;
-
 // 【中外环替代：姿态串级差速逻辑】将基于 MPU6050 实现三串级：目标角度 -> 目标角角速度 -> 目标差�?
 static void distribute_wheel_speeds(float speed_goal, float diff_speed, float effective_min_wheel) {
     (void)effective_min_wheel;
@@ -365,70 +328,35 @@ static void distribute_wheel_speeds(float speed_goal, float diff_speed, float ef
 
 void speed_dif_cascade(float inner_dt)
 {
-    // --- Status and time variables ---
     static auto last_visual_frame_time_ms = 0LL;
     static uint32_t last_processed_seq = 0;
-
-    static float last_diff_speed = 0.0f;
-    static float last_target_gyro_z = 0.0f;
     static float last_steer_error = 0.0f;
-
-    static float raw_steer_error = 0.0f;
-    static bool simple_curve_active = false;
-
-    static int consecutive_imu_successes = 0;
-    static int consecutive_imu_failures = 0;
-    static bool imu_in_fallback = false;
-
-// --- planned control parameters from outer loop to inner loop ---
+    static float steer_integral = 0.0f;
     static float target_gyro_z = 0.0f;
-    static float fallback_diff = 0.0f;
-    static float max_diff = 0.0f;
-    static float effective_min_wheel = MIN_SPEED;
+    static float raw_steer_error = 0.0f;
 
-    static bool was_in_ring = false;
-    static float last_control_raw_steer_error = 0.0f;
-    static bool raw_steer_initialized = false;
-
-    static bool full_loss_stop_latched = false;
-
-    // 单侧丢线预判只在“入弯阶段”生效一次。
-    // 一旦视觉误差已经明显进入弯道，就不允许它在出弯阶段重新介入。
-    static int preview_turn_sign = 0;
-    static bool preview_committed = false;
-    static bool preview_entry_active = false;
-
-    // --- Vehicle stopped/idle state reset ---
     if (SystemData.Stop == 1) {
-        full_loss_stop_latched = false;
-        preview_turn_sign = 0;
-        preview_committed = false;
-        preview_entry_active = false;
-
         Speed_Goal_l = 0.0f;
         Speed_Goal_r = 0.0f;
-        last_diff_speed = 0.0f;
-        last_target_gyro_z = 0.0f;
         last_steer_error = 0.0f;
-        raw_steer_error = 0.0f;
-        simple_curve_active = false;
-        consecutive_imu_successes = 0;
-        consecutive_imu_failures = 0;
-        imu_in_fallback = false;
+        steer_integral = 0.0f;
         target_gyro_z = 0.0f;
-        fallback_diff = 0.0f;
-        max_diff = 0.0f;
-        effective_min_wheel = MIN_SPEED;
-        raw_steer_initialized = false;
+        raw_steer_error = 0.0f;
+        planned_speed_goal = 0.0f;
+        cascade_ctrl.reset_runtime_state();
 
-        dbg_diff_speed = 0.0f;
+        dbg_steer_error = 0.0f;
         dbg_target_gyro_z = 0.0f;
+        dbg_diff_speed = 0.0f;
+        dbg_raw_steer_error = 0.0f;
+        dbg_diff_steer = 0.0f;
         dbg_visual_pd_out = 0.0f;
         dbg_cmd_target_gyro_z = 0.0f;
         dbg_real_gyro_z = 0.0f;
         dbg_filtered_gyro_z = 0.0f;
         dbg_gyro_error = 0.0f;
         dbg_target_delta = 0.0f;
+        dbg_dt = 0.0f;
         dbg_max_diff = 0.0f;
         dbg_diff_before_limit = 0.0f;
         dbg_speed_err_l = 0.0f;
@@ -436,16 +364,13 @@ void speed_dif_cascade(float inner_dt)
         dbg_diff_limited = 0;
         dbg_imu_ok = 0;
         dbg_deadband_active = 0;
-        cascade_ctrl.reset_runtime_state();
         return;
     }
 
-    // --- 1. Dual-rate architecture - visual outer loop (event-driven) ---
-    uint32_t current_seq = g_control_vision_frame_seq.load(std::memory_order_acquire);
-    bool new_frame_arrived = (current_seq != last_processed_seq);
+    const uint32_t current_seq = g_control_vision_frame_seq.load(std::memory_order_acquire);
+    const bool new_frame_arrived = (current_seq != last_processed_seq);
 
     if (new_frame_arrived) {
-        // A. Lock and copy latest vision snapshot to prevent race conditions
         VisionSnapshot local_vision;
         {
             std::lock_guard<std::mutex> lock(g_vision_mutex);
@@ -453,521 +378,111 @@ void speed_dif_cascade(float inner_dt)
         }
         last_processed_seq = current_seq;
 
-        // B. Calculate physical latency visual_dt
-        long long current_frame_time_ms = g_control_last_vision_frame_ms.load(std::memory_order_acquire);
-        float visual_dt = (last_visual_frame_time_ms > 0) ? (float)(current_frame_time_ms - last_visual_frame_time_ms) / 1000.0f : 0.010f;
+        const long long current_frame_time_ms = g_control_last_vision_frame_ms.load(std::memory_order_acquire);
+        float visual_dt = (last_visual_frame_time_ms > 0) ?
+            (float)(current_frame_time_ms - last_visual_frame_time_ms) / 1000.0f : 0.010f;
         last_visual_frame_time_ms = current_frame_time_ms;
-
         if (visual_dt <= 0.0001f || visual_dt > 0.1f) {
-            visual_dt = 0.010f; // Default to 100Hz
+            visual_dt = 0.010f;
         }
         dbg_dt = visual_dt;
 
-        // C. Calculate visual error and low-pass/jump protection
         raw_steer_error = local_vision.MiddleLine - local_vision.Det_True;
+        float steer_error = raw_steer_error;
+        if (std::fabs(steer_error) <= (float)car_config::kSteerDeadBand) {
+            steer_error = 0.0f;
+            dbg_deadband_active = 1;
+        } else {
+            dbg_deadband_active = 0;
+        }
+
+        steer_integral = clamp_float(
+            steer_integral + steer_error * visual_dt,
+            -car_config::kSteerIntegralLimit,
+            car_config::kSteerIntegralLimit);
+        const float diff_steer = steer_error - last_steer_error;
+
+        float visual_pid_out =
+            car_config::kSteerKp * steer_error +
+            car_config::kSteerKi * steer_integral +
+            car_config::kSteerKd * diff_steer;
+        visual_pid_out = clamp_float(
+            visual_pid_out,
+            -car_config::kSteerOutputLimitDps,
+            car_config::kSteerOutputLimitDps);
+
+        target_gyro_z = visual_pid_out;
+        last_steer_error = steer_error;
+        planned_speed_goal = (SystemData.Stop == 1) ? 0.0f : car_config::kBaseSpeedGoal;
+
         dbg_raw_steer_error = raw_steer_error;
-
-        const bool ring_now = (local_vision.image_element_rings != 0);
-        const bool ring_entry_phase = ring_now && local_vision.image_element_rings_flag <= 6;
-        const bool ring_just_finished = was_in_ring && !ring_now;
-        was_in_ring = ring_now;
-
-        const bool bad_vision = local_vision.OFFLine >= car_config::kBadVisionOfflineThreshold;
-        const bool full_loss_non_ring = !ring_now && local_vision.OFFLine >= car_config::kBadVisionCenterHoldOfflineThreshold;
-
-        float control_raw_steer_error = raw_steer_error;
-
-        float preview_gyro_bias = 0.0f;
-
-        const int left_loss  = local_vision.Left_Line;
-        const int right_loss = local_vision.Right_Line;
-
-        const int dominant_loss = std::max(left_loss, right_loss);
-        const int loss_delta = left_loss - right_loss;
-
-        const int preview_sign =
-            (loss_delta > 0) ? 1 :
-            (loss_delta < 0) ? -1 : 0;
-
-        const bool preview_direction_consistent =
-            (std::fabs(raw_steer_error) <= 2.0f) ||
-            ((raw_steer_error > 0.0f) == (loss_delta > 0));
-
-        const bool preview_candidate =
-            !ring_now &&
-            local_vision.Road_type == Normol &&
-            local_vision.OFFLine <= 10 &&
-            preview_sign != 0 &&
-            dominant_loss >= car_config::kCurvePreviewLossStart &&
-            std::abs(loss_delta) >= car_config::kCurvePreviewLossStart &&
-            preview_direction_consistent;
-
-        // 两条边重新稳定后，允许下一次弯道重新使用预判。
-        if (!preview_candidate ||
-            dominant_loss <= car_config::kCurvePreviewResetLoss) {
-            preview_turn_sign = 0;
-            preview_committed = false;
-        } else {
-            // 单侧丢线方向切换，视为新弯道。
-            if (preview_turn_sign != preview_sign) {
-                preview_turn_sign = preview_sign;
-                preview_committed = false;
-            }
-
-            // 视觉已经明确进入弯道后，关闭预判。
-            // 后续完全交给视觉误差 + 陀螺仪闭环，避免出弯仍被旧方向预判拖住。
-            if (std::fabs(raw_steer_error) >=
-                car_config::kCurvePreviewCommitRawError) {
-                preview_committed = true;
-            }
-        }
-
-        const bool preview_valid =
-            preview_candidate &&
-            !preview_committed;
-
-        if (preview_valid) {
-            const float loss_level =
-                static_cast<float>(
-                    dominant_loss -
-                    car_config::kCurvePreviewLossStart + 1);
-
-            const float magnitude = clamp_float(
-                car_config::kCurvePreviewGyroBaseDps +
-                loss_level * car_config::kCurvePreviewGyroPerLossDps,
-                0.0f,
-                car_config::kCurvePreviewGyroMaxDps);
-
-            preview_gyro_bias = std::copysign(
-                magnitude,
-                static_cast<float>(loss_delta));
-        }
-
-        const bool preview_turn_active =
-            std::fabs(preview_gyro_bias) > 0.01f;
-
-        // 只表示“视觉还未明确进入弯道”的预判阶段。
-        preview_entry_active =
-            preview_turn_active &&
-            !preview_committed;
-
-        if (full_loss_non_ring) {
-            control_raw_steer_error = 0.0f;
-
-            raw_steer_initialized = false;
-            last_control_raw_steer_error = 0.0f;
-
-            last_steer_error = 0.0f;
-            last_target_gyro_z = 0.0f;
-            target_gyro_z = 0.0f;
-
-            last_diff_speed = 0.0f;
-            fallback_diff = 0.0f;
-            max_diff = 0.0f;
-
-            preview_turn_sign = 0;
-            preview_committed = false;
-            preview_entry_active = false;
-
-            cascade_ctrl.reset_runtime_state();
-
-            if (car_config::kFullLossStopLatchEnable) {
-                full_loss_stop_latched = true;
-            }
-        } else if (ring_just_finished) {
-            control_raw_steer_error = 0.0f;
-            raw_steer_initialized = false;
-            last_control_raw_steer_error = 0.0f;
-
-            last_steer_error = 0.0f;
-            last_target_gyro_z = 0.0f;
-            target_gyro_z = 0.0f;
-
-            last_diff_speed = 0.0f;
-            cascade_ctrl.reset_runtime_state();
-        }
-
-        if (!raw_steer_initialized) {
-            raw_steer_initialized = true;
-            last_control_raw_steer_error = control_raw_steer_error;
-        } else {
-            float raw_delta = control_raw_steer_error - last_control_raw_steer_error;
-            if (std::fabs(raw_delta) > car_config::kSteerRawJumpThreshold) {
-                raw_delta = std::copysign(car_config::kSteerRawMaxStepPerFrame, raw_delta);
-                control_raw_steer_error = last_control_raw_steer_error + raw_delta;
-            }
-            last_control_raw_steer_error = control_raw_steer_error;
-        }
-
-        // D. Visual outer loop first-order low-pass filter
-        float steer_error = last_steer_error;
-        if (ring_just_finished) {
-            steer_error = control_raw_steer_error;
-        } else {
-            float filter_alpha = car_config::kSteerFilterAlpha;
-            // S-curve fast flip enhancement
-            const bool opposing_direction = (control_raw_steer_error > 0.0f && last_steer_error < 0.0f) ||
-                                            (control_raw_steer_error < 0.0f && last_steer_error > 0.0f);
-            if (opposing_direction && std::fabs(control_raw_steer_error) >= car_config::kSteerFastFlipRawThreshold) {
-                float gap = std::fabs(control_raw_steer_error - last_steer_error);
-                if (gap >= car_config::kSteerFastFlipGap) {
-                    filter_alpha = car_config::kSteerFastFlipAlpha;
-                }
-            }
-            float error_delta = control_raw_steer_error - last_steer_error;
-            float max_step = car_config::kSteerFilterMaxStepPerFrame;
-            if (opposing_direction) {
-                max_step = car_config::kSteerFilterSignFlipMaxStepPerFrame;
-            }
-            error_delta = clamp_float(error_delta, -max_step, max_step);
-            steer_error = last_steer_error + error_delta * filter_alpha;
-        }
         dbg_steer_error = steer_error;
-
-        // E. Visual derivative calculation, normalized by dt ratio for time invariance
-        float diff_steer = steer_error - last_steer_error;
-        float normalized_dt_ratio = visual_dt / 0.010f; // Nominal 10ms frame period
-        float diff_steer_normalized = diff_steer / normalized_dt_ratio;
-        dbg_diff_steer = diff_steer_normalized;
-
-        // F. Continuous speed planning using raw error and error derivative
-        const float abs_err = std::max(
-            std::fabs(control_raw_steer_error),
-            std::fabs(steer_error));
-
-        // 用误差变化量提前识别入弯趋势
-        const float preview = std::min(
-            std::fabs(diff_steer_normalized),
-            8.0f);
-
-        const float curve_score = abs_err + 0.35f * preview;
-
-        // 误差约 2 开始减速，误差约 8 降至完整弯道速度
-        const float slow_start = 2.0f;
-        const float full_curve = 8.0f;
-
-        float u = (curve_score - slow_start) / (full_curve - slow_start);
-        u = clamp_float(u, 0.0f, 1.0f);
-
-        // ZD 为直道速度，WD 为弯道速度
-        float speed_to_plan =
-            ZD_Speed_Goal + (WD_Speed_Goal - ZD_Speed_Goal) * u;
-
-        if (preview_turn_active) {
-            speed_to_plan = std::min(
-                speed_to_plan,
-                car_config::kCurveSpeedGoal);
-        }
-
-        simple_curve_active = (u > 0.15f) || preview_turn_active;
-        if (SystemData.Stop == 1) {
-            speed_to_plan = 0.0f;
-        }
-        if (ring_now && speed_to_plan > car_config::kRingSpeedGoal) {
-            speed_to_plan = car_config::kRingSpeedGoal;
-        }
-        if (bad_vision && local_vision.image_element_rings == 0 && speed_to_plan > car_config::kBadVisionSpeedGoal) {
-            speed_to_plan = car_config::kBadVisionSpeedGoal;
-        }
-        planned_speed_goal = speed_to_plan;
-
-        // H. Visual outer loop PID calculation for target_gyro_z
-        float visual_pd_out = 0.0f;
-        float delta_target = 0.0f;
-        const float DEAD_BAND = (local_vision.Road_type == Straight || local_vision.Road_type == Normol) ? 
-            (float)car_config::kSteerDeadBandStraight : (float)car_config::kSteerDeadBandCurve;
-
-        if (std::fabs(steer_error) <= DEAD_BAND &&
-            !preview_turn_active) {
-            delta_target = -last_target_gyro_z;
-            delta_target = clamp_float(
-                delta_target,
-                -car_config::kTargetGyroDeadbandReturnDeltaDps,
-                car_config::kTargetGyroDeadbandReturnDeltaDps);
-            target_gyro_z = last_target_gyro_z + delta_target;
-            if (std::fabs(target_gyro_z) < car_config::kGyroDeadBandDps) {
-                target_gyro_z = 0.0f;
-                delta_target = -last_target_gyro_z;
-            }
-            last_target_gyro_z = target_gyro_z;
-            last_steer_error = steer_error;
-        } else {
-            visual_pd_out = steer_error * STEER_KP +
-                            diff_steer_normalized * STEER_KD +
-                            preview_gyro_bias;
-            visual_pd_out = clamp_float(
-                visual_pd_out,
-                -car_config::kVisualGyroLimitDps,
-                car_config::kVisualGyroLimitDps);
-
-            if ((local_vision.Road_type == LeftCirque || local_vision.Road_type == RightCirque) &&
-                 std::fabs(visual_pd_out) > car_config::kRingSceneGyroLimitDps) {
-                visual_pd_out = std::copysign(car_config::kRingSceneGyroLimitDps, visual_pd_out);
-            }
-            if (ring_entry_phase && std::fabs(visual_pd_out) > car_config::kRingEntryGyroLimitDps) {
-                visual_pd_out = std::copysign(car_config::kRingEntryGyroLimitDps, visual_pd_out);
-            }
-            if (bad_vision && !ring_now && std::fabs(visual_pd_out) > car_config::kBadVisionGyroLimitDps) {
-                visual_pd_out = std::copysign(car_config::kBadVisionGyroLimitDps, visual_pd_out);
-            }
-
-            float max_delta_target = car_config::kTargetGyroMaxDeltaDps;
-            if ((visual_pd_out > 0.0f && last_target_gyro_z < 0.0f) ||
-                (visual_pd_out < 0.0f && last_target_gyro_z > 0.0f)) {
-                max_delta_target = car_config::kTargetGyroSignFlipMaxDeltaDps;
-            }
-            float max_delta_target_scaled = max_delta_target * normalized_dt_ratio;
-            delta_target = visual_pd_out - last_target_gyro_z;
-            delta_target = clamp_float(delta_target, -max_delta_target_scaled, max_delta_target_scaled);
-            target_gyro_z = last_target_gyro_z + delta_target;
-            last_target_gyro_z = target_gyro_z;
-            last_steer_error = steer_error;
-        }
+        dbg_diff_steer = diff_steer;
+        dbg_visual_pd_out = visual_pid_out;
         dbg_target_gyro_z = target_gyro_z;
-        dbg_visual_pd_out = visual_pd_out;
-        dbg_target_delta = delta_target;
-
-        // Compute basic differential limit and single global minimum wheel speed.
-        max_diff = speed_to_plan * MAX_DIFF_RATIO;
-        if (ring_now) {
-            float ring_max_diff = ring_entry_phase ? car_config::kRingEntryMaxDiff : car_config::kRingMaxDiff;
-            if (max_diff > ring_max_diff) {
-                max_diff = ring_max_diff;
-            }
-        }
-        if (bad_vision && !ring_now && max_diff > car_config::kBadVisionMaxDiff) {
-            max_diff = car_config::kBadVisionMaxDiff;
-        }
-        effective_min_wheel = MIN_SPEED;
-
-        // Under fallback, pre-compute pure visual diff_speed
-        if (imu_in_fallback) {
-            if (std::fabs(steer_error) <= DEAD_BAND &&
-            !preview_turn_active) {
-                fallback_diff = 0.0f;
-            } else {
-                fallback_diff = steer_error * STEER_KP + diff_steer_normalized * STEER_KD;
-                fallback_diff = clamp_float(fallback_diff, -car_config::kFallbackDiffLimit, car_config::kFallbackDiffLimit);
-            }
-        }
+        dbg_target_delta = 0.0f;
+        dbg_max_diff = car_config::kGyroPidOutputLimit;
     }
 
-    if (full_loss_stop_latched) {
-        planned_speed_goal = 0.0f;
-
-        Speed_Goal = 0.0f;
+    Mpu6050Data imu_data;
+    if (!imu.read_processed_data(imu_data)) {
         Speed_Goal_l = 0.0f;
         Speed_Goal_r = 0.0f;
-
         speed_out_l = 0.0f;
         speed_out_r = 0.0f;
-        speed_last_erro_L = 0.0f;
-        speed_last_erro_R = 0.0f;
-
+        target_gyro_z = 0.0f;
+        cascade_ctrl.reset_runtime_state();
+        dbg_imu_ok = 0;
         dbg_diff_speed = 0.0f;
-        dbg_target_gyro_z = 0.0f;
-        dbg_visual_pd_out = 0.0f;
-        dbg_cmd_target_gyro_z = 0.0f;
         dbg_diff_before_limit = 0.0f;
-        dbg_max_diff = 0.0f;
-        dbg_diff_limited = 0;
-
         return;
     }
 
-    // --- 2. Dual-rate architecture - inner loop (Runs unconditionally every 5ms) ---
-    Mpu6050Data imu_data;
-    bool imu_ok = imu.read_processed_data(imu_data);
+    dbg_imu_ok = 1;
+    const float diff_speed = cascade_ctrl.calc_diff_speed_bypass_angle(target_gyro_z, imu_data, inner_dt);
 
-    if (imu_ok) {
-        consecutive_imu_successes++;
-        consecutive_imu_failures = 0;
-
-        if (imu_in_fallback) {
-            if (consecutive_imu_successes >= car_config::kImuRecoveryMinFrames) {
-                imu_in_fallback = false;
-                cascade_ctrl.initialize_recovery_state(imu_data.gyro_z, last_diff_speed);
-            }
-        }
-    } else {
-        consecutive_imu_failures++;
-        consecutive_imu_successes = 0;
-
-        if (consecutive_imu_failures > car_config::kImuMaxAllowedMissedFrames) {
-            imu_in_fallback = true;
-        }
-    }
-
-    float diff_speed = 0.0f;
-
-    if (!imu_in_fallback) {
-        dbg_imu_ok = 1;
-
-        if (consecutive_imu_failures > 0) {
-            // Transient failure: freeze control action, hold previous frame
-            diff_speed = last_diff_speed;
-        } else {
-            // Normal: execute gyro rate PID loop at 5ms (0.005s)
-            float cmd_target_gyro_z = target_gyro_z;
-
-            diff_speed = cascade_ctrl.calc_diff_speed_bypass_angle(cmd_target_gyro_z, imu_data, inner_dt);
-            dbg_cmd_target_gyro_z = cmd_target_gyro_z;
-            dbg_real_gyro_z = imu_data.gyro_z;
-            dbg_filtered_gyro_z = cascade_ctrl.last_filtered_gyro_z();
-            dbg_gyro_error = cascade_ctrl.gyro_pid.err;
-            dbg_diff_before_limit = diff_speed;
-        }
-    } else {
-        // Fallback: execute pure visual closed loop using pre-computed fallback_diff
-        dbg_imu_ok = 0;
-        dbg_real_gyro_z = 0.0f;
-        dbg_filtered_gyro_z = 0.0f;
-        dbg_gyro_error = 0.0f;
-        dbg_cmd_target_gyro_z = 0.0f;
-        dbg_target_delta = 0.0f;
-        dbg_target_gyro_z = 0.0f;
-        last_target_gyro_z = 0.0f;
-
-        if (Speed_Goal > car_config::kImuFallbackSpeedGoal) {
-            Speed_Goal = car_config::kImuFallbackSpeedGoal;
-        }
-
-        diff_speed = fallback_diff;
-        dbg_visual_pd_out = fallback_diff;
-        dbg_diff_before_limit = fallback_diff;
-    }
-
-    // --- 3. Unified clamping and speed distribution ---
-    float effective_max_diff = max_diff;
-
-    const bool need_curve_turn_authority =
-        simple_curve_active &&
-        std::fabs(target_gyro_z) >= car_config::kCurveMinDiffGyroDps;
-
-    if (need_curve_turn_authority) {
-        effective_max_diff = std::max(
-            effective_max_diff,
-            car_config::kCurveMinDiff);
-    }
-
-    if (Speed_Goal > 0.0f) {
-        const float current_diff_ratio = simple_curve_active ? MAX_DIFF_RATIO : 1.0f;
-        float ramp_limited_max_diff =
-            Speed_Goal * current_diff_ratio;
-
-        if (need_curve_turn_authority) {
-            ramp_limited_max_diff = std::max(
-                ramp_limited_max_diff,
-                car_config::kCurveMinDiff);
-        }
-
-        if (effective_max_diff > ramp_limited_max_diff) {
-            effective_max_diff = ramp_limited_max_diff;
-        }
-    } else {
-        effective_max_diff = 0.0f;
-    }
-
-    // 预判只允许“轻转向”，不能在中线还接近中心时把内轮压到 0。
-    // 一旦 Raw 已达到 kCurvePreviewCommitRawError，preview_committed=true，
-    // 此限制自动失效，正常弯道仍可使用完整差速能力。
-    if (preview_entry_active &&
-        !preview_committed &&
-        Speed_Goal > 0.0f) {
-
-        const float preview_max_diff = std::max(
-            0.0f,
-            Speed_Goal -
-            car_config::kCurvePreviewMinInnerWheelSpeed);
-
-        effective_max_diff = std::min(
-            effective_max_diff,
-            preview_max_diff);
-    }
-
-    dbg_max_diff = effective_max_diff;
-    dbg_diff_limited = 0;
-    if (diff_speed > effective_max_diff) {
-        diff_speed = effective_max_diff;
-        dbg_diff_limited = 1;
-    }
-    if (diff_speed < -effective_max_diff) {
-        diff_speed = -effective_max_diff;
-        dbg_diff_limited = 1;
-    }
-
-    // Keep turn authority tied to the current ramped speed so startup cannot command a reverse inner wheel.
-
+    dbg_cmd_target_gyro_z = target_gyro_z;
+    dbg_real_gyro_z = imu_data.gyro_z;
+    dbg_filtered_gyro_z = cascade_ctrl.last_filtered_gyro_z();
+    dbg_gyro_error = cascade_ctrl.gyro_pid.err;
+    dbg_diff_before_limit = diff_speed;
     dbg_diff_speed = diff_speed;
-    last_diff_speed = diff_speed;
+    dbg_diff_limited = 0;
 
-    // Distribute speed targets to left and right wheels using the matching effective_min_wheel
-    distribute_wheel_speeds(Speed_Goal, diff_speed, effective_min_wheel);
-
-    const bool one_wheel_released =
-        (Speed_Goal_l <= 0.02f) ||
-        (Speed_Goal_r <= 0.02f);
-
-    if (simple_curve_active &&
-        one_wheel_released &&
-        Speed_Goal > 0.0f) {
-
-        Speed_Goal_l = std::min(
-            Speed_Goal_l,
-            car_config::kCurveOuterWheelMax);
-
-        Speed_Goal_r = std::min(
-            Speed_Goal_r,
-            car_config::kCurveOuterWheelMax);
-
-        // 限速后重新记录速度误差，保证日志正确
-        dbg_speed_err_l = Speed_Goal_l - speed_encoder_L;
-        dbg_speed_err_r = Speed_Goal_r - speed_encoder_R;
-    }
+    distribute_wheel_speeds(Speed_Goal, diff_speed, 0.0f);
 
     if (car_config::kSteerDebugPrintEnable) {
         static int debug_print_count = 0;
         debug_print_count++;
         if (debug_print_count >= car_config::kSteerDebugPrintDivider) {
             debug_print_count = 0;
-            printf("[steer] det:%d mid:%d raw:%.1f filt:%.1f dE:%.1f pd:%.1f tgt:%.1f cmd:%.1f gz:%.1f gf:%.1f ge:%.1f dT:%.1f d0:%.1f diff:%.1f cap:%d max:%.1f goal:%.1f L:%.1f R:%.1f encL:%.1f encR:%.1f rawEncL:%.2f rawEncR:%.2f pwmL:%.0f pwmR:%.0f eL:%.1f eR:%.1f dt:%.3f imu:%d db:%d off:%d ll:%d rl:%d curve:%d\n",
+            printf("[steer] det:%d mid:%d raw:%.1f err:%.1f dE:%.1f tgt:%.1f gz:%.1f ge:%.1f diff:%.2f goal:%.2f L:%.2f R:%.2f encL:%.2f encR:%.2f pwmL:%.0f pwmR:%.0f dt:%.3f imu:%d db:%d off:%d ll:%d rl:%d\n",
                    ImageStatus.Det_True,
                    ImageStatus.MiddleLine,
                    raw_steer_error,
                    dbg_steer_error,
                    dbg_diff_steer,
-                   dbg_visual_pd_out,
                    dbg_target_gyro_z,
-                   dbg_cmd_target_gyro_z,
                    dbg_real_gyro_z,
-                   dbg_filtered_gyro_z,
                    dbg_gyro_error,
-                   dbg_target_delta,
-                   dbg_diff_before_limit,
                    dbg_diff_speed,
-                   dbg_diff_limited,
-                   dbg_max_diff,
                    Speed_Goal,
                    Speed_Goal_l,
                    Speed_Goal_r,
                    speed_encoder_L,
                    speed_encoder_R,
-                   speed_encoder_raw_L,
-                   speed_encoder_raw_R,
                    speed_out_l,
                    speed_out_r,
-                   dbg_speed_err_l,
-                   dbg_speed_err_r,
                    dbg_dt,
                    dbg_imu_ok,
                    dbg_deadband_active,
                    ImageStatus.OFFLine,
                    ImageStatus.Left_Line,
-                   ImageStatus.Right_Line,
-                   simple_curve_active ? 1 : 0);
+                   ImageStatus.Right_Line);
         }
     }
 }
+
 
 
 
@@ -994,34 +509,7 @@ void Car_distance(float dt)
 // ===============================================================================
 
 //变速控�?
-void Car_Speed_Contrl(void)
-{
 
-
-    //直线加�?
-    if(ImageStatus.straight_acc==1)
-    {
-        Speed_Goal=ZD_Speed_Goal;
-        // beep.SetGpioValue(1);
-    }
-    else
-    {
-        Speed_Goal=WD_Speed_Goal;
-        // beep.SetGpioValue(0);
-    }
-
-
-
-
-    
-    if(SystemData.Stop==1)  //停车（不再因为车�?斑马线识别停车）
-    {
-        Speed_Goal=0;
-        Speed_Goal_l=0;
-        Speed_Goal_r=0;
-    }
-
-}
 
 
 
@@ -1030,7 +518,7 @@ void Speed_BiHuan(void)
     static long long control_start_ms = 0;
     const long long last_vision_ms =
         g_control_last_vision_frame_ms.load(std::memory_order_acquire);
-    
+
     // Waiting for first frame on startup: keep output at 0 but do NOT exit unless timeout exceeded
     if (last_vision_ms <= 0) {
         Speed_Goal = 0.0f;
@@ -1135,49 +623,22 @@ void Speed_BiHuan(void)
     speed_encoder_L = speed_encoder_raw_L;
     speed_encoder_R = speed_encoder_raw_R;
 
-    static float ramped_speed_goal = 0.0f;
-    static auto last_speed_ramp_time = std::chrono::steady_clock::now();
-    auto speed_ramp_now = std::chrono::steady_clock::now();
-    std::chrono::duration<float> speed_ramp_elapsed = speed_ramp_now - last_speed_ramp_time;
-    float speed_ramp_dt = speed_ramp_elapsed.count();
-    last_speed_ramp_time = speed_ramp_now;
-    if (speed_ramp_dt <= 0.0001f || speed_ramp_dt > 0.05f) {
-        speed_ramp_dt = 0.005f;
+    static auto last_control_time = std::chrono::steady_clock::now();
+    const auto control_time_now = std::chrono::steady_clock::now();
+    std::chrono::duration<float> control_elapsed = control_time_now - last_control_time;
+    float inner_dt = control_elapsed.count();
+    last_control_time = control_time_now;
+    if (inner_dt <= 0.0001f || inner_dt > 0.05f) {
+        inner_dt = 0.005f;
     }
-
-    float inner_dt = speed_ramp_dt;
-    if (inner_dt < 0.003f) inner_dt = 0.003f;
-    if (inner_dt > 0.012f) inner_dt = 0.012f;
 
     Car_distance(inner_dt);
 
-    if (SystemData.Stop == 1) {
-        planned_speed_goal = 0.0f;
-    }
+    static float ramped_speed_goal = 0.0f;
+    Speed_Goal = (planned_speed_goal > 0.0f) ? planned_speed_goal : 0.0f;
+    ramped_speed_goal = Speed_Goal;
 
-    const float desired_speed_goal = planned_speed_goal;
-    if (desired_speed_goal <= 0.0f) {
-        ramped_speed_goal = 0.0f;
-        Speed_Goal = 0.0f;
-    } else {
-        const float speed_goal_delta = desired_speed_goal - ramped_speed_goal;
-        const float speed_goal_limit =
-            (speed_goal_delta > 0.0f) ?
-            car_config::kSpeedTargetAccelLimit :
-            car_config::kSpeedTargetDecelLimit;
-        const float speed_goal_max_step = speed_goal_limit * speed_ramp_dt;
-        if (speed_goal_delta > speed_goal_max_step) {
-            ramped_speed_goal += speed_goal_max_step;
-        } else if (speed_goal_delta < -speed_goal_max_step) {
-            ramped_speed_goal -= speed_goal_max_step;
-        } else {
-            ramped_speed_goal = desired_speed_goal;
-        }
-        if (ramped_speed_goal < 0.0f) ramped_speed_goal = 0.0f;
-        Speed_Goal = ramped_speed_goal;
-    }
-
-    speed_dif_cascade(inner_dt);     
+    speed_dif_cascade(inner_dt);
 
     // 外环弯道/丢线保护可能�?speed_dif_cascade() 内把目标速度直接压低�?
     // 同步斜坡状态，避免保护解除时从旧的高速记忆值瞬间跳回去�?
@@ -1222,18 +683,13 @@ void Speed_BiHuan(void)
 
     Speed_PID_L();           // 【最内环】：左右轮速度环PI闭环运算
     Speed_PID_R();           // 【最内环】：左右轮速度环PI闭环运算
-    
+
     motor_Duty_R(speed_out_r); // 输出到PWM驱动
     motor_Duty_L(speed_out_l);
     // 只有完整完成“编码器读取 �?速度�?�?电机输出”的控制周期后才续命�?
     // 图像/UDP/调试线程不能续命，控制线程卡死时 gpio_manager 必须能超时停车�?
     gpio_protect_heartbeat_pulse();
 }
-
-// 差速速度调整函数
-// void Speed_Adjust_By_Offset(float offset)
-// {
-//     float KP = 0.3f;  // 方向调整比例系数，可调试
 
 //     float turn = KP * offset;  // 转向�?
 

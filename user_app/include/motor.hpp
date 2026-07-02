@@ -16,7 +16,6 @@ extern float speed_out_r;
 extern float speed_out_l;
 extern float Speed_Goal_l;
 extern float Speed_Goal_r;
-extern int DEAD_BAND;
 
 // extern ls_gpio beep;
 
@@ -31,5 +30,4 @@ bool Speed_decision(void);
 void Speed_PID_L(void);
 void Speed_PID_R(void);
 void Speed_BiHuan(void);
-void Speed_Adjust_By_Offset(float offset);
 #endif // !__MOTOR_H__
