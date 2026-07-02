@@ -12,8 +12,9 @@ const auto timer_interval_1 = std::chrono::milliseconds(5);
 
 static void print_usage(const char *program)
 {
-    std::printf("Usage: %s --mode=<car|motor-pwm-test|encoder-hand-test|forward-pwm-sweep|speed-loop-step|udp-pid-autotune|motor-id> [--unsafe-dev-mode]\n", program);
+    std::printf("Usage: %s --mode=<car|demo04|motor-pwm-test|encoder-hand-test|forward-pwm-sweep|speed-loop-step|udp-pid-autotune|motor-id> [--unsafe-dev-mode]\n", program);
     std::printf("  --mode=car             competition control mode\n");
+    std::printf("  --mode=demo04          official ATIM PWM driver-board debug entry\n");
     std::printf("  --mode=motor-pwm-test   airborne PWM/encoder direction diagnostic\n");
     std::printf("  --mode=encoder-hand-test read-only hand-push encoder diagnostic\n");
     std::printf("  --mode=forward-pwm-sweep forward-only PWM startup sweep\n");
@@ -185,6 +186,20 @@ int main(int argc, char **argv)
         signal(SIGPIPE, SIG_IGN);
 
         lq_pwm_quick_test();
+        gpio_protect_heartbeat_deinit();
+        return 0;
+    }
+
+    if (run_mode == "demo04" || run_mode == "atim-pwm-test" || run_mode == "atim_pwm") {
+        if (!unsafe_dev_mode && !gpio_protect_heartbeat_require_ready(1500)) {
+            gpio_protect_heartbeat_deinit();
+            return 3;
+        }
+        if (unsafe_dev_mode) {
+            std::printf("[MAIN][UNSAFE] initial gpio_manager readiness check skipped. Direct ATIM PWM debug mode.\n");
+        }
+
+        lq_atim_pwm_demo();
         gpio_protect_heartbeat_deinit();
         return 0;
     }

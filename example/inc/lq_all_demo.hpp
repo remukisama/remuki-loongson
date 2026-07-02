@@ -5,6 +5,7 @@
 #include "lq_app_inc.hpp"
 #include "lq_common.hpp"
 
+void lq_atim_pwm_demo(void);        // ATIM PWM output mode debug demo
 void lq_mpu6050_demo(void);         // MPU6050 测试
 void lq_motor_pid_demo(void);
 void lq_direaction(void);

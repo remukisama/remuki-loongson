@@ -40,6 +40,7 @@ set(LQ_USER_APP_SOURCES
 )
 
 set(LQ_RUNTIME_HELPER_SOURCES
+    ${PROJECT_SOURCE_DIR}/../example/src/04_lq_atim_pwm_demo.cpp
     ${PROJECT_SOURCE_DIR}/../example/src/24_lq_line_patrol_debug_demo.cpp
     ${PROJECT_SOURCE_DIR}/../example/src/37_lq_motor_pwm_encoder_diag.cpp
     ${PROJECT_SOURCE_DIR}/../example/src/36_lq_vision_capture_demo.cpp
