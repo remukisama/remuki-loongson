@@ -78,12 +78,14 @@
 #define PIN_I2C_SDA             51          // GPIO51（I2C1_SDA）
 
 // ==================== 安全默认值 ====================
-// DRV8701E uses PH/EN control: PWM drives EN directly.
-// EN duty 0 brakes/stops; EN duty 10000 is full drive.
+// DRV8701P uses IN1/IN2 control on this PCB:
+// GPIO drives IN1, PWM drives IN2. Safe stop/brake is IN1=1, IN2=1.
 // GTIM 反极性：duty=0 → 输出HIGH → 舵机中位（或停止）
-#define MOTOR_EN_DUTY_MAX       10000
-#define SAFE_MOTOR_DUTY         0           // 电机停止（EN=LOW）
-#define SAFE_MOTOR_DIR          0           // PH LOW（EN=0 时方向无驱动，仅固定电平）
+#define MOTOR_PWM_DUTY_MAX      10000
+#define SAFE_MOTOR_ACTIVE_LOW_DUTY 0        // 应用层功率停止命令
+#define SAFE_MOTOR_RAW_DUTY     10000       // 电机停止（IN2=HIGH）
+#define SAFE_MOTOR_DUTY         SAFE_MOTOR_RAW_DUTY
+#define SAFE_MOTOR_DIR          1           // IN1=HIGH，与 IN2=HIGH 组成刹车态
 #define SAFE_SERVO_DUTY         0           // 舵机停止
 #define SAFE_BUZZER             0           // 静音
 

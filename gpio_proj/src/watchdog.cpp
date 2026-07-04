@@ -52,6 +52,12 @@ static inline void gpio_pin_low(volatile uint8_t *base, int pin)
     *reg = *reg & ~(1 << (pin % 8));
 }
 
+static inline void gpio_pin_high(volatile uint8_t *base, int pin)
+{
+    volatile uint8_t *reg = base + 0x10 + (pin / 8);
+    *reg = *reg | (1 << (pin % 8));
+}
+
 static inline void ccr_write(volatile uint32_t *base, uint32_t offset, uint32_t val)
 {
     if (base && base != MAP_FAILED) {
@@ -198,8 +204,8 @@ int GpioWatchdog::init_registers(void)
 
 void GpioWatchdog::write_safe_values(void)
 {
-    // ---- ATIM: 4路电机 EN duty=SAFE_MOTOR_DUTY ----
-    // DRV8701E PH/EN: EN=LOW is the stop/brake state.
+    // ---- ATIM: 4路电机 IN2 raw duty=SAFE_MOTOR_DUTY ----
+    // DRV8701P IN1/IN2: IN1=HIGH and IN2=HIGH is brake/stop.
     uint32_t safe_compare = 0;
     if (atim_base_ && atim_base_ != MAP_FAILED) {
         volatile uint32_t *arr =
@@ -213,7 +219,7 @@ void GpioWatchdog::write_safe_values(void)
     ccr_write(atim_base_, ATIM_CCR3, safe_compare);   // 电机3 (GPIO83)
     ccr_write(atim_base_, ATIM_CCR4, safe_compare);   // 电机4 (GPIO76)
 
-    // Keep NORMAL polarity and channel enable so the timer actively drives EN low.
+    // Keep NORMAL polarity and channel enable so the timer actively drives IN2 high.
     if (atim_base_ && atim_base_ != MAP_FAILED) {
         volatile uint32_t *ccer =
             (volatile uint32_t *)((uintptr_t)atim_base_ + ATIM_CCER);
@@ -228,12 +234,12 @@ void GpioWatchdog::write_safe_values(void)
     // ---- GTIM: 舵机 PWM duty=0 ----
     ccr_write(gtim_base_, GTIM_CCR2, 0);   // 舵机 (GPIO88)
 
-    // ---- GPIO: PH方向引脚固定 LOW + 蜂鸣器 LOW ----
+    // ---- GPIO: IN1方向引脚固定 HIGH + 蜂鸣器 LOW ----
     if (gpio_base_ && gpio_base_ != MAP_FAILED) {
-        gpio_pin_low(gpio_base_, PIN_MOTOR_DIR_1);   // GPIO21 LOW
-        gpio_pin_low(gpio_base_, PIN_MOTOR_DIR_2);   // GPIO22 LOW
-        gpio_pin_low(gpio_base_, PIN_MOTOR_DIR_3);   // GPIO23 LOW
-        gpio_pin_low(gpio_base_, PIN_MOTOR_DIR_4);   // GPIO24 LOW
+        gpio_pin_high(gpio_base_, PIN_MOTOR_DIR_1);  // GPIO21 HIGH
+        gpio_pin_high(gpio_base_, PIN_MOTOR_DIR_2);  // GPIO22 HIGH
+        gpio_pin_high(gpio_base_, PIN_MOTOR_DIR_3);  // GPIO23 HIGH
+        gpio_pin_high(gpio_base_, PIN_MOTOR_DIR_4);  // GPIO24 HIGH
         gpio_pin_low(gpio_base_, PIN_BUZZER);         // GPIO61 LOW
     }
 }

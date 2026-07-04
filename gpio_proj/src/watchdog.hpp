@@ -3,8 +3,8 @@
  * @brief GPIO 看门狗 — 心跳监测 + 异常安全接管
  *
  * 保护范围（心跳超时写安全值）：
- *   - 4路电机 PWM（ATIM CCR1~CCR4 → DRV8701E EN低电平停车）
- *   - 4路方向 GPIO → LOW
+ *   - 4路电机 PWM/GPIO（DRV8701P IN1=HIGH, IN2=HIGH 刹车停车）
+ *   - 4路方向 GPIO → HIGH
  *   - 1路舵机 PWM（GTIM CCR2 → duty=0）
  *   - 蜂鸣器 GPIO → LOW
  */

@@ -134,8 +134,8 @@ void ls_atim_pwm::atim_pwm_set_duty(uint32_t _duty)
     }
     this->duty = _duty;
 
-    // Keep register duty as a direct EN command for DRV8701E PH/EN:
-    // 0=EN low stop/brake, 10000=full drive.
+    // Keep register duty as a direct raw PWM command: 3000=30%, 10000=100%.
+    // DRV8701P motor power mapping is handled by the motor layer.
     ls_writel(this->atim_ccrx,
               ATIM_PWM_CLK_FRE / this->period * this->duty / ATIM_PWM_DUTY_MAX);
     pthread_mutex_unlock(&ATIM_MUTEX);
@@ -146,8 +146,8 @@ void ls_atim_pwm::atim_pwm_set_active_low_duty(uint32_t _duty)
     if (_duty > ATIM_PWM_DUTY_MAX) {
         _duty = ATIM_PWM_DUTY_MAX;
     }
-    // Deprecated compatibility name. DRV8701E uses high-active EN, so do not invert.
-    this->atim_pwm_set_duty(_duty);
+    // DRV8701P forward/brake-PWM command: 0=brake/stop (IN2 high), 10000=full drive (IN2 low).
+    this->atim_pwm_set_duty(ATIM_PWM_DUTY_MAX - _duty);
 }
 
 /********************************************************************************
@@ -195,8 +195,8 @@ void ls_atim_pwm::cleanup()
 {
     if (this->atim_base != nullptr) {
         if (this->pola == ATIM_PWM_POL_NORMAL) {
-            // DRV8701E EN low is the safe stop/brake state; keep PWM enabled to drive it.
-            this->atim_pwm_set_duty(0);
+            // DRV8701P safe brake also needs IN1 high; keep IN2 high and PWM enabled.
+            this->atim_pwm_set_duty(ATIM_PWM_DUTY_MAX);
             this->atim_pwm_enable();
         } else if (this->pola == ATIM_PWM_POL_INV) {
             this->atim_pwm_set_duty(0);

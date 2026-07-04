@@ -209,19 +209,19 @@ void lq_angle_pid_tuning_demo(void)
         }
 
         if (speed_out_L >= 0) {
-            motor_L_Dir.gpio_level_set(GPIO_LOW);  
+            motor_L_Dir.gpio_level_set(GPIO_HIGH);
             motor_L.atim_pwm_set_active_low_duty(speed_out_L);
         } else {
-            motor_L_Dir.gpio_level_set(GPIO_HIGH); 
-            motor_L.atim_pwm_set_active_low_duty(-speed_out_L);
+            motor_L_Dir.gpio_level_set(GPIO_LOW);
+            motor_L.atim_pwm_set_duty(-speed_out_L);
         }
 
         if (speed_out_R >= 0) {
-            motor_R_Dir.gpio_level_set(GPIO_LOW);  
+            motor_R_Dir.gpio_level_set(GPIO_HIGH);
             motor_R.atim_pwm_set_active_low_duty(speed_out_R);
         } else {
-            motor_R_Dir.gpio_level_set(GPIO_HIGH); 
-            motor_R.atim_pwm_set_active_low_duty(-speed_out_R);
+            motor_R_Dir.gpio_level_set(GPIO_LOW);
+            motor_R.atim_pwm_set_duty(-speed_out_R);
         }
 
         // ==============================================
@@ -243,6 +243,8 @@ void lq_angle_pid_tuning_demo(void)
     }
 
     std::cout << "正在关闭电机..." << std::endl;
+    motor_L_Dir.gpio_level_set(GPIO_HIGH);
+    motor_R_Dir.gpio_level_set(GPIO_HIGH);
     motor_L.atim_pwm_set_active_low_duty(0);
     motor_R.atim_pwm_set_active_low_duty(0);
     motor_L.atim_pwm_enable();

@@ -78,7 +78,7 @@ float encoder_num_L(void)
         return 0.0f;
     }
 
-    // 取反：落地后 DIR=LOW=前进，编码器原始值为负，取反后为正
+    // 左轮前进时编码器原始值为负，取反后统一为正速度。
     float raw = -encoder_L.encoder_get_count() * car_config::kEncoderRpsToMS;
     g_raw_last_L = raw;
     if (std::fabs(raw) > kMaxValidSpeed) {
@@ -103,7 +103,7 @@ float encoder_num_R(void)
         return 0.0f;
     }
 
-    // 取反：落地后 DIR=LOW=前进，编码器原始值为负，取反后为正
+    // 右轮前进时编码器原始值为正，保持为正速度。
     float raw = encoder_R.encoder_get_count() * car_config::kEncoderRpsToMS;
     g_raw_last_R = raw;
     if (std::fabs(raw) > kMaxValidSpeed) {
