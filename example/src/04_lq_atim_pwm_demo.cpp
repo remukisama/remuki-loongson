@@ -24,7 +24,7 @@ void atim_pwm_test_signal_handler(int)
  * @version V2.1.0
  * @note    适用与龙芯 2K0300/0301 平台.
  *          本 demo 实现 ATIM PWM 输出功能，用于测试 PWM 引脚的基本功能.
- *!         注意：当前项目电机驱动为 DRV8701P IN1/IN2，GPIO=IN1，PWM=IN2。
+ *!         注意：当前项目电机驱动为 DRV8701E PH/EN，PWM 为 EN 高有效。
  ********************************************************************************/
 
 /********************************************************************************
@@ -36,7 +36,7 @@ void atim_pwm_test_signal_handler(int)
 void lq_atim_pwm_demo(void)
 {
     constexpr uint32_t kTestFrequencyHz = car_config::kMotorPwmFrequencyHz;
-    constexpr uint32_t kTestActiveLowDuty = 3000; // Forward power: 0=brake, 10000=full output
+    constexpr uint32_t kTestDuty = 3000; // EN high duty: 3000=30% high
 
     // 默认极性的构造方式
     ls_atim_pwm pwm1(ATIM_PWM0_PIN81, kTestFrequencyHz, car_config::kMotorInitialDuty, ATIM_PWM_POL_NORMAL);
@@ -58,18 +58,16 @@ void lq_atim_pwm_demo(void)
     signal(SIGHUP, atim_pwm_test_signal_handler);
     signal(SIGQUIT, atim_pwm_test_signal_handler);
 
-    pwm1dir.gpio_level_set(GPIO_HIGH);
-    pwm2dir.gpio_level_set(GPIO_HIGH);
-    pwm1.atim_pwm_set_active_low_duty(kTestActiveLowDuty);
-    pwm2.atim_pwm_set_active_low_duty(kTestActiveLowDuty);
+    pwm1dir.gpio_level_set(GPIO_LOW);
+    pwm2dir.gpio_level_set(GPIO_LOW);
+    pwm1.atim_pwm_set_duty(kTestDuty);
+    pwm2.atim_pwm_set_duty(kTestDuty);
     pwm1.atim_pwm_enable();
     pwm2.atim_pwm_enable();
     // pwm3.atim_pwm_enable();
     // pwm4.atim_pwm_enable();
-    printf("[ATIM_PWM_TEST] CH0(pin81) and CH1(pin82): %u Hz, IN1=HIGH, active_low_duty=%u raw_IN2_duty=%u. Press Ctrl+C to stop.\n",
-           kTestFrequencyHz,
-           kTestActiveLowDuty,
-           car_config::kMotorPwmFullScale - kTestActiveLowDuty);
+    printf("[ATIM_PWM_TEST] CH0(pin81) and CH1(pin82): %u Hz, EN high duty=%u/10000. Press Ctrl+C to stop.\n",
+           kTestFrequencyHz, kTestDuty);
 
     while (!g_atim_pwm_test_stop)
     {
@@ -77,18 +75,18 @@ void lq_atim_pwm_demo(void)
         usleep(10000);
     }
 
-    // DRV8701P IN1/IN2: IN1=HIGH and IN2=HIGH is brake/stop.
-    pwm1.atim_pwm_set_active_low_duty(car_config::kMotorActiveLowStopDuty);
-    pwm2.atim_pwm_set_active_low_duty(car_config::kMotorActiveLowStopDuty);
+    // DRV8701E PH/EN: EN=0 is stop/brake.
+    pwm1.atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
+    pwm2.atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
     pwm1.atim_pwm_enable();
     pwm2.atim_pwm_enable();
-    pwm1dir.gpio_level_set(GPIO_HIGH);
-    pwm2dir.gpio_level_set(GPIO_HIGH);
+    pwm1dir.gpio_level_set(GPIO_LOW);
+    pwm2dir.gpio_level_set(GPIO_LOW);
     gpio_protect_heartbeat_deinit();
 
-    printf("\n[ATIM_PWM_TEST] Both PWM channels stopped at IN1=HIGH, IN2=HIGH with PWM enabled.\n");
+    printf("\n[ATIM_PWM_TEST] Both PWM channels stopped at EN high duty=0 with PWM enabled.\n");
     fflush(stdout);
 
-    // 不返回，避免局部 PWM 对象析构时 disable 通道；停机态已由 IN1=HIGH, IN2=HIGH 主动保持。
+    // 不返回，避免局部 PWM 对象析构时 disable 通道；停机态已由 EN=0 主动保持。
     _exit(0);
 }

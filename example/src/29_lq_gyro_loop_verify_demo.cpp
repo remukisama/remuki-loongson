@@ -25,8 +25,8 @@ void signal_handler_gyro_verify(int signum) {
 // ===================================================================
 void lq_gyro_loop_verify_demo(void)
 {
-    ls_atim_pwm motor_L(ATIM_PWM0_PIN81, 25000, 10000, ATIM_PWM_POL_NORMAL);
-    ls_atim_pwm motor_R(ATIM_PWM1_PIN82, 25000, 10000, ATIM_PWM_POL_NORMAL);
+    ls_atim_pwm motor_L(ATIM_PWM0_PIN81, 25000, 0, ATIM_PWM_POL_NORMAL);
+    ls_atim_pwm motor_R(ATIM_PWM1_PIN82, 25000, 0, ATIM_PWM_POL_NORMAL);
 
     ls_gpio motor_L_Dir(PIN_21, GPIO_MODE_OUT);
     ls_gpio motor_R_Dir(PIN_22, GPIO_MODE_OUT);
@@ -128,18 +128,18 @@ void lq_gyro_loop_verify_demo(void)
 
         // 输出 PWM
         if (pwm_cmd_l >= 0.0f) {
-            motor_L_Dir.gpio_level_set(GPIO_HIGH);
+            motor_L_Dir.gpio_level_set(GPIO_LOW);
             motor_L.atim_pwm_set_active_low_duty((int)pwm_cmd_l);
         } else {
-            motor_L_Dir.gpio_level_set(GPIO_LOW);
-            motor_L.atim_pwm_set_duty((int)(-pwm_cmd_l));
+            motor_L_Dir.gpio_level_set(GPIO_HIGH);
+            motor_L.atim_pwm_set_active_low_duty((int)(-pwm_cmd_l));
         }
         if (pwm_cmd_r >= 0.0f) {
-            motor_R_Dir.gpio_level_set(GPIO_HIGH);
+            motor_R_Dir.gpio_level_set(GPIO_LOW);
             motor_R.atim_pwm_set_active_low_duty((int)pwm_cmd_r);
         } else {
-            motor_R_Dir.gpio_level_set(GPIO_LOW);
-            motor_R.atim_pwm_set_duty((int)(-pwm_cmd_r));
+            motor_R_Dir.gpio_level_set(GPIO_HIGH);
+            motor_R.atim_pwm_set_active_low_duty((int)(-pwm_cmd_r));
         }
 
         // 打印 (每10个循环 ≈ 100ms 一次)
@@ -166,8 +166,6 @@ void lq_gyro_loop_verify_demo(void)
     }
 
     std::cout << "关闭电机..." << std::endl;
-    motor_L_Dir.gpio_level_set(GPIO_HIGH);
-    motor_R_Dir.gpio_level_set(GPIO_HIGH);
     motor_L.atim_pwm_set_active_low_duty(0);
     motor_R.atim_pwm_set_active_low_duty(0);
     motor_L.atim_pwm_enable();

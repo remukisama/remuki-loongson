@@ -35,7 +35,10 @@ static const uint32_t ATIM_CCR1 = 0x34;
 static const uint32_t ATIM_CCR2 = 0x38;
 static const uint32_t ATIM_CCR3 = 0x3C;
 static const uint32_t ATIM_CCR4 = 0x40;
+static const uint32_t ATIM_CCMR1 = 0x18;
+static const uint32_t ATIM_CCMR2 = 0x1C;
 static const uint32_t ATIM_CCER = 0x20;
+static const uint32_t ATIM_EGR  = 0x14;
 static const uint32_t ATIM_ARR  = 0x2C;
 
 // ==================== GTIM CCR 偏移（CH1~CH4）====================
@@ -52,18 +55,32 @@ static inline void gpio_pin_low(volatile uint8_t *base, int pin)
     *reg = *reg & ~(1 << (pin % 8));
 }
 
-static inline void gpio_pin_high(volatile uint8_t *base, int pin)
-{
-    volatile uint8_t *reg = base + 0x10 + (pin / 8);
-    *reg = *reg | (1 << (pin % 8));
-}
-
 static inline void ccr_write(volatile uint32_t *base, uint32_t offset, uint32_t val)
 {
     if (base && base != MAP_FAILED) {
         volatile uint32_t *reg = (volatile uint32_t *)((uintptr_t)base + offset);
         *reg = val;
     }
+}
+
+static inline uint32_t atim_channel_mode1(uint32_t reg, int sub_ch)
+{
+    const uint32_t shift = static_cast<uint32_t>(sub_ch * 8);
+    reg &= ~(0x3u << shift);        // CCxS=00: output compare
+    reg &= ~(0x7u << (shift + 4));  // OCxM clear
+    reg |=  (0x6u << (shift + 4));  // OCxM=110: PWM mode 1
+    reg |=  (0x1u << (shift + 3));  // OCxPE=1: preload enable
+    return reg;
+}
+
+static inline void atim_force_pwm_mode1(volatile uint32_t *base)
+{
+    if (!base || base == MAP_FAILED) return;
+
+    volatile uint32_t *ccmr1 = (volatile uint32_t *)((uintptr_t)base + ATIM_CCMR1);
+    volatile uint32_t *ccmr2 = (volatile uint32_t *)((uintptr_t)base + ATIM_CCMR2);
+    *ccmr1 = atim_channel_mode1(atim_channel_mode1(*ccmr1, 0), 1);
+    *ccmr2 = atim_channel_mode1(atim_channel_mode1(*ccmr2, 0), 1);
 }
 
 // ==================== 构造 / 析构 ====================
@@ -204,8 +221,10 @@ int GpioWatchdog::init_registers(void)
 
 void GpioWatchdog::write_safe_values(void)
 {
-    // ---- ATIM: 4路电机 IN2 raw duty=SAFE_MOTOR_DUTY ----
-    // DRV8701P IN1/IN2: IN1=HIGH and IN2=HIGH is brake/stop.
+    // ---- ATIM: 4路电机 EN high-duty=SAFE_MOTOR_DUTY ----
+    // Force PWM mode 1 so duty 0 really means 0% high on the EN pin.
+    atim_force_pwm_mode1(atim_base_);
+
     uint32_t safe_compare = 0;
     if (atim_base_ && atim_base_ != MAP_FAILED) {
         volatile uint32_t *arr =
@@ -219,7 +238,7 @@ void GpioWatchdog::write_safe_values(void)
     ccr_write(atim_base_, ATIM_CCR3, safe_compare);   // 电机3 (GPIO83)
     ccr_write(atim_base_, ATIM_CCR4, safe_compare);   // 电机4 (GPIO76)
 
-    // Keep NORMAL polarity and channel enable so the timer actively drives IN2 high.
+    // Keep NORMAL polarity and channel enable so the timer actively drives EN low.
     if (atim_base_ && atim_base_ != MAP_FAILED) {
         volatile uint32_t *ccer =
             (volatile uint32_t *)((uintptr_t)atim_base_ + ATIM_CCER);
@@ -230,16 +249,17 @@ void GpioWatchdog::write_safe_values(void)
         }
         *ccer = value;
     }
+    ccr_write(atim_base_, ATIM_EGR, 0x01);       // latch preloaded mode/duty promptly
 
     // ---- GTIM: 舵机 PWM duty=0 ----
     ccr_write(gtim_base_, GTIM_CCR2, 0);   // 舵机 (GPIO88)
 
-    // ---- GPIO: IN1方向引脚固定 HIGH + 蜂鸣器 LOW ----
+    // ---- GPIO: PH方向引脚固定 LOW + 蜂鸣器 LOW ----
     if (gpio_base_ && gpio_base_ != MAP_FAILED) {
-        gpio_pin_high(gpio_base_, PIN_MOTOR_DIR_1);  // GPIO21 HIGH
-        gpio_pin_high(gpio_base_, PIN_MOTOR_DIR_2);  // GPIO22 HIGH
-        gpio_pin_high(gpio_base_, PIN_MOTOR_DIR_3);  // GPIO23 HIGH
-        gpio_pin_high(gpio_base_, PIN_MOTOR_DIR_4);  // GPIO24 HIGH
+        gpio_pin_low(gpio_base_, PIN_MOTOR_DIR_1);   // GPIO21 LOW
+        gpio_pin_low(gpio_base_, PIN_MOTOR_DIR_2);   // GPIO22 LOW
+        gpio_pin_low(gpio_base_, PIN_MOTOR_DIR_3);   // GPIO23 LOW
+        gpio_pin_low(gpio_base_, PIN_MOTOR_DIR_4);   // GPIO24 LOW
         gpio_pin_low(gpio_base_, PIN_BUZZER);         // GPIO61 LOW
     }
 }

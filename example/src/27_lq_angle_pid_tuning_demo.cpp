@@ -19,8 +19,8 @@ void signal_handler_angle_tuning(int signum) {
 void lq_angle_pid_tuning_demo(void)
 {
     // 1. 初始化两路电机 PWM 
-    ls_atim_pwm motor_L(ATIM_PWM0_PIN81, 25000, 10000, ATIM_PWM_POL_NORMAL);
-    ls_atim_pwm motor_R(ATIM_PWM1_PIN82, 25000, 10000, ATIM_PWM_POL_NORMAL);
+    ls_atim_pwm motor_L(ATIM_PWM0_PIN81, 25000, 0, ATIM_PWM_POL_NORMAL);
+    ls_atim_pwm motor_R(ATIM_PWM1_PIN82, 25000, 0, ATIM_PWM_POL_NORMAL);
     
     // 2. 初始化电机方向引脚
     ls_gpio motor_L_Dir(PIN_21, GPIO_MODE_OUT);
@@ -209,19 +209,19 @@ void lq_angle_pid_tuning_demo(void)
         }
 
         if (speed_out_L >= 0) {
-            motor_L_Dir.gpio_level_set(GPIO_HIGH);
+            motor_L_Dir.gpio_level_set(GPIO_LOW);  
             motor_L.atim_pwm_set_active_low_duty(speed_out_L);
         } else {
-            motor_L_Dir.gpio_level_set(GPIO_LOW);
-            motor_L.atim_pwm_set_duty(-speed_out_L);
+            motor_L_Dir.gpio_level_set(GPIO_HIGH); 
+            motor_L.atim_pwm_set_active_low_duty(-speed_out_L);
         }
 
         if (speed_out_R >= 0) {
-            motor_R_Dir.gpio_level_set(GPIO_HIGH);
+            motor_R_Dir.gpio_level_set(GPIO_LOW);  
             motor_R.atim_pwm_set_active_low_duty(speed_out_R);
         } else {
-            motor_R_Dir.gpio_level_set(GPIO_LOW);
-            motor_R.atim_pwm_set_duty(-speed_out_R);
+            motor_R_Dir.gpio_level_set(GPIO_HIGH); 
+            motor_R.atim_pwm_set_active_low_duty(-speed_out_R);
         }
 
         // ==============================================
@@ -243,8 +243,6 @@ void lq_angle_pid_tuning_demo(void)
     }
 
     std::cout << "正在关闭电机..." << std::endl;
-    motor_L_Dir.gpio_level_set(GPIO_HIGH);
-    motor_R_Dir.gpio_level_set(GPIO_HIGH);
     motor_L.atim_pwm_set_active_low_duty(0);
     motor_R.atim_pwm_set_active_low_duty(0);
     motor_L.atim_pwm_enable();

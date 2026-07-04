@@ -12,15 +12,14 @@ namespace car_config
 // =====================================================================
 constexpr float kEncoderRpsToMS = 0.08870f;
 constexpr int kMotorPwmFrequencyHz = 25000;
-// DRV8701P uses IN1/IN2 control on this PCB:
-// GPIO drives IN1, PWM drives IN2. The safe stop/brake state is IN1=1, IN2=1.
-constexpr int kMotorPwmRawStopDuty = 10000;
-constexpr int kMotorPwmStopDuty = kMotorPwmRawStopDuty;
+// DRV8701E uses PH/EN control: PWM drives EN directly.
+// ATIM mode 1 makes software duty match output high duty:
+// duty 0 keeps EN low and brakes/stops; duty 10000 is full drive.
+constexpr int kMotorPwmStopDuty = 0;
 constexpr int kMotorPwmFullScale = 10000;
-constexpr int kMotorActiveLowStopDuty = 0;
 constexpr int kEncoderDiagPulsePwm = 2500;
 constexpr int kEncoderDiagPulseMs = 200;
-constexpr int kMotorInitialDuty = kMotorPwmRawStopDuty;
+constexpr int kMotorInitialDuty = kMotorPwmStopDuty;
 constexpr int kGpioProtectHeartbeatIntervalMs = 10;
 constexpr int kWatchdogHeartbeatStallTimeoutMs = 100;
 

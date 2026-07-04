@@ -83,8 +83,8 @@ void lq_vofa_speed_pid_demo(void)
     std::cout << ">>> UDP waveform sender initialized." << std::endl;
 
     // 2. Initialize motor PWM control.
-    ls_atim_pwm motor_L(ATIM_PWM0_PIN81, 25000, 10000, ATIM_PWM_POL_NORMAL);
-    ls_atim_pwm motor_R(ATIM_PWM1_PIN82, 25000, 10000, ATIM_PWM_POL_NORMAL);
+    ls_atim_pwm motor_L(ATIM_PWM0_PIN81, 25000, 0, ATIM_PWM_POL_NORMAL);
+    ls_atim_pwm motor_R(ATIM_PWM1_PIN82, 25000, 0, ATIM_PWM_POL_NORMAL);
 
     // 3. Initialize motor direction pins.
     ls_gpio motor_L_Dir(PIN_21, GPIO_MODE_OUT);
@@ -93,10 +93,8 @@ void lq_vofa_speed_pid_demo(void)
     motor_R.atim_pwm_enable();
 
     auto stop_motors = [&]() {
-    motor_L_Dir.gpio_level_set(GPIO_HIGH);
-    motor_R_Dir.gpio_level_set(GPIO_HIGH);
-    motor_L.atim_pwm_set_active_low_duty(0);
-    motor_R.atim_pwm_set_active_low_duty(0);
+        motor_L.atim_pwm_set_active_low_duty(0);
+        motor_R.atim_pwm_set_active_low_duty(0);
     };
 
     auto shutdown_motors = [&]() {
@@ -176,19 +174,19 @@ void lq_vofa_speed_pid_demo(void)
             // ==============================================
             // 5. 鐢垫満鏂瑰悜鎺у埗鍙?PWM 鍗犵┖姣旇緭�?            // ==============================================
                             if (speed_out_L >= 0.0f) {
-                motor_L_Dir.gpio_level_set(GPIO_HIGH);
+                motor_L_Dir.gpio_level_set(GPIO_LOW);
                 motor_L.atim_pwm_set_active_low_duty((int)speed_out_L);
             } else {
-                motor_L_Dir.gpio_level_set(GPIO_LOW);
-                motor_L.atim_pwm_set_duty((int)(-speed_out_L));
+                motor_L_Dir.gpio_level_set(GPIO_HIGH);
+                motor_L.atim_pwm_set_active_low_duty((int)(-speed_out_L));
             }
 
             if (speed_out_R >= 0.0f) {
-                motor_R_Dir.gpio_level_set(GPIO_HIGH);
+                motor_R_Dir.gpio_level_set(GPIO_LOW);
                 motor_R.atim_pwm_set_active_low_duty((int)speed_out_R);
             } else {
-                motor_R_Dir.gpio_level_set(GPIO_LOW);
-                motor_R.atim_pwm_set_duty((int)(-speed_out_R));
+                motor_R_Dir.gpio_level_set(GPIO_HIGH);
+                motor_R.atim_pwm_set_active_low_duty((int)(-speed_out_R));
             }
         }
 
@@ -252,8 +250,8 @@ void lq_vofa_speed_step_demo(void)
     client.udp_client_init(SERVER_IP, SERVER_PORT);
 
     // 2. 鍒濆鍖栫數�?PWM 鎺у埗
-    ls_atim_pwm motor_L(ATIM_PWM0_PIN81, 25000, 10000, ATIM_PWM_POL_NORMAL);
-    ls_atim_pwm motor_R(ATIM_PWM1_PIN82, 25000, 10000, ATIM_PWM_POL_NORMAL);
+    ls_atim_pwm motor_L(ATIM_PWM0_PIN81, 25000, 0, ATIM_PWM_POL_NORMAL);
+    ls_atim_pwm motor_R(ATIM_PWM1_PIN82, 25000, 0, ATIM_PWM_POL_NORMAL);
 
     // 3. Initialize motor direction pins.
     ls_gpio motor_L_Dir(PIN_21, GPIO_MODE_OUT);
@@ -263,10 +261,8 @@ void lq_vofa_speed_step_demo(void)
     motor_R.atim_pwm_enable();
 
     auto stop_motors = [&]() {
-    motor_L_Dir.gpio_level_set(GPIO_HIGH);
-    motor_R_Dir.gpio_level_set(GPIO_HIGH);
-    motor_L.atim_pwm_set_active_low_duty(0);
-    motor_R.atim_pwm_set_active_low_duty(0);
+        motor_L.atim_pwm_set_active_low_duty(0);
+        motor_R.atim_pwm_set_active_low_duty(0);
     };
 
     auto shutdown_motors = [&]() {
@@ -442,19 +438,19 @@ void lq_vofa_speed_step_demo(void)
         // ==============================================
         // 5. 鐢垫満鏂瑰悜鎺у埗鍙?PWM 鍗犵┖姣旇緭�?        // ==============================================
                             if (speed_out_L >= 0.0f) {
-            motor_L_Dir.gpio_level_set(GPIO_HIGH);
+            motor_L_Dir.gpio_level_set(GPIO_LOW);
             motor_L.atim_pwm_set_active_low_duty((int)speed_out_L);
         } else {
-            motor_L_Dir.gpio_level_set(GPIO_LOW);
-            motor_L.atim_pwm_set_duty((int)(-speed_out_L));
+            motor_L_Dir.gpio_level_set(GPIO_HIGH);
+            motor_L.atim_pwm_set_active_low_duty((int)(-speed_out_L));
         }
 
         if (speed_out_R >= 0.0f) {
-            motor_R_Dir.gpio_level_set(GPIO_HIGH);
+            motor_R_Dir.gpio_level_set(GPIO_LOW);
             motor_R.atim_pwm_set_active_low_duty((int)speed_out_R);
         } else {
-            motor_R_Dir.gpio_level_set(GPIO_LOW);
-            motor_R.atim_pwm_set_duty((int)(-speed_out_R));
+            motor_R_Dir.gpio_level_set(GPIO_HIGH);
+            motor_R.atim_pwm_set_active_low_duty((int)(-speed_out_R));
         }
 
         // ==============================================
@@ -510,8 +506,8 @@ void lq_vofa_speed_sine_demo(void)
     client.udp_client_init(SERVER_IP, SERVER_PORT);
 
     // 2. 鍒濆鍖栫數�?PWM 鎺у埗
-    ls_atim_pwm motor_L(ATIM_PWM0_PIN81, 25000, 10000, ATIM_PWM_POL_NORMAL);
-    ls_atim_pwm motor_R(ATIM_PWM1_PIN82, 25000, 10000, ATIM_PWM_POL_NORMAL);
+    ls_atim_pwm motor_L(ATIM_PWM0_PIN81, 25000, 0, ATIM_PWM_POL_NORMAL);
+    ls_atim_pwm motor_R(ATIM_PWM1_PIN82, 25000, 0, ATIM_PWM_POL_NORMAL);
 
     // 3. Initialize motor direction pins.
     ls_gpio motor_L_Dir(PIN_21, GPIO_MODE_OUT);
@@ -521,10 +517,8 @@ void lq_vofa_speed_sine_demo(void)
     motor_R.atim_pwm_enable();
 
     auto stop_motors = [&]() {
-    motor_L_Dir.gpio_level_set(GPIO_HIGH);
-    motor_R_Dir.gpio_level_set(GPIO_HIGH);
-    motor_L.atim_pwm_set_active_low_duty(0);
-    motor_R.atim_pwm_set_active_low_duty(0);
+        motor_L.atim_pwm_set_active_low_duty(0);
+        motor_R.atim_pwm_set_active_low_duty(0);
     };
 
     auto shutdown_motors = [&]() {
@@ -744,19 +738,19 @@ void lq_vofa_speed_sine_demo(void)
         // ==============================================
         // 5. 鐢垫満鏂瑰悜鎺у埗鍙?PWM 鍗犵┖姣旇緭�?        // ==============================================
                             if (speed_out_L >= 0.0f) {
-            motor_L_Dir.gpio_level_set(GPIO_HIGH);
+            motor_L_Dir.gpio_level_set(GPIO_LOW);
             motor_L.atim_pwm_set_active_low_duty((int)speed_out_L);
         } else {
-            motor_L_Dir.gpio_level_set(GPIO_LOW);
-            motor_L.atim_pwm_set_duty((int)(-speed_out_L));
+            motor_L_Dir.gpio_level_set(GPIO_HIGH);
+            motor_L.atim_pwm_set_active_low_duty((int)(-speed_out_L));
         }
 
         if (speed_out_R >= 0.0f) {
-            motor_R_Dir.gpio_level_set(GPIO_HIGH);
+            motor_R_Dir.gpio_level_set(GPIO_LOW);
             motor_R.atim_pwm_set_active_low_duty((int)speed_out_R);
         } else {
-            motor_R_Dir.gpio_level_set(GPIO_LOW);
-            motor_R.atim_pwm_set_duty((int)(-speed_out_R));
+            motor_R_Dir.gpio_level_set(GPIO_HIGH);
+            motor_R.atim_pwm_set_active_low_duty((int)(-speed_out_R));
         }
 
         // ==============================================
@@ -844,20 +838,18 @@ void lq_speed_loop_track_udp_tune_demo(void)
     encoder_R.encoder_clear_capture_buffer();
 
     auto stop_motors = [&]() {
-    motor_L_Dir.gpio_level_set(GPIO_HIGH);
-    motor_R_Dir.gpio_level_set(GPIO_HIGH);
-    motor_L.atim_pwm_set_active_low_duty(0);
-    motor_R.atim_pwm_set_active_low_duty(0);
-        motor_L_Dir.gpio_level_set(GPIO_HIGH);
-        motor_R_Dir.gpio_level_set(GPIO_HIGH);
+        motor_L.atim_pwm_set_active_low_duty(0);
+        motor_R.atim_pwm_set_active_low_duty(0);
+        motor_L_Dir.gpio_level_set(GPIO_LOW);
+        motor_R_Dir.gpio_level_set(GPIO_LOW);
     };
     auto apply_motor = [&](float out_l, float out_r, int forward_limit, int reverse_limit) {
         out_l = std::max(-(float)reverse_limit, std::min((float)forward_limit, out_l));
         out_r = std::max(-(float)reverse_limit, std::min((float)forward_limit, out_r));
-        if (out_l >= 0.0f) { motor_L_Dir.gpio_level_set(GPIO_HIGH); motor_L.atim_pwm_set_active_low_duty((int)out_l); }
-        else { motor_L_Dir.gpio_level_set(GPIO_LOW); motor_L.atim_pwm_set_duty((int)(-out_l)); }
-        if (out_r >= 0.0f) { motor_R_Dir.gpio_level_set(GPIO_HIGH); motor_R.atim_pwm_set_active_low_duty((int)out_r); }
-        else { motor_R_Dir.gpio_level_set(GPIO_LOW); motor_R.atim_pwm_set_duty((int)(-out_r)); }
+        if (out_l >= 0.0f) { motor_L_Dir.gpio_level_set(GPIO_LOW); motor_L.atim_pwm_set_active_low_duty((int)out_l); }
+        else { motor_L_Dir.gpio_level_set(GPIO_HIGH); motor_L.atim_pwm_set_active_low_duty((int)(-out_l)); }
+        if (out_r >= 0.0f) { motor_R_Dir.gpio_level_set(GPIO_LOW); motor_R.atim_pwm_set_active_low_duty((int)out_r); }
+        else { motor_R_Dir.gpio_level_set(GPIO_HIGH); motor_R.atim_pwm_set_active_low_duty((int)(-out_r)); }
     };
     auto send_log = [&](const char *phase, int t_ms, float target, float desired,
                         float enc_l, float enc_r, float err_l, float err_r,
@@ -1093,12 +1085,10 @@ void lq_speed_loop_recovery_return_demo(void)
 
     motor_L.atim_pwm_enable();
     motor_R.atim_pwm_enable();
-    motor_L_Dir.gpio_level_set(GPIO_HIGH);
-    motor_R_Dir.gpio_level_set(GPIO_HIGH);
     motor_L.atim_pwm_set_active_low_duty(0);
     motor_R.atim_pwm_set_active_low_duty(0);
-    motor_L_Dir.gpio_level_set(GPIO_HIGH);
-    motor_R_Dir.gpio_level_set(GPIO_HIGH);
+    motor_L_Dir.gpio_level_set(GPIO_LOW);
+    motor_R_Dir.gpio_level_set(GPIO_LOW);
 
     client.udp_send_string("speed_return,v=1,event=disabled,reason=auto_reverse_disabled_after_track_incident\n");
     client.udp_close();
@@ -1160,16 +1150,14 @@ void lq_encoder512_udp_diagnose_demo(void)
     encoder_3.encoder_clear_capture_buffer();
 
     auto stop_motors = [&]() {
-    motor_L_Dir.gpio_level_set(GPIO_HIGH);
-    motor_R_Dir.gpio_level_set(GPIO_HIGH);
-    motor_L.atim_pwm_set_active_low_duty(0);
-    motor_R.atim_pwm_set_active_low_duty(0);
-        motor_L_Dir.gpio_level_set(GPIO_HIGH);
-        motor_R_Dir.gpio_level_set(GPIO_HIGH);
+        motor_L.atim_pwm_set_active_low_duty(0);
+        motor_R.atim_pwm_set_active_low_duty(0);
+        motor_L_Dir.gpio_level_set(GPIO_LOW);
+        motor_R_Dir.gpio_level_set(GPIO_LOW);
     };
     auto set_motor_pwm = [&](int duty_l, int duty_r) {
-        motor_L_Dir.gpio_level_set(GPIO_HIGH);
-        motor_R_Dir.gpio_level_set(GPIO_HIGH);
+        motor_L_Dir.gpio_level_set(GPIO_LOW);
+        motor_R_Dir.gpio_level_set(GPIO_LOW);
         motor_L.atim_pwm_set_active_low_duty(duty_l);
         motor_R.atim_pwm_set_active_low_duty(duty_r);
     };

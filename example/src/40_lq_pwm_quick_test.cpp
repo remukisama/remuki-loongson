@@ -33,6 +33,8 @@ void lq_pwm_quick_test(void)
     const int LOG_PERIOD_MS = 50;
 
     std::printf("\n=== Quick PWM Test: %d PWM for %d ms ===\n\n", PWM, DURATION_MS);
+    std::printf("[PWM_QUICK] Expected PWM pin high duty: %d/10000 = %.1f%%\n",
+                PWM, PWM / 100.0f);
 
     gpio_protect_heartbeat_init();
     motor_Init();

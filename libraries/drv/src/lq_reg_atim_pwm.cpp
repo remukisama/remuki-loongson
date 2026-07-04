@@ -59,7 +59,8 @@ ls_atim_pwm::ls_atim_pwm(atim_pwm_pin_t _pin, uint32_t _period, uint32_t _duty, 
     // 初始化配置
     ls_writel(this->atim_egr, 0x01);            // 初始化所有寄存器
     ls_writel(this->atim_bdtr, (1 << 15));      // MOE=1, 使能主输出
-    this->atim_pwm_set_mode(ATIM_PWM_MODE_2);   // 设置 PWM 模式 2
+    // PWM mode 1 + NORMAL polarity makes set_duty(x) produce x/10000 high duty.
+    this->atim_pwm_set_mode(ATIM_PWM_MODE_1);
     this->atim_pwm_set_polarity(_pola);         // 设置 PWM 极性
     this->atim_pwm_set_period(_period);         // 设置 PWM 周期
     this->atim_pwm_set_duty(_duty);             // 设置 PWM 占空比
@@ -70,7 +71,7 @@ ls_atim_pwm::ls_atim_pwm(atim_pwm_pin_t _pin, uint32_t _period, uint32_t _duty, 
  * @brief   设置 ATIM PWM 模式.
  * @param   _mode : ATIM PWM 模式, 参考 atim_pwm_mode_t 枚举.
  * @return  none.
- * @example MyPwm.atim_pwm_set_mode(ATIM_PWM_MODE_2);
+ * @example MyPwm.atim_pwm_set_mode(ATIM_PWM_MODE_1);
  * @note    none
  ********************************************************************************/
 void ls_atim_pwm::atim_pwm_set_mode(atim_pwm_mode_t _mode)
@@ -135,8 +136,8 @@ void ls_atim_pwm::atim_pwm_set_duty(uint32_t _duty)
     }
     this->duty = _duty;
 
-    // Keep register duty as a direct raw PWM command: 3000=30%, 10000=100%.
-    // DRV8701P motor power mapping is handled by the motor layer.
+    // Direct waveform command: 0=0% high, 4000=40% high, 10000=100% high.
+    // DRV8701E PH/EN therefore uses EN high duty directly as motor power.
     ls_writel(this->atim_ccrx,
               ATIM_PWM_CLK_FRE / this->period * this->duty / ATIM_PWM_DUTY_MAX);
     pthread_mutex_unlock(&ATIM_MUTEX);
@@ -147,8 +148,8 @@ void ls_atim_pwm::atim_pwm_set_active_low_duty(uint32_t _duty)
     if (_duty > ATIM_PWM_DUTY_MAX) {
         _duty = ATIM_PWM_DUTY_MAX;
     }
-    // DRV8701P forward/brake-PWM command: 0=brake/stop (IN2 high), 10000=full drive (IN2 low).
-    this->atim_pwm_set_duty(ATIM_PWM_DUTY_MAX - _duty);
+    // Compatibility name only. Current ATIM output is direct high-duty, so do not invert.
+    this->atim_pwm_set_duty(_duty);
 }
 
 /********************************************************************************
@@ -255,8 +256,8 @@ ls_atim_pwm::~ls_atim_pwm()
 {
     if (this->atim_base != nullptr) {
         if (this->pola == ATIM_PWM_POL_NORMAL) {
-            // DRV8701P safe brake also needs IN1 high; keep IN2 high and PWM enabled.
-            this->atim_pwm_set_duty(ATIM_PWM_DUTY_MAX);
+            // DRV8701E EN low is the safe stop/brake state; keep PWM enabled to drive it.
+            this->atim_pwm_set_duty(0);
             this->atim_pwm_enable();
         } else {
             this->atim_pwm_set_duty(0);
