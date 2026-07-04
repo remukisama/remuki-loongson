@@ -151,15 +151,15 @@ void motor_Init(void)
         motor_R_Dir = new ls_gpio(PIN_22, GPIO_MODE_OUT);
     }
 
-    motor_R->atim_pwm_set_active_low_duty(0);
-    motor_L->atim_pwm_set_active_low_duty(0);
+    motor_R->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
+    motor_L->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
 
     printf("R:OK!");
 
-    motor_R->atim_pwm_enable();
-    motor_L->atim_pwm_enable();
     motor_R_Dir->gpio_level_set(GPIO_LOW);
     motor_L_Dir->gpio_level_set(GPIO_LOW);
+    motor_R->atim_pwm_enable();
+    motor_L->atim_pwm_enable();
 }
 
 void motor_Duty_R(int duty)
@@ -167,22 +167,24 @@ void motor_Duty_R(int duty)
     if (!motor_R || !motor_R_Dir) return;  // 电机未初始化时安全跳�?
     if (duty == 0)
     {
-        motor_R->atim_pwm_set_active_low_duty(0);
+        motor_R->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
         motor_R_Dir->gpio_level_set(GPIO_LOW);
     }
     else if (duty < 0)
     {
         // 反转：DIR=HIGH + 反转PWM占空比（对称力矩�?
+        motor_R->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
         const int magnitude = std::min(-duty, car_config::kMotorPwmFullScale);
-        motor_R->atim_pwm_set_active_low_duty(magnitude);
         motor_R_Dir->gpio_level_set(GPIO_HIGH);
+        motor_R->atim_pwm_set_duty(magnitude);
     }
     else
     {
-        // 正转：DIR=LOW + active_low_duty
+        // 正转：PH=LOW + EN duty
+        motor_R->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
         const int magnitude = std::min(duty, car_config::kMotorPwmFullScale);
-        motor_R->atim_pwm_set_active_low_duty(magnitude);
         motor_R_Dir->gpio_level_set(GPIO_LOW);
+        motor_R->atim_pwm_set_duty(magnitude);
     }
 }
 
@@ -191,22 +193,24 @@ void motor_Duty_L(int duty)
     if (!motor_L || !motor_L_Dir) return;  // 电机未初始化时安全跳�?
     if (duty == 0)
     {
-        motor_L->atim_pwm_set_active_low_duty(0);
+        motor_L->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
         motor_L_Dir->gpio_level_set(GPIO_LOW);
     }
     else if (duty < 0)
     {
         // 反转：DIR=HIGH + 反转PWM占空比（对称力矩�?
+        motor_L->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
         const int magnitude = std::min(-duty, car_config::kMotorPwmFullScale);
-        motor_L->atim_pwm_set_active_low_duty(magnitude);
         motor_L_Dir->gpio_level_set(GPIO_HIGH);
+        motor_L->atim_pwm_set_duty(magnitude);
     }
     else
     {
-        // 正转：DIR=LOW + active_low_duty
+        // 正转：PH=LOW + EN duty
+        motor_L->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
         const int magnitude = std::min(duty, car_config::kMotorPwmFullScale);
-        motor_L->atim_pwm_set_active_low_duty(magnitude);
         motor_L_Dir->gpio_level_set(GPIO_LOW);
+        motor_L->atim_pwm_set_duty(magnitude);
     }
 }
 
@@ -726,8 +730,8 @@ void emergency_stop() {
     if (motor_L_Dir) motor_L_Dir->gpio_level_set(GPIO_LOW);
 
     if (motor_R && motor_L) {
-        motor_R->atim_pwm_set_active_low_duty(0);
-        motor_L->atim_pwm_set_active_low_duty(0);
+        motor_R->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
+        motor_L->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
         motor_R->atim_pwm_enable();
         motor_L->atim_pwm_enable();
     }

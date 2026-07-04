@@ -78,10 +78,12 @@
 #define PIN_I2C_SDA             51          // GPIO51（I2C1_SDA）
 
 // ==================== 安全默认值 ====================
-// 当前双路驱动板正常极性、低有效：保持通道使能且原始 duty=10000 时电机停止
+// DRV8701E uses PH/EN control: PWM drives EN directly.
+// EN duty 0 brakes/stops; EN duty 10000 is full drive.
 // GTIM 反极性：duty=0 → 输出HIGH → 舵机中位（或停止）
-#define SAFE_MOTOR_DUTY         10000       // 电机停止（100%高电平）
-#define SAFE_MOTOR_DIR          0           // 方向 LOW（标定安全方向）
+#define MOTOR_EN_DUTY_MAX       10000
+#define SAFE_MOTOR_DUTY         0           // 电机停止（EN=LOW）
+#define SAFE_MOTOR_DIR          0           // PH LOW（EN=0 时方向无驱动，仅固定电平）
 #define SAFE_SERVO_DUTY         0           // 舵机停止
 #define SAFE_BUZZER             0           // 静音
 

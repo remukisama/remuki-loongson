@@ -1,4 +1,5 @@
 #include "lq_all_demo.hpp"
+#include "car_config.hpp"
 #include "gpio_protect_heartbeat.hpp"
 #include <signal.h>
 #include <unistd.h>
@@ -23,7 +24,7 @@ void atim_pwm_test_signal_handler(int)
  * @version V2.1.0
  * @note    适用与龙芯 2K0300/0301 平台.
  *          本 demo 实现 ATIM PWM 输出功能，用于测试 PWM 引脚的基本功能.
- *!         注意：该例程进攻测试 PWM，因给定占空比过大，请勿连接电机等设备，否则可能会损坏设备.
+ *!         注意：当前项目电机驱动为 DRV8701E PH/EN，PWM 为 EN 高有效。
  ********************************************************************************/
 
 /********************************************************************************
@@ -34,13 +35,13 @@ void atim_pwm_test_signal_handler(int)
  ********************************************************************************/
 void lq_atim_pwm_demo(void)
 {
-    constexpr uint32_t kTestFrequencyHz = 25000;
-    constexpr uint32_t kTestDuty = 3000; // 原始PWM直映射测试：示波器应读到约30%
+    constexpr uint32_t kTestFrequencyHz = car_config::kMotorPwmFrequencyHz;
+    constexpr uint32_t kTestDuty = 3000; // EN duty: 0=stop, 10000=full output
 
     // 默认极性的构造方式
-    ls_atim_pwm pwm1(ATIM_PWM0_PIN81, kTestFrequencyHz, 10000, ATIM_PWM_POL_NORMAL);
+    ls_atim_pwm pwm1(ATIM_PWM0_PIN81, kTestFrequencyHz, car_config::kMotorInitialDuty, ATIM_PWM_POL_NORMAL);
     // // 自定义极性的构造方式
-    ls_atim_pwm pwm2(ATIM_PWM1_PIN82, kTestFrequencyHz, 10000, ATIM_PWM_POL_NORMAL);
+    ls_atim_pwm pwm2(ATIM_PWM1_PIN82, kTestFrequencyHz, car_config::kMotorInitialDuty, ATIM_PWM_POL_NORMAL);
     // ls_atim_pwm pwm2(ATIM_PWM1_PIN82, 10000, 0);
     // // 拷贝构造使用方法, 调用 pwm3 与调用 pwm1 同效
     // ls_atim_pwm pwm3(pwm1);
@@ -57,18 +58,15 @@ void lq_atim_pwm_demo(void)
     signal(SIGHUP, atim_pwm_test_signal_handler);
     signal(SIGQUIT, atim_pwm_test_signal_handler);
 
-    pwm1dir.gpio_level_set(GPIO_HIGH);
-    pwm2dir.gpio_level_set(GPIO_HIGH);
+    pwm1dir.gpio_level_set(GPIO_LOW);
+    pwm2dir.gpio_level_set(GPIO_LOW);
     pwm1.atim_pwm_set_duty(kTestDuty);
     pwm2.atim_pwm_set_duty(kTestDuty);
     pwm1.atim_pwm_enable();
     pwm2.atim_pwm_enable();
     // pwm3.atim_pwm_enable();
     // pwm4.atim_pwm_enable();
-    // pwm2dir.gpio_level_set(GPIO_HIGH);
-    // pwm1.atim_pwm_set_duty(5000);
-    // pwm2.atim_pwm_set_duty(7000);
-    printf("[ATIM_PWM_TEST] CH0(pin81) and CH1(pin82): %u Hz, duty=%u. Press Ctrl+C to stop.\n",
+    printf("[ATIM_PWM_TEST] CH0(pin81) and CH1(pin82): %u Hz, EN duty=%u. Press Ctrl+C to stop.\n",
            kTestFrequencyHz, kTestDuty);
 
     while (!g_atim_pwm_test_stop)
@@ -77,18 +75,18 @@ void lq_atim_pwm_demo(void)
         usleep(10000);
     }
 
-    // 当前双路驱动板为低有效输入；保持100%高电平并维持PWM使能才是安全停止。
-    pwm1.atim_pwm_set_duty(10000);
-    pwm2.atim_pwm_set_duty(10000);
+    // DRV8701E PH/EN: EN=0 is stop/brake.
+    pwm1.atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
+    pwm2.atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
     pwm1.atim_pwm_enable();
     pwm2.atim_pwm_enable();
     pwm1dir.gpio_level_set(GPIO_LOW);
     pwm2dir.gpio_level_set(GPIO_LOW);
     gpio_protect_heartbeat_deinit();
 
-    printf("\n[ATIM_PWM_TEST] Both PWM channels stopped at raw duty=10000 with PWM enabled.\n");
+    printf("\n[ATIM_PWM_TEST] Both PWM channels stopped at EN duty=0 with PWM enabled.\n");
     fflush(stdout);
 
-    // 不返回，避免局部 PWM 对象析构时 disable 通道，使驱动输入悬空/落低而触发满转。
+    // 不返回，避免局部 PWM 对象析构时 disable 通道；停机态已由 EN=0 主动保持。
     _exit(0);
 }

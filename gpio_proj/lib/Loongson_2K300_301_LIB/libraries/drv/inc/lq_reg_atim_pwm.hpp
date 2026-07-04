@@ -95,7 +95,7 @@ public:
 
     void atim_pwm_set_period(uint32_t _period);             // 设置 ATIM PWM 周期
     void atim_pwm_set_duty(uint32_t _duty);                 // 设置 ATIM PWM 占空比度
-    void atim_pwm_set_active_low_duty(uint32_t _duty);      // 低有效负载功率：0=停止，10000=满输出
+    void atim_pwm_set_active_low_duty(uint32_t _duty);      // 兼容旧名；DRV8701E PH/EN 下等同 set_duty
     void atim_pwm_set_polarity(atim_pwm_polarity_t _pola);  // 设置 ATIM PWM 极性
     void atim_pwm_set_mode(atim_pwm_mode_t _mode);          // 设置 ATIM PWM 模式
 

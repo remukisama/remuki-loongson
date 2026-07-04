@@ -12,8 +12,10 @@ namespace car_config
 // =====================================================================
 constexpr float kEncoderRpsToMS = 0.08870f;
 constexpr int kMotorPwmFrequencyHz = 25000;
-constexpr int kMotorPwmStopDuty = 10000;
-constexpr int kMotorPwmFullScale = kMotorPwmStopDuty;
+// DRV8701E uses PH/EN control: PWM drives EN directly.
+// duty 0 keeps EN low and brakes/stops; duty 10000 is full drive.
+constexpr int kMotorPwmStopDuty = 0;
+constexpr int kMotorPwmFullScale = 10000;
 constexpr int kEncoderDiagPulsePwm = 2500;
 constexpr int kEncoderDiagPulseMs = 200;
 constexpr int kMotorInitialDuty = kMotorPwmStopDuty;

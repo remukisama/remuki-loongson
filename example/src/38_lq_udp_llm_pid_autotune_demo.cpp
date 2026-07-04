@@ -208,12 +208,12 @@ void lq_udp_llm_pid_autotune_demo(void)
         const int max_pwm = car_config::kMotorMaxPwm;
         v = std::max(0.0f, std::min((float)max_pwm, v));
         dir.gpio_level_set(GPIO_LOW);           // 正转 DIR=LOW
-        pwm.atim_pwm_set_active_low_duty((uint32_t)v);
+        pwm.atim_pwm_set_duty((uint32_t)v);
     };
 
     auto stop_motors = [&]() {
-        motor_L_pwm.atim_pwm_set_active_low_duty(0);
-        motor_R_pwm.atim_pwm_set_active_low_duty(0);
+        motor_L_pwm.atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
+        motor_R_pwm.atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
     };
 
     // ---- 3. 增量式 PID 初始化（与 car_config 一致） ----
