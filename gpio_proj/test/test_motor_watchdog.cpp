@@ -91,17 +91,17 @@ int main()
     // 初始：全部停止（EN=0）
     set_all_motor_duty(m1, m2, m3, m4, SAFE_MOTOR_DUTY);
     servo.gtim_pwm_set_duty(0);
-    d1.gpio_level_set(GPIO_LOW); d2.gpio_level_set(GPIO_LOW);
-    d3.gpio_level_set(GPIO_LOW); d4.gpio_level_set(GPIO_LOW);
+    d1.gpio_level_set(GPIO_HIGH); d2.gpio_level_set(GPIO_HIGH);
+    d3.gpio_level_set(GPIO_HIGH); d4.gpio_level_set(GPIO_HIGH);
 
     printf("[OK] 硬件初始化完成\n\n");
 
     // ==================== 阶段 A ====================
-    printf("=== A: 电机EN高有效20%% 舵机30%% PH=LOW 心跳正常 (3秒) ===\n");
+    printf("=== A: 电机EN高有效20%% 舵机30%% PH=HIGH 心跳正常 (3秒) ===\n");
     set_all_motor_duty(m1, m2, m3, m4, 2000);
     servo.gtim_pwm_set_duty(3000);
-    d1.gpio_level_set(GPIO_LOW); d2.gpio_level_set(GPIO_LOW);
-    d3.gpio_level_set(GPIO_LOW); d4.gpio_level_set(GPIO_LOW);
+    d1.gpio_level_set(GPIO_HIGH); d2.gpio_level_set(GPIO_HIGH);
+    d3.gpio_level_set(GPIO_HIGH); d4.gpio_level_set(GPIO_HIGH);
 
     for (int i = 0; i < 300; i++) {
         gpio::heartbeat();
@@ -122,7 +122,7 @@ int main()
 
     // ==================== 阶段 C ====================
     printf("\n=== C: 停止心跳！模拟小车线程掉线 (5秒) ===\n");
-    printf("  >>> 50ms后看门狗接管：4路电机EN拉低停车 + 舵机归零 + PH LOW <<<\n\n");
+    printf("  >>> 50ms后看门狗接管：4路电机EN拉低停车 + 舵机归零 + PH HIGH <<<\n\n");
 
     for (int i = 0; i < 500; i++) {
         usleep(10000);
@@ -138,8 +138,8 @@ int main()
         if (i == 0) {
             set_all_motor_duty(m1, m2, m3, m4, 5000);
             servo.gtim_pwm_set_duty(6000);
-            d1.gpio_level_set(GPIO_LOW); d2.gpio_level_set(GPIO_LOW);
-            d3.gpio_level_set(GPIO_LOW); d4.gpio_level_set(GPIO_LOW);
+            d1.gpio_level_set(GPIO_HIGH); d2.gpio_level_set(GPIO_HIGH);
+            d3.gpio_level_set(GPIO_HIGH); d4.gpio_level_set(GPIO_HIGH);
         }
         usleep(10000);
         if (i % 100 == 99) print_status(11000 + (i + 1) * 10);
@@ -168,14 +168,14 @@ int main()
     printf("\n=== 测试结束 ===\n");
     set_all_motor_duty(m1, m2, m3, m4, SAFE_MOTOR_DUTY);
     servo.gtim_pwm_set_duty(0);
-    d1.gpio_level_set(GPIO_LOW); d2.gpio_level_set(GPIO_LOW);
-    d3.gpio_level_set(GPIO_LOW); d4.gpio_level_set(GPIO_LOW);
+    d1.gpio_level_set(GPIO_HIGH); d2.gpio_level_set(GPIO_HIGH);
+    d3.gpio_level_set(GPIO_HIGH); d4.gpio_level_set(GPIO_HIGH);
     gpio::deinit();
 
     printf("========================================\n");
     printf("  预期示波器现象：\n");
-    printf("    A: 电机EN高电平约20%% 舵机30%%方波 PH=LOW\n");
-    printf("    B: 电机EN高电平约50%% 舵机60%%方波 PH=LOW\n");
+    printf("    A: 电机EN高电平约20%% 舵机30%%方波 PH=HIGH\n");
+    printf("    B: 电机EN高电平约50%% 舵机60%%方波 PH=HIGH\n");
     printf("    C: 50ms后 全部EN变直流LOW(安全)\n");
     printf("    D: PWM方波恢复\n");
     printf("    E: 再次50ms后 全部EN变直流LOW\n");

@@ -4,6 +4,7 @@
 
 #include "lq_ncnn.hpp"
 #include <opencv2/imgproc.hpp>
+#include <exception>
 #include <iostream>
 #include <vector>
 
@@ -65,24 +66,66 @@ bool NcnnInference::init()
 
 bool NcnnInference::infer(const cv::Mat &bgr_320x240, std::string &label)
 {
+    NcnnResult result;
+    const bool accepted = infer_with_result(bgr_320x240, result);
+    label = result.label;
+    return accepted;
+}
+
+bool NcnnInference::infer_with_result(const cv::Mat &bgr_320x240, NcnnResult &result)
+{
+    return infer_with_result(bgr_320x240, result, car_config::kNcnnObjectBottomGap);
+}
+
+bool NcnnInference::infer_with_result(const cv::Mat &bgr_320x240, NcnnResult &result, int object_bottom_gap)
+{
+    result = NcnnResult();
+    result.object_bottom_gap = object_bottom_gap;
     if (!m_initialized) return false;
     if (bgr_320x240.empty()) return false;
 
-    // 1. 红色标记检测 + 透视校正裁剪（48×48，gap=5 与训练 --object-bottom-gap 5 一致）
-    cv::Mat roi = preprocess_for_ncnn(bgr_320x240, m_crop_side, car_config::kNcnnObjectBottomGap);
-    if (roi.empty()) return false;
+    const RedMarker marker = find_red_marker(bgr_320x240, car_config::kRedMinArea);
+    if (!marker.valid) return false;
+
+    result.red_marker_valid = true;
+    result.red_box = marker.box;
+    result.red_box_points = marker.box_points;
+    result.red_area = marker.contour_area;
+
+    const RotatedRoi roi = extract_rotated_roi(
+        bgr_320x240,
+        marker,
+        m_crop_side,
+        1.0f,
+        object_bottom_gap);
+    if (roi.crop.empty()) return false;
+
+    result.roi_valid = true;
+    result.roi_points = roi.points;
 
     // 2. 缩放到模型输入尺寸（roi 已为 48×48 则无操作）
     cv::Mat input;
-    if (roi.cols != m_input_w || roi.rows != m_input_h)
-        cv::resize(roi, input, cv::Size(m_input_w, m_input_h));
+    if (roi.crop.cols != m_input_w || roi.crop.rows != m_input_h)
+        cv::resize(roi.crop, input, cv::Size(m_input_w, m_input_h));
     else
-        input = roi;
+        input = roi.crop;
+    result.input_roi = input.clone();
 
     // 3. NCNN 推理（BGR→RGB + resize + normalize 在 LQ_NCNN::Infer 内完成）
-    std::string result = m_impl->ncnn.Infer(input);
-    if (result.empty()) return false;
+    try {
+        const LQNcnnResult scored = m_impl->ncnn.InferWithScore(input);
+        m_last_logits = scored.logits;
 
-    label = result;
-    return true;
+        result.label = scored.label;
+        result.class_id = scored.class_id;
+        result.confidence = scored.confidence;
+        result.logits = scored.logits;
+        result.probabilities = scored.probabilities;
+        result.valid = scored.valid && result.confidence >= car_config::kNcnnConfidenceThreshold;
+    } catch (const std::exception &ex) {
+        std::cerr << "[NCNN] 推理异常: " << ex.what() << std::endl;
+        return false;
+    }
+
+    return result.valid;
 }

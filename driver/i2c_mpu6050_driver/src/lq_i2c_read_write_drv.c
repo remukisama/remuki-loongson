@@ -12,30 +12,33 @@
 int i2c_read_regs(struct ls_i2c_dev *dev, u8 reg, void *val, int len)
 {
     int ret;
-    // 用于描述 I2C 消息的基本数据结构
+    int retry;
     struct i2c_msg msg[2];
-    // 表示一个连接到 I2C 总线上的客户端设备
     struct i2c_client *cli = (struct i2c_client*)dev->client;
-    // 配置第一个消息(写消息)
-    msg[0].addr = cli->addr;// cli 指向的 I2C 设备的地址
-    msg[0].flags = 0;       // 消息标志位，表示一个写操作
-    msg[0].buf = &reg;      // 要读取的寄存器地址
-    msg[0].len = 1;         // 消息的数据长度 1 字节，因为只需要发送一个寄存器地址
-    // 配置第二个消息(读消息)
-    msg[1].addr = cli->addr;// cli 指向的 I2C 设备的地址
-    msg[1].flags = I2C_M_RD;// 消息标志位，表示一个读操作
-    msg[1].buf = val;       // 消息缓冲区指向 val
-    msg[1].len = len;       // 消息长度为 len，即要从寄存器读取的字节数
-    // 在 I2C 总线上进行数据传输
-    ret = i2c_transfer(cli->adapter, msg, 2);
-    if (ret == 2)
-        ret = 0;
-    else
-    {
-        printk("i2c read error. ret = %d, reg = %06x, len = %d\r\n", ret, reg, len);
-        ret = -EREMOTEIO;
+
+    msg[0].addr = cli->addr;
+    msg[0].flags = 0;
+    msg[0].buf = &reg;
+    msg[0].len = 1;
+    msg[1].addr = cli->addr;
+    msg[1].flags = I2C_M_RD;
+    msg[1].buf = val;
+    msg[1].len = len;
+
+    // 重试3次，抵抗电机EMI导致的瞬态I2C传输失败
+    for (retry = 0; retry < 3; retry++) {
+        ret = i2c_transfer(cli->adapter, msg, 2);
+        if (ret == 2) {
+            return 0;
+        }
+        // 传输失败，短暂延时后重试
+        if (retry < 2) {
+            udelay(100);
+        }
     }
-    return ret;
+
+    printk("i2c read error after 3 retries. ret = %d, reg = %06x, len = %d\r\n", ret, reg, len);
+    return -EREMOTEIO;
 }
 
 /********************************************************************************
@@ -45,14 +48,9 @@ int i2c_read_regs(struct ls_i2c_dev *dev, u8 reg, void *val, int len)
  * @return  返回获取到的数据
  * @date    2025/3/20
  ********************************************************************************/
-u8 i2c_read_reg_byte(struct ls_i2c_dev *dev, u8 reg)
+int i2c_read_reg_byte(struct ls_i2c_dev *dev, u8 reg, u8 *out)
 {
-    // 定义一个变量存储读取的数据
-    u8 data = 0;
-    // 调用上面的读取函数，将自定义结构体、要读取的寄存器地址、存储缓冲区、缓冲区长度传入函数中
-    i2c_read_regs(dev, reg, &data, 1);
-    // 返回数据
-    return data;
+    return i2c_read_regs(dev, reg, out, 1);
 }
 
 /********************************************************************************

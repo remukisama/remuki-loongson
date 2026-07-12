@@ -55,6 +55,12 @@ static inline void gpio_pin_low(volatile uint8_t *base, int pin)
     *reg = *reg & ~(1 << (pin % 8));
 }
 
+static inline void gpio_pin_high(volatile uint8_t *base, int pin)
+{
+    volatile uint8_t *reg = base + 0x10 + (pin / 8);
+    *reg = *reg | (1 << (pin % 8));
+}
+
 static inline void ccr_write(volatile uint32_t *base, uint32_t offset, uint32_t val)
 {
     if (base && base != MAP_FAILED) {
@@ -254,12 +260,12 @@ void GpioWatchdog::write_safe_values(void)
     // ---- GTIM: 舵机 PWM duty=0 ----
     ccr_write(gtim_base_, GTIM_CCR2, 0);   // 舵机 (GPIO88)
 
-    // ---- GPIO: PH方向引脚固定 LOW + 蜂鸣器 LOW ----
+    // ---- GPIO: PH方向引脚固定 HIGH（正转端，EN=0 无输出）+ 蜂鸣器 LOW ----
     if (gpio_base_ && gpio_base_ != MAP_FAILED) {
-        gpio_pin_low(gpio_base_, PIN_MOTOR_DIR_1);   // GPIO21 LOW
-        gpio_pin_low(gpio_base_, PIN_MOTOR_DIR_2);   // GPIO22 LOW
-        gpio_pin_low(gpio_base_, PIN_MOTOR_DIR_3);   // GPIO23 LOW
-        gpio_pin_low(gpio_base_, PIN_MOTOR_DIR_4);   // GPIO24 LOW
+        gpio_pin_high(gpio_base_, PIN_MOTOR_DIR_1);  // GPIO21 HIGH
+        gpio_pin_high(gpio_base_, PIN_MOTOR_DIR_2);  // GPIO22 HIGH
+        gpio_pin_high(gpio_base_, PIN_MOTOR_DIR_3);  // GPIO23 HIGH
+        gpio_pin_high(gpio_base_, PIN_MOTOR_DIR_4);  // GPIO24 HIGH
         gpio_pin_low(gpio_base_, PIN_BUZZER);         // GPIO61 LOW
     }
 }

@@ -1077,8 +1077,8 @@ static void DrawExtensionLine(void)        //绘制延长线并重新确定中�
       }
   }
   for (Ysite = 59; Ysite >= ImageStatus.OFFLine; Ysite--) {
-    ImageDeal[Ysite].Center =(ImageDeal[Ysite].LeftBorder + ImageDeal[Ysite].RightBorder) /2;                                //扫描结束，把这一块经优化之后的中间值存入
-    ImageDeal[Ysite].Wide =-ImageDeal[Ysite].LeftBorder +ImageDeal[Ysite].RightBorder;                                       //把优化之后的宽度存入
+    ImageDeal[Ysite].Center =(ImageDeal[Ysite].LeftBorder + ImageDeal[Ysite].RightBorder) /2;
+    ImageDeal[Ysite].Wide =-ImageDeal[Ysite].LeftBorder +ImageDeal[Ysite].RightBorder;
   }
 }
 
@@ -1580,12 +1580,87 @@ void GetDet()
 
   static bool det_history_valid = false;
   static float last_det_true = car_config::kImageMiddleLine;
+  static bool cross_entry_hold_active = false;
+  static bool cross_entry_core_seen = false;
+  static int cross_entry_recovery_frames = 0;
+
+  // 无元素模式的十字入口锁存：十字核心区里一侧边界会比另一侧更早出现，
+  // 若此时立即解除双弱观测保持，中线会被吸向横向支路。锁存入口方向，
+  // 直到越过十字核心且出口边界连续恢复后才重新接纳当前帧中心。
+  // 出口可能直接接弯，因此核心确认后允许仅一侧可靠边界接管；否则会在
+  // 另一侧持续丢线时永久保持入口方向，错过出口弯。
+  const bool repaired_cross = ImageStatus.Road_type == Cross_ture;
+  const bool both_sides_weak =
+      ImageStatus.Left_Line >= car_config::kCrossHoldEnterSideLossMin &&
+      ImageStatus.Right_Line >= car_config::kCrossHoldEnterSideLossMin;
+  const bool entering_cross =
+      !g_enable_element_process && !repaired_cross &&
+      (ImageStatus.WhiteLine >= car_config::kCrossMinWhiteLine ||
+       both_sides_weak);
+  if (repaired_cross) {
+    cross_entry_hold_active = false;
+    cross_entry_core_seen = false;
+    cross_entry_recovery_frames = 0;
+  } else {
+    if (entering_cross && !cross_entry_hold_active) {
+      cross_entry_hold_active = true;
+      cross_entry_core_seen = false;
+      cross_entry_recovery_frames = 0;
+    }
+    if (cross_entry_hold_active &&
+        ImageStatus.WhiteLine >= car_config::kCrossHoldCoreWhiteLineMin) {
+      cross_entry_core_seen = true;
+    }
+    if (cross_entry_hold_active && entering_cross) {
+      cross_entry_recovery_frames = 0;
+    }
+  }
+  if (cross_entry_hold_active && !entering_cross) {
+    const bool common_exit_quality =
+        ImageStatus.OFFLine < car_config::kCrossHoldReleaseOfflineMax &&
+        ImageStatus.WhiteLine <= car_config::kCrossHoldReleaseWhiteLineMax;
+    const bool both_sides_recovered =
+        ImageStatus.Left_Line <= car_config::kCrossHoldReleaseSideLossMax &&
+        ImageStatus.Right_Line <= car_config::kCrossHoldReleaseSideLossMax;
+    const bool exit_corridor_valid =
+        is_border_found(ImageDeal[TowPoint].IsLeftFind) &&
+        is_border_found(ImageDeal[TowPoint].IsRightFind) &&
+        is_road_width_valid(
+            TowPoint,
+            ImageDeal[TowPoint].RightBorder - ImageDeal[TowPoint].LeftBorder);
+    const bool one_side_curve_exit_recovered =
+        cross_entry_core_seen &&
+        exit_corridor_valid &&
+        (ImageStatus.Left_Line <= car_config::kCrossHoldReleaseSideLossMax ||
+         ImageStatus.Right_Line <= car_config::kCrossHoldReleaseSideLossMax);
+    const bool cross_exit_recovered =
+        common_exit_quality &&
+        (both_sides_recovered || one_side_curve_exit_recovered);
+    if (cross_exit_recovered) {
+      cross_entry_recovery_frames++;
+      if (cross_entry_recovery_frames >= car_config::kCrossHoldReleaseFrames) {
+        cross_entry_hold_active = false;
+        cross_entry_core_seen = false;
+        cross_entry_recovery_frames = 0;
+      }
+    } else {
+      cross_entry_recovery_frames = 0;
+    }
+  }
+  if (cross_entry_hold_active) {
+    ImageStatus.Road_type = Cross;
+  }
+
   const bool det_bad_frame =
-      ImageStatus.OFFLine >= 45 ||
+      cross_entry_hold_active ||
+      ImageStatus.OFFLine >= car_config::kBadVisionDetHoldOfflineThreshold ||
       (ImageStatus.Left_Line >= car_config::kCurveCenterOppositeLossMax &&
        ImageStatus.Right_Line >= car_config::kCurveCenterOppositeLossMax);
   if (det_bad_frame) {
-    det_history_valid = false;
+    // 双边同时弱观测时，当前帧中心可能直接落到画面边缘或邻道。
+    // 保持上一有效控制中心，等至少一侧边界恢复后再继续更新，
+    // 避免 Det_True 在坏帧中跨越赛道并瞬间反向打满转向。
+    DetTemp = det_history_valid ? last_det_true : car_config::kImageMiddleLine;
   } else {
     if (det_history_valid) {
       const float max_det_step = 12.0f;
@@ -2805,7 +2880,10 @@ void Straightacc_Test(void)
       }
 
       // 添加UI显示状态更新：当没有在特殊元素内时，实时反馈当前赛道是直道还是常规（弯道等）
-      if (ImageFlag.image_element_rings == 0 && ImageStatus.Road_type != Barn_in) {
+      if (ImageFlag.image_element_rings == 0 &&
+          ImageStatus.Road_type != Barn_in &&
+          ImageStatus.Road_type != Cross &&
+          ImageStatus.Road_type != Cross_ture) {
           if (ImageStatus.straight_acc_flag == 1) {
               ImageStatus.Road_type = Straight;
           } else {
@@ -2939,7 +3017,7 @@ void imageprocess(void)
 
   // 十字角点补线：在延长线之后、滤波之前，用角点几何特征重构十字边界
   // 如果成功补线，后续RouteFilter和GetDet会使用补好的边界
-  if (!(car_config::kBasicLineBaselineMode && !g_enable_element_process)) {
+  if (g_enable_element_process || car_config::kBasicCrossRepairEnable) {
     CrossCornerRepair();
   }
 

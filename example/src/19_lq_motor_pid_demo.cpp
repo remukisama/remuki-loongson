@@ -66,24 +66,24 @@ void lq_motor_pid_demo(void)
     //     // 6. 执行到底层电机驱动
     //     if (current_pwm1 >= 0) 
     //     {
-    //         pwm1dir.gpio_level_set(GPIO_LOW); // 控制电机正转 (如果是倒退，把1改成0即可)
-    //         pwm1.atim_pwm_set_active_low_duty((uint32_t)current_pwm1);
+    //         pwm1dir.gpio_level_set(GPIO_HIGH); // 控制电机正转 (如果是倒退，把1改成0即可)
+    //         pwm1.atim_pwm_set_duty((uint32_t)current_pwm1);
     //     } 
     //     else 
     //     {
-    //         pwm1dir.gpio_level_set(GPIO_HIGH); // 控制电机反转
-    //         pwm1.atim_pwm_set_active_low_duty((uint32_t)(-current_pwm1)); // duty不能接收负数
+    //         pwm1dir.gpio_level_set(GPIO_LOW); // 控制电机反转
+    //         pwm1.atim_pwm_set_duty((uint32_t)(-current_pwm1)); // duty不能接收负数
     //     }
 
     //     if (current_pwm2 >= 0) 
     //     {
-    //         pwm2dir.gpio_level_set(GPIO_LOW); // 控制电机正转 (如果是倒退，把1改成0即可)
-    //         pwm2.atim_pwm_set_active_low_duty((uint32_t)current_pwm2);
+    //         pwm2dir.gpio_level_set(GPIO_HIGH); // 控制电机正转 (如果是倒退，把1改成0即可)
+    //         pwm2.atim_pwm_set_duty((uint32_t)current_pwm2);
     //     } 
     //     else 
     //     {
-    //         pwm2dir.gpio_level_set(GPIO_HIGH); // 控制电机反转
-    //         pwm2.atim_pwm_set_active_low_duty((uint32_t)(-current_pwm2)); // duty不能接收负数
+    //         pwm2dir.gpio_level_set(GPIO_LOW); // 控制电机反转
+    //         pwm2.atim_pwm_set_duty((uint32_t)(-current_pwm2)); // duty不能接收负数
     //     }
 
     //     // // --- 打印信息查看平滑度 ---

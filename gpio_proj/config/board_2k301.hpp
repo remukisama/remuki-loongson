@@ -80,10 +80,11 @@
 // ==================== 安全默认值 ====================
 // DRV8701E uses PH/EN control: PWM drives EN directly.
 // ATIM mode 1: duty 0=0% high stop/brake; duty 10000=100% high full drive.
+// PH=HIGH 为正转方向（实测确认）。
 // GTIM 反极性：duty=0 → 输出HIGH → 舵机中位（或停止）
 #define MOTOR_EN_DUTY_MAX       10000
 #define SAFE_MOTOR_DUTY         0           // 电机停止（EN=0%高电平）
-#define SAFE_MOTOR_DIR          0           // PH LOW（EN=0 时方向无驱动，仅固定电平）
+#define SAFE_MOTOR_DIR          1           // PH HIGH（正转方向端，EN=0 时无输出）
 #define SAFE_SERVO_DUTY         0           // 舵机停止
 #define SAFE_BUZZER             0           // 静音
 

@@ -81,17 +81,41 @@ float AttitudeCascade::calc_diff_speed_bypass_angle(float target_gyro_z,
                                                     const Mpu6050Data& data,
                                                     float dt) {
     if (dt <= 0.0001f || dt > 0.1f) dt = 0.005f;
-    const float gyro_z = data.gyro_z;
-    gyro_z_filtered_ = gyro_z;
-    gyro_pid.err = target_gyro_z - gyro_z;
+
+    // --- 信号调理：尖峰拒绝 → 测量限幅 → 一阶低通滤波 → 死区 ---
+    float gyro_z = data.gyro_z;
+
+    // 1. 尖峰拒绝：单帧异常值（如 MPU6050 静止时偶发 -359°/s）用上次有效值替代
+    if (std::fabs(gyro_z) > car_config::kGyroRawSpikeRejectDps) {
+        gyro_z = last_gyro_z_measurement_;
+    }
+
+    // 2. 测量限幅：防止超出物理量程的异常值进入 PID
+    gyro_z = clamp_float(gyro_z,
+                         -car_config::kGyroMeasurementLimitDps,
+                         car_config::kGyroMeasurementLimitDps);
+
+    // 3. 一阶低通滤波：y[n] = y[n-1] + alpha * (x[n] - y[n-1])
+    gyro_z_filtered_ = gyro_z_filtered_ * (1.0f - car_config::kGyroLpfAlpha) +
+                       gyro_z * car_config::kGyroLpfAlpha;
+
+    // 4. 死区：滤除静止零漂
+    if (std::fabs(gyro_z_filtered_) < car_config::kGyroDeadBandDps) {
+        gyro_z_filtered_ = 0.0f;
+    }
+
+    gyro_pid.err = target_gyro_z - gyro_z_filtered_;
     gyro_pid.integral = clamp_float(gyro_pid.integral + gyro_pid.err * dt,
                                     -gyro_pid.int_max,
                                     gyro_pid.int_max);
     const float derivative = (gyro_pid.err - gyro_pid.last_err) / dt;
-    float out = gyro_pid.P * gyro_pid.err +
+    const float feedforward = target_gyro_z * car_config::kGyroFeedforwardGain;
+    float out = feedforward +
+                gyro_pid.P * gyro_pid.err +
                 gyro_pid.I * gyro_pid.integral +
                 gyro_pid.D * derivative;
     out = clamp_float(out, -gyro_pid.out_max, gyro_pid.out_max);
+
     last_gyro_z_measurement_ = gyro_z;
     gyro_pid.output = out;
     gyro_pid.last_err = gyro_pid.err;

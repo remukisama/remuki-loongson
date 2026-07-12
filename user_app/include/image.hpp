@@ -366,5 +366,6 @@ extern ImageStatustypedef ImageStatus;  //图像的全局变量
 extern ImageFlagtypedef ImageFlag;
 extern SystemDatatypedef SystemData;
 extern ImageParametertypedef ImageParameter;
+extern ImageDealDatatypedef ImageDeal[60]; // 最终图像边界数据
 extern float variance, variance_acc;  //方差--直线检测用
 #endif

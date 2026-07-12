@@ -1,7 +1,10 @@
 #include "lq_vision_capture_demo.hpp"
+#include "main.hpp"
+#include "ncnn_inference.hpp"
 #include "user_app.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -10,6 +13,7 @@
 #include <deque>
 #include <mutex>
 #include <opencv2/opencv.hpp>
+#include <string>
 #include <sys/stat.h>
 #include <thread>
 #include <utility>
@@ -130,6 +134,435 @@ cv::Mat make_raw_roi_frame()
     return make_raw_roi_frame_from(image_cv_get_hires_frame().clone(), ImageStatus);
 }
 
+const char *ncnn_action_name(const std::string &label)
+{
+    if (label == car_config::kNcnnLabel0) return "right";
+    if (label == car_config::kNcnnLabel1) return "straight";
+    if (label == car_config::kNcnnLabel2) return "left";
+    return "none";
+}
+
+float ncnn_probability_at(const NcnnResult &result, int index)
+{
+    if (index < 0 || index >= static_cast<int>(result.probabilities.size())) return 0.0f;
+    return result.probabilities[index];
+}
+
+struct NcnnGapObserveResult {
+    int gap = 0;
+    NcnnResult result;
+    std::string roi_path;
+};
+
+struct NcnnDecisionVote {
+    bool valid = false;
+    bool supplies = false;
+    bool vehicles = false;
+    bool weapons = false;
+};
+
+struct NcnnDecisionState {
+    bool locked = false;
+    std::string label;
+    int locked_frame = -1;
+    int window_size = 0;
+    int supplies_votes = 0;
+    int vehicles_votes = 0;
+    int weapons_votes = 0;
+};
+
+const int *ncnn_observe_gaps(size_t &count)
+{
+    static const int gaps[] = {0, 2, 5, 8};
+    count = sizeof(gaps) / sizeof(gaps[0]);
+    return gaps;
+}
+
+constexpr int kNcnnDecisionWindowSize = 8;
+constexpr int kNcnnSuppliesVotesNeeded = 2;
+constexpr int kNcnnVehiclesVotesNeeded = 4;
+constexpr int kNcnnWeaponsVotesNeeded = 4;
+constexpr float kNcnnSuppliesGap0Threshold = 0.55f;
+constexpr float kNcnnVehiclesGap2Threshold = 0.90f;
+constexpr float kNcnnWeaponsGap025Threshold = 0.90f;
+constexpr int kNcnnDecisionResetNoRedFrames = 12;
+
+std::string save_ncnn_roi_debug(const NcnnResult &result, int frame_index, const std::string &tag, int sequence)
+{
+    if (!result.roi_valid || result.input_roi.empty()) return {};
+    char path[192];
+    std::snprintf(path, sizeof(path),
+                  "/home/root/ncnn_debug_roi/roi_%04d_f%06d_g%02d_%s_%s_c%03d.jpg",
+                  sequence,
+                  frame_index,
+                  result.object_bottom_gap,
+                  tag.empty() ? "element" : tag.c_str(),
+                  result.label.empty() ? "none" : result.label.c_str(),
+                  static_cast<int>(result.confidence * 1000.0f + 0.5f));
+    if (!cv::imwrite(path, result.input_roi)) return {};
+    return path;
+}
+
+void draw_points(cv::Mat &frame, const std::vector<cv::Point2f> &points, const cv::Scalar &color)
+{
+    if (points.size() < 2) return;
+    for (size_t i = 0; i < points.size(); ++i) {
+        const cv::Point p0(cvRound(points[i].x), cvRound(points[i].y));
+        const cv::Point p1(cvRound(points[(i + 1) % points.size()].x), cvRound(points[(i + 1) % points.size()].y));
+        cv::line(frame, p0, p1, color, 2, cv::LINE_AA);
+    }
+}
+
+cv::Scalar ncnn_gap_color(int index)
+{
+    static const cv::Scalar colors[] = {
+        cv::Scalar(0, 255, 0),
+        cv::Scalar(255, 255, 0),
+        cv::Scalar(255, 0, 255),
+        cv::Scalar(0, 165, 255)
+    };
+    return colors[index % (sizeof(colors) / sizeof(colors[0]))];
+}
+
+cv::Mat make_ncnn_observe_frame(
+    cv::Mat frame,
+    const std::vector<NcnnGapObserveResult> &gap_results,
+    const NcnnDecisionState &decision,
+    int frame_index,
+    const char *tag)
+{
+    if (frame.empty()) {
+        frame = cv::Mat::zeros(car_config::kCameraHiresHeight, car_config::kCameraHiresWidth, CV_8UC3);
+    }
+
+    const NcnnResult empty_result;
+    const NcnnResult &base_result = gap_results.empty() ? empty_result : gap_results.front().result;
+
+    const int src_width = std::max(1, frame.cols);
+    const int src_height = std::max(1, frame.rows);
+    cv::resize(frame, frame, cv::Size(640, 480), 0, 0, cv::INTER_LINEAR);
+    const float sx = 640.0f / src_width;
+    const float sy = 480.0f / src_height;
+
+    if (base_result.red_marker_valid) {
+        cv::Rect red_box(cvRound(base_result.red_box.x * sx),
+                         cvRound(base_result.red_box.y * sy),
+                         cvRound(base_result.red_box.width * sx),
+                         cvRound(base_result.red_box.height * sy));
+        cv::rectangle(frame, red_box, cv::Scalar(0, 255, 255), 2);
+
+        std::vector<cv::Point2f> scaled_red;
+        scaled_red.reserve(base_result.red_box_points.size());
+        for (const cv::Point2f &point : base_result.red_box_points) {
+            scaled_red.emplace_back(point.x * sx, point.y * sy);
+        }
+        draw_points(frame, scaled_red, cv::Scalar(0, 200, 255));
+    }
+
+    for (size_t i = 0; i < gap_results.size(); ++i) {
+        const NcnnResult &result = gap_results[i].result;
+        if (!result.roi_valid) continue;
+        std::vector<cv::Point2f> scaled_roi;
+        scaled_roi.reserve(result.roi_points.size());
+        for (const cv::Point2f &point : result.roi_points) {
+            scaled_roi.emplace_back(point.x * sx, point.y * sy);
+        }
+        draw_points(frame, scaled_roi, ncnn_gap_color(static_cast<int>(i)));
+    }
+
+    cv::rectangle(frame, cv::Point(0, 0), cv::Point(frame.cols - 1, 182), cv::Scalar(0, 0, 0), -1);
+    char text[224];
+    std::snprintf(text, sizeof(text), "NCNN GAP OBS %s f:%d red:%d area:%.0f th:%.2f",
+                  tag ? tag : "-",
+                  frame_index,
+                  base_result.red_marker_valid ? 1 : 0,
+                  base_result.red_area,
+                  car_config::kNcnnConfidenceThreshold);
+    cv::putText(frame, text, cv::Point(8, 24), cv::FONT_HERSHEY_SIMPLEX,
+                0.58, cv::Scalar(0, 255, 255), 1, cv::LINE_AA);
+
+    int y = 50;
+    for (size_t i = 0; i < gap_results.size(); ++i) {
+        const NcnnResult &result = gap_results[i].result;
+        const char *label = result.label.empty() ? "-" : result.label.c_str();
+        std::snprintf(text, sizeof(text), "g%-2d %s v:%d c:%4.1f S/V/W:%4.1f %4.1f %4.1f",
+                      gap_results[i].gap,
+                      label,
+                      result.valid ? 1 : 0,
+                      result.confidence * 100.0f,
+                      ncnn_probability_at(result, 0) * 100.0f,
+                      ncnn_probability_at(result, 1) * 100.0f,
+                      ncnn_probability_at(result, 2) * 100.0f);
+        cv::putText(frame, text, cv::Point(8, y), cv::FONT_HERSHEY_SIMPLEX,
+                    0.48, result.valid ? ncnn_gap_color(static_cast<int>(i)) : cv::Scalar(190, 190, 190), 1, cv::LINE_AA);
+        y += 24;
+    }
+
+    std::snprintf(text, sizeof(text), "LOCK:%s action:%s win:%d S/V/W:%d/%d/%d",
+                  decision.locked ? decision.label.c_str() : "-",
+                  decision.locked ? ncnn_action_name(decision.label) : "none",
+                  decision.window_size,
+                  decision.supplies_votes,
+                  decision.vehicles_votes,
+                  decision.weapons_votes);
+    cv::putText(frame, text, cv::Point(8, 146), cv::FONT_HERSHEY_SIMPLEX,
+                0.52, decision.locked ? cv::Scalar(0, 255, 0) : cv::Scalar(220, 220, 220), 1, cv::LINE_AA);
+
+    std::snprintf(text, sizeof(text), "rule: full8 g0S>=.55x2 | g2V>=.90x4 | g0+g2+g5W>=.90x4");
+    cv::putText(frame, text, cv::Point(8, 170), cv::FONT_HERSHEY_SIMPLEX,
+                0.52, cv::Scalar(220, 220, 220), 1, cv::LINE_AA);
+    return frame;
+}
+
+class NcnnObserveWorker {
+public:
+    bool start(const char *host, int port)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (running_) return true;
+        if (!ncnn_.init()) {
+            std::printf("[NCNN_OBS][WARN] NCNN init failed; observe disabled\n");
+            return false;
+        }
+        mkdir("/home/root/ncnn_debug_roi", 0755);
+        udp_client_.udp_client_init(host, port);
+        host_ = host ? host : "";
+        port_ = port;
+        saved_roi_count_ = 0;
+        clear_decision_state();
+        stopping_ = false;
+        pending_ = false;
+        running_ = true;
+        worker_ = std::thread(&NcnnObserveWorker::run, this);
+        std::printf("[NCNN_OBS] UDP stream to %s:%d, every %d frames, confidence>=%.2f\n",
+                    host_.c_str(),
+                    port_,
+                    car_config::kNcnnObserveUdpEveryFrames,
+                    car_config::kNcnnConfidenceThreshold);
+        return true;
+    }
+
+    void submit(const cv::Mat &frame, int frame_index, const char *tag)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!running_ || frame.empty()) return;
+        latest_frame_ = frame.clone();
+        latest_frame_index_ = frame_index;
+        latest_tag_ = tag ? tag : "";
+        pending_ = true;
+        cv_.notify_one();
+    }
+
+    void stop()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!running_) return;
+            stopping_ = true;
+        }
+        cv_.notify_one();
+        if (worker_.joinable()) worker_.join();
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        running_ = false;
+        stopping_ = false;
+        pending_ = false;
+        latest_frame_.release();
+    }
+
+private:
+    void clear_decision_state()
+    {
+        decision_window_.clear();
+        decision_state_ = NcnnDecisionState();
+        no_red_observe_count_ = 0;
+    }
+
+    const NcnnResult *find_gap_result(const std::vector<NcnnGapObserveResult> &gap_results, int gap) const
+    {
+        for (const NcnnGapObserveResult &gap_result : gap_results) {
+            if (gap_result.gap == gap) return &gap_result.result;
+        }
+        return nullptr;
+    }
+
+    NcnnDecisionVote make_decision_vote(const std::vector<NcnnGapObserveResult> &gap_results) const
+    {
+        NcnnDecisionVote vote;
+        const NcnnResult *g0 = find_gap_result(gap_results, 0);
+        const NcnnResult *g2 = find_gap_result(gap_results, 2);
+        const NcnnResult *g5 = find_gap_result(gap_results, 5);
+        const NcnnResult *g8 = find_gap_result(gap_results, 8);
+        if (!g0 || !g2 || !g5 || !g8 ||
+            !g0->roi_valid || !g2->roi_valid || !g5->roi_valid || !g8->roi_valid) {
+            return vote;
+        }
+
+        vote.valid = true;
+        vote.supplies =
+            ncnn_probability_at(*g0, 0) >= kNcnnSuppliesGap0Threshold;
+        vote.vehicles =
+            ncnn_probability_at(*g2, 1) >= kNcnnVehiclesGap2Threshold;
+        vote.weapons =
+            ncnn_probability_at(*g0, 2) >= kNcnnWeaponsGap025Threshold &&
+            ncnn_probability_at(*g2, 2) >= kNcnnWeaponsGap025Threshold &&
+            ncnn_probability_at(*g5, 2) >= kNcnnWeaponsGap025Threshold;
+        return vote;
+    }
+
+    NcnnDecisionState update_decision(const std::vector<NcnnGapObserveResult> &gap_results, int frame_index)
+    {
+        const bool red_visible =
+            !gap_results.empty() && gap_results.front().result.red_marker_valid;
+        if (!red_visible) {
+            ++no_red_observe_count_;
+            if (no_red_observe_count_ > kNcnnDecisionResetNoRedFrames) {
+                clear_decision_state();
+            }
+            return decision_state_;
+        }
+        no_red_observe_count_ = 0;
+
+        const NcnnDecisionVote vote = make_decision_vote(gap_results);
+        if (vote.valid) {
+            decision_window_.push_back(vote);
+            while (static_cast<int>(decision_window_.size()) > kNcnnDecisionWindowSize) {
+                decision_window_.pop_front();
+            }
+        }
+
+        int supplies_votes = 0;
+        int vehicles_votes = 0;
+        int weapons_votes = 0;
+        for (const NcnnDecisionVote &item : decision_window_) {
+            if (item.supplies) ++supplies_votes;
+            if (item.vehicles) ++vehicles_votes;
+            if (item.weapons) ++weapons_votes;
+        }
+
+        decision_state_.window_size = static_cast<int>(decision_window_.size());
+        decision_state_.supplies_votes = supplies_votes;
+        decision_state_.vehicles_votes = vehicles_votes;
+        decision_state_.weapons_votes = weapons_votes;
+
+        if (!decision_state_.locked &&
+            decision_state_.window_size >= kNcnnDecisionWindowSize) {
+            if (supplies_votes >= kNcnnSuppliesVotesNeeded &&
+                supplies_votes >= weapons_votes) {
+                decision_state_.locked = true;
+                decision_state_.label = car_config::kNcnnLabel0;
+                decision_state_.locked_frame = frame_index;
+            } else if (vehicles_votes >= kNcnnVehiclesVotesNeeded) {
+                decision_state_.locked = true;
+                decision_state_.label = car_config::kNcnnLabel1;
+                decision_state_.locked_frame = frame_index;
+            } else if (weapons_votes >= kNcnnWeaponsVotesNeeded) {
+                decision_state_.locked = true;
+                decision_state_.label = car_config::kNcnnLabel2;
+                decision_state_.locked_frame = frame_index;
+            }
+        }
+
+        return decision_state_;
+    }
+
+    void run()
+    {
+        for (;;) {
+            cv::Mat frame;
+            int frame_index = 0;
+            std::string tag;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [this] { return stopping_ || pending_; });
+                if (stopping_ && !pending_) return;
+                frame = latest_frame_;
+                frame_index = latest_frame_index_;
+                tag = latest_tag_;
+                pending_ = false;
+            }
+
+            std::vector<NcnnGapObserveResult> gap_results;
+            size_t gap_count = 0;
+            const int *gaps = ncnn_observe_gaps(gap_count);
+            gap_results.reserve(gap_count);
+            for (size_t i = 0; i < gap_count; ++i) {
+                NcnnGapObserveResult gap_result;
+                gap_result.gap = gaps[i];
+                const bool accepted = ncnn_.infer_with_result(frame, gap_result.result, gaps[i]);
+                gap_result.result.valid = accepted;
+                if (gap_result.result.roi_valid && saved_roi_count_ < 500) {
+                    gap_result.roi_path = save_ncnn_roi_debug(gap_result.result, frame_index, tag, ++saved_roi_count_);
+                }
+                gap_results.push_back(std::move(gap_result));
+            }
+
+            const NcnnDecisionState decision = update_decision(gap_results, frame_index);
+            const cv::Mat overlay = make_ncnn_observe_frame(frame, gap_results, decision, frame_index, tag.c_str());
+            udp_client_.udp_send_image(overlay, car_config::kNcnnObserveJpegQuality);
+
+            const bool should_print =
+                (!gap_results.empty() && gap_results.front().result.red_marker_valid) ||
+                (frame_index % 60) == 0;
+            if (should_print) {
+                for (const NcnnGapObserveResult &gap_result : gap_results) {
+                    const NcnnResult &result = gap_result.result;
+                    std::printf("[NCNN_GAP] f:%d tag:%s gap:%d red:%d roi:%d valid:%d label:%s conf:%.3f pS:%.3f pV:%.3f pW:%.3f action:%s area:%.0f roi_file:%s\n",
+                                frame_index,
+                                tag.c_str(),
+                                gap_result.gap,
+                                result.red_marker_valid ? 1 : 0,
+                                result.roi_valid ? 1 : 0,
+                                result.valid ? 1 : 0,
+                                result.label.empty() ? "-" : result.label.c_str(),
+                                result.confidence,
+                                ncnn_probability_at(result, 0),
+                                ncnn_probability_at(result, 1),
+                                ncnn_probability_at(result, 2),
+                                ncnn_action_name(result.label),
+                                result.red_area,
+                                gap_result.roi_path.empty() ? "-" : gap_result.roi_path.c_str());
+                }
+                std::printf("[NCNN_LOCK] f:%d tag:%s locked:%d label:%s action:%s lock_frame:%d window:%d votesS:%d votesV:%d votesW:%d\n",
+                            frame_index,
+                            tag.c_str(),
+                            decision.locked ? 1 : 0,
+                            decision.locked ? decision.label.c_str() : "-",
+                            decision.locked ? ncnn_action_name(decision.label) : "none",
+                            decision.locked_frame,
+                            decision.window_size,
+                            decision.supplies_votes,
+                            decision.vehicles_votes,
+                            decision.weapons_votes);
+            }
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    cv::Mat latest_frame_;
+    int latest_frame_index_ = 0;
+    std::string latest_tag_;
+    std::string host_;
+    int port_ = 0;
+    bool running_ = false;
+    bool stopping_ = false;
+    bool pending_ = false;
+    int saved_roi_count_ = 0;
+    int no_red_observe_count_ = 0;
+    std::deque<NcnnDecisionVote> decision_window_;
+    NcnnDecisionState decision_state_;
+    std::thread worker_;
+    NcnnInference ncnn_;
+    lq_udp_client udp_client_;
+};
+
+NcnnObserveWorker &ncnn_observe_worker()
+{
+    static NcnnObserveWorker worker;
+    return worker;
+}
+
 struct RaceSnapshot {
     int index = 0;
     int frame_index = 0;
@@ -228,6 +661,21 @@ RaceCaptureWriter &race_capture_writer()
 
 } // namespace
 
+bool lq_ncnn_observe_start(const char *host, int port)
+{
+    return ncnn_observe_worker().start(host, port);
+}
+
+void lq_ncnn_observe_submit(const cv::Mat &frame, int frame_index, const char *tag)
+{
+    ncnn_observe_worker().submit(frame, frame_index, tag);
+}
+
+void lq_ncnn_observe_stop(void)
+{
+    ncnn_observe_worker().stop();
+}
+
 int lq_vision_capture_demo(void)
 {
     const char *dir = "/tmp/vision_capture";
@@ -315,4 +763,196 @@ void lq_vision_capture_maybe_save_race_frame(int frame_index)
         ++saved;
         last_saved_frame = frame_index;
     }
+}
+
+// =====================================================================
+// NCNN/视觉观测模式：不驱动电机，普通元素处理关闭，UDP图传/TFT屏显示
+// =====================================================================
+
+// TFT 颜色 (lq_display_color_t 枚举)
+static const lq_display_color_t TFT_BLACK   = U16BLACK;
+static const lq_display_color_t TFT_WHITE   = U16WHITE;
+static const lq_display_color_t TFT_RED     = U16RED;
+static const lq_display_color_t TFT_GREEN   = U16GREEN;
+static const lq_display_color_t TFT_BLUE    = U16BLUE;
+static const lq_display_color_t TFT_YELLOW  = U16YELLOW;
+static const lq_display_color_t TFT_CYAN    = U16CYAN;
+static const lq_display_color_t TFT_MAGENTA = U16PURPLE;
+static const lq_display_color_t TFT_ORANGE  = U16ORANGE;
+
+static const char *element_road_name(RoadType_e type)
+{
+    switch (type) {
+    case zero:        return "zero";
+    case Normol:      return "Normal";
+    case Straight:    return "Straight";
+    case Cross:       return "Cross";
+    case Ramp:        return "Ramp";
+    case LeftCirque:  return "LeftRing";
+    case RightCirque: return "RightRing";
+    case Cross_ture:  return "CrossTrue";
+    case Barn_in:     return "BarnIn";
+    default:          return "Unknown";
+    }
+}
+
+static void element_observe_draw_tft(void)
+{
+    // 清屏
+    lq_tft18_drv_cls(TFT_BLACK);
+
+    // 画二值图 (60行x80列 -> TFT 128x128，缩放到 80x60 居中)
+    uint8_t xoff = 0, yoff = 0;
+    for (int y = 0; y < 60; ++y) {
+        for (int x = 0; x < 80; ++x) {
+            if (img1[y][x]) {
+                lq_tft18_drv_draw_dot(xoff + x, yoff + y, TFT_WHITE);
+            }
+        }
+    }
+
+    // 画左边线（蓝）、右边线（绿）、中线（红）、初始边界（青/黄）
+    for (int y = 0; y < 60; ++y) {
+        int lx = ImageDeal[y].LeftBorder;
+        int rx = ImageDeal[y].RightBorder;
+        int cx = ImageDeal[y].Center;
+        int lxf = ImageDeal[y].LeftBoundary_First;
+        int rxf = ImageDeal[y].RightBoundary_First;
+
+        if (lxf >= 0 && lxf < 80)
+            lq_tft18_drv_draw_dot(xoff + lxf, yoff + y, TFT_CYAN);
+        if (rxf >= 0 && rxf < 80)
+            lq_tft18_drv_draw_dot(xoff + rxf, yoff + y, TFT_YELLOW);
+        if (lx >= 0 && lx < 80)
+            lq_tft18_drv_draw_dot(xoff + lx, yoff + y, TFT_BLUE);
+        if (rx >= 0 && rx < 80)
+            lq_tft18_drv_draw_dot(xoff + rx, yoff + y, TFT_GREEN);
+        if (cx >= 0 && cx < 80)
+            lq_tft18_drv_draw_dot(xoff + cx, yoff + y, TFT_RED);
+    }
+
+    // 画前瞻线（黄色横线）
+    int tp = ImageStatus.TowPoint;
+    if (tp >= 0 && tp < 60) {
+        for (int x = 0; x < 80; ++x)
+            lq_tft18_drv_draw_dot(xoff + x, yoff + tp, TFT_YELLOW);
+    }
+
+    // 状态文字（底部，TFT 128宽，64行以下为文字区）
+    char buf[64];
+    int ty = 64;
+    std::snprintf(buf, sizeof(buf), "Road:%s", element_road_name(ImageStatus.Road_type));
+    lq_tft18_drv_p6x8_str(0, ty, buf, TFT_WHITE, TFT_BLACK); ty += 8;
+
+    std::snprintf(buf, sizeof(buf), "det:%d err:%d off:%d",
+                  ImageStatus.Det_True,
+                  ImageStatus.MiddleLine - ImageStatus.Det_True,
+                  ImageStatus.OFFLine);
+    lq_tft18_drv_p6x8_str(0, ty, buf, TFT_WHITE, TFT_BLACK); ty += 8;
+
+    std::snprintf(buf, sizeof(buf), "ll:%d rl:%d tp:%d",
+                  ImageStatus.Left_Line, ImageStatus.Right_Line, ImageStatus.TowPoint);
+    lq_tft18_drv_p6x8_str(0, ty, buf, TFT_WHITE, TFT_BLACK); ty += 8;
+
+    std::snprintf(buf, sizeof(buf), "ring:%d/%d",
+                  ImageFlag.image_element_rings, ImageFlag.image_element_rings_flag);
+    lq_tft18_drv_p6x8_str(0, ty, buf, TFT_YELLOW, TFT_BLACK); ty += 8;
+
+    std::snprintf(buf, sizeof(buf), "mid:%d L:%d R:%d",
+                  ImageStatus.MiddleLine,
+                  ImageDeal[55].LeftBorder,
+                  ImageDeal[55].RightBorder);
+    lq_tft18_drv_p6x8_str(0, ty, buf, TFT_CYAN, TFT_BLACK);
+
+    lq_tft18_drv_flush();
+}
+
+int lq_element_observe_demo(int display_mode)
+{
+    const bool use_udp = (display_mode == 0 || display_mode == 2);
+    const bool use_tft = (display_mode == 1 || display_mode == 2);
+
+    std::printf("[ELEMENT_OBSERVE] display_mode=%d (udp=%d tft=%d)\n",
+                display_mode, use_udp ? 1 : 0, use_tft ? 1 : 0);
+
+    Data_Settings();
+    g_enable_element_process = false;
+    std::printf("[ELEMENT_OBSERVE] element process DISABLED for NCNN observe\n");
+
+    if (!image_cv_Init()) {
+        std::printf("[ELEMENT_OBSERVE][FATAL] camera init failed\n");
+        return 5;
+    }
+
+    // TFT 初始化
+    if (use_tft) {
+        lq_tft18_drv_init(1);  // 1=竖屏
+        std::printf("[ELEMENT_OBSERVE] TFT18 initialized\n");
+    }
+
+    // UDP 初始化
+    lq_udp_client udp_client;
+    if (use_udp) {
+        udp_client.udp_client_init(car_config::kNcnnObserveUdpHost, car_config::kNcnnObserveUdpPort);
+        std::printf("[ELEMENT_OBSERVE] UDP stream to %s:%d\n",
+                    car_config::kNcnnObserveUdpHost,
+                    car_config::kNcnnObserveUdpPort);
+    }
+    const bool ncnn_observe_ready = use_udp &&
+        car_config::kNcnnObserveEnable &&
+        lq_ncnn_observe_start(car_config::kNcnnObserveUdpHost, car_config::kNcnnObserveUdpPort);
+    const int ncnn_observe_interval = std::max(1, car_config::kNcnnObserveUdpEveryFrames);
+
+    std::printf("[ELEMENT_OBSERVE] running... Press Ctrl+C to stop\n");
+
+    uint32_t frame_count = 0;
+    auto last_print = std::chrono::steady_clock::now();
+
+    while (!exit_flag.load(std::memory_order_relaxed)) {
+        if (!image_cv_zip()) {
+            std::printf("[ELEMENT_OBSERVE][WARN] frame read failed\n");
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        imageprocess();
+
+        // UDP 图传
+        if (use_udp) {
+            lq_udp_center_line_send_one_frame(udp_client, 55);
+            if (ncnn_observe_ready && (frame_count % ncnn_observe_interval) == 0) {
+                lq_ncnn_observe_submit(image_cv_get_hires_frame(),
+                                       static_cast<int>(frame_count),
+                                       "element");
+            }
+        }
+
+        // TFT 显示
+        if (use_tft) {
+            element_observe_draw_tft();
+        }
+
+        // 串口日志（每10帧打印一次，避免刷屏）
+        ++frame_count;
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_print).count() >= 200) {
+            std::printf("[OBS] f:%lu road:%s det:%d err:%d off:%d ll:%d rl:%d tp:%d ring:%d/%d\n",
+                        (unsigned long)frame_count,
+                        element_road_name(ImageStatus.Road_type),
+                        ImageStatus.Det_True,
+                        ImageStatus.MiddleLine - ImageStatus.Det_True,
+                        ImageStatus.OFFLine,
+                        ImageStatus.Left_Line,
+                        ImageStatus.Right_Line,
+                        ImageStatus.TowPoint,
+                        ImageFlag.image_element_rings,
+                        ImageFlag.image_element_rings_flag);
+            last_print = now;
+        }
+    }
+
+    if (ncnn_observe_ready) {
+        lq_ncnn_observe_stop();
+    }
+    return 0;
 }

@@ -1,7 +1,13 @@
 #include "main.hpp"
 #include "my_cascade_pid.hpp"
 #include "car_config.hpp"
+#include "lq_udp_client.hpp"
+#include <algorithm>
+#include <cstdio>
 #include <mutex>
+#include <thread>
+#include <sched.h>
+#include <cstring>
 
 static inline float clamp_float(float value, float min_value, float max_value) {
     if (value < min_value) return min_value;
@@ -54,7 +60,9 @@ float Speed_Goal = 0.0f;
 // ========================
 float dbg_steer_error = 0.0f;
 float dbg_target_gyro_z = 0.0f;
-float dbg_diff_speed = 0.0f;
+float dbg_diff_speed = 0.0f;          // 角速度环原始输出（限幅前）
+float dbg_diff_cmd = 0.0f;            // 动态限幅后实际执行差速
+float dbg_diff_limit = 0.0f;          // 当前动态差速限幅值
 float dbg_raw_steer_error = 0.0f;
 float dbg_diff_steer = 0.0f;
 float dbg_visual_pd_out = 0.0f;
@@ -72,11 +80,46 @@ int dbg_diff_limited = 0;
 int dbg_imu_ok = 0;
 int dbg_deadband_active = 0;
 
-// 姿�?航向 PID串级控制对象与IMU
+// 姿�?航向 PID串级控制对象与IMU
 AttitudeCascade cascade_ctrl;
 MyMpu6050 imu;
 
-static constexpr uint32_t kVisionFreshTimeoutMs = 60;
+void control_set_imu_async_cache_only(bool enabled)
+{
+    imu.set_async_cache_only(enabled);
+}
+
+void imu_thread_1(void)
+{
+    // 提升IMU线程为SCHED_FIFO实时优先级，防止摄像头帧处理/图像算法
+    // 抢占I2C读取调度，导致弯道中IMU数据stale级联断连。
+    {
+        struct sched_param sp;
+        std::memset(&sp, 0, sizeof(sp));
+        sp.sched_priority = 10;  // 低实时优先级，足够抢占SCHED_OTHER但不阻塞更高优先级内核线程
+        if (sched_setscheduler(0, SCHED_FIFO, &sp) != 0) {
+            perror("[IMU_THREAD] SCHED_FIFO failed, using default scheduler");
+        }
+    }
+    const auto imu_interval = std::chrono::milliseconds(10);
+    while (!exit_flag.load(std::memory_order_relaxed)) {
+        const auto tick_start = std::chrono::steady_clock::now();
+        imu.update_async_sample();
+        const auto elapsed = std::chrono::steady_clock::now() - tick_start;
+        if (elapsed < imu_interval) {
+            std::this_thread::sleep_for(imu_interval - elapsed);
+        }
+    }
+}
+
+static constexpr uint32_t kVisionFreshTimeoutMs = 150;      // 视觉帧超时阈值：150ms容忍偶发卡顿
+static constexpr uint32_t kVisionStaleTurnHoldMs = 280;     // 急弯中短暂卡帧时先保持转向，避免被拉直
+static constexpr uint32_t kVisionFatalTimeoutMs = 500;      // 视觉帧致命超时：500ms无帧才退出
+static constexpr uint32_t kVisionStaleWarnIntervalMs = 150; // 超时降速期间每150ms打印一次警告
+static constexpr float kVisionStaleSpeedGoal = 0.12f;       // 短暂卡帧时低速直行等待新视觉
+static constexpr float kVisionRecoverySpeedGoal = 0.18f;    // 丢线恢复/直角弯保持转向时的低速目标
+static constexpr float kTurnRecoveryMinWheel = 0.03f;       // 直角弯允许慢轮接近停转以缩小转弯半径
+static constexpr float kGuardedTurnReleaseRatio = 0.30f;
 static std::atomic<uint32_t> g_control_vision_frame_seq(0);
 static std::atomic<long long> g_control_last_vision_frame_ms(0);
 
@@ -120,6 +163,8 @@ float Speed_Goal_l = 0;
 float speed_P_l, speed_I_l, speed_D_l;
 float speed_out_l;
 float speed_erro_L, speed_last_erro_L;
+float speed_integral_L = 0.0f;   // 位置式积分项
+float speed_last_out_l = 0.0f;    // 输出变化率限制用
 float speed_encoder_L;
 float speed_encoder_raw_L = 0.0f;
 
@@ -128,12 +173,14 @@ float Speed_Goal_r = 0;
 float speed_P_r, speed_I_r, speed_D_r;
 float speed_out_r;
 float speed_erro_R, speed_last_erro_R;
+float speed_integral_R = 0.0f;   // 位置式积分项
+float speed_last_out_r = 0.0f;    // 输出变化率限制用
 float speed_encoder_R;
 float speed_encoder_raw_R = 0.0f;
 
-// PWM与路�?
-int MAX_PWM; // PWM最大限�?
-float Record_encoder = 0.0f; // 记录编码�?(m/s)
+// PWM与路�?
+int MAX_PWM; // PWM最大限�?
+float Record_encoder = 0.0f; // 记录编码�?(m/s)
 static float planned_speed_goal = 0.0f;
 
 
@@ -145,10 +192,10 @@ void motor_Init(void)
 {
     // 延迟初始化：首次调用时才构造硬件对象，避免全局构造时访问 /dev/mem 导致崩溃
     if (!motor_L) {
-        motor_L = new ls_atim_pwm(ATIM_PWM0_PIN81, car_config::kMotorPwmFrequencyHz, car_config::kMotorInitialDuty, ATIM_PWM_POL_NORMAL);
-        motor_R = new ls_atim_pwm(ATIM_PWM1_PIN82, car_config::kMotorPwmFrequencyHz, car_config::kMotorInitialDuty, ATIM_PWM_POL_NORMAL);
-        motor_L_Dir = new ls_gpio(PIN_21, GPIO_MODE_OUT);
-        motor_R_Dir = new ls_gpio(PIN_22, GPIO_MODE_OUT);
+        motor_L_Dir = new ls_gpio(PIN_22, GPIO_MODE_OUT);
+        motor_R_Dir = new ls_gpio(PIN_21, GPIO_MODE_OUT);
+        motor_L = new ls_atim_pwm(ATIM_PWM1_PIN82, car_config::kMotorPwmFrequencyHz, car_config::kMotorInitialDuty, ATIM_PWM_POL_NORMAL);
+        motor_R = new ls_atim_pwm(ATIM_PWM0_PIN81, car_config::kMotorPwmFrequencyHz, car_config::kMotorInitialDuty, ATIM_PWM_POL_NORMAL);
     }
 
     motor_R->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
@@ -156,60 +203,60 @@ void motor_Init(void)
 
     printf("R:OK!");
 
-    motor_R_Dir->gpio_level_set(GPIO_LOW);
-    motor_L_Dir->gpio_level_set(GPIO_LOW);
+    motor_R_Dir->gpio_level_set(GPIO_HIGH);
+    motor_L_Dir->gpio_level_set(GPIO_HIGH);
     motor_R->atim_pwm_enable();
     motor_L->atim_pwm_enable();
 }
 
 void motor_Duty_R(int duty)
 {
-    if (!motor_R || !motor_R_Dir) return;  // 电机未初始化时安全跳�?
+    if (!motor_R || !motor_R_Dir) return;  // 电机未初始化时安全跳过
     if (duty == 0)
     {
         motor_R->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
-        motor_R_Dir->gpio_level_set(GPIO_LOW);
+        motor_R_Dir->gpio_level_set(GPIO_HIGH);
     }
     else if (duty < 0)
     {
-        // 反转：DIR=HIGH + 反转PWM占空比（对称力矩�?
+        // 反转：PH=LOW + 反转PWM占空比（对称力矩）
         motor_R->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
         const int magnitude = std::min(-duty, car_config::kMotorPwmFullScale);
-        motor_R_Dir->gpio_level_set(GPIO_HIGH);
+        motor_R_Dir->gpio_level_set(GPIO_LOW);
         motor_R->atim_pwm_set_duty(magnitude);
     }
     else
     {
-        // 正转：PH=LOW + EN duty
+        // 正转：PH=HIGH + EN duty
         motor_R->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
         const int magnitude = std::min(duty, car_config::kMotorPwmFullScale);
-        motor_R_Dir->gpio_level_set(GPIO_LOW);
+        motor_R_Dir->gpio_level_set(GPIO_HIGH);
         motor_R->atim_pwm_set_duty(magnitude);
     }
 }
 
 void motor_Duty_L(int duty)
 {
-    if (!motor_L || !motor_L_Dir) return;  // 电机未初始化时安全跳�?
+    if (!motor_L || !motor_L_Dir) return;  // 电机未初始化时安全跳过
     if (duty == 0)
     {
         motor_L->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
-        motor_L_Dir->gpio_level_set(GPIO_LOW);
+        motor_L_Dir->gpio_level_set(GPIO_HIGH);
     }
     else if (duty < 0)
     {
-        // 反转：DIR=HIGH + 反转PWM占空比（对称力矩�?
+        // 反转：PH=LOW + 反转PWM占空比（对称力矩）
         motor_L->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
         const int magnitude = std::min(-duty, car_config::kMotorPwmFullScale);
-        motor_L_Dir->gpio_level_set(GPIO_HIGH);
+        motor_L_Dir->gpio_level_set(GPIO_LOW);
         motor_L->atim_pwm_set_duty(magnitude);
     }
     else
     {
-        // 正转：PH=LOW + EN duty
+        // 正转：PH=HIGH + EN duty
         motor_L->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
         const int magnitude = std::min(duty, car_config::kMotorPwmFullScale);
-        motor_L_Dir->gpio_level_set(GPIO_LOW);
+        motor_L_Dir->gpio_level_set(GPIO_HIGH);
         motor_L->atim_pwm_set_duty(magnitude);
     }
 }
@@ -225,7 +272,7 @@ void motor_Duty_L(int duty)
 
 bool Speed_decision(void)
 {
-    // Incremental PID wheel-speed loop gains.
+    // 位置式 PID wheel-speed loop gains.
     speed_P_l = car_config::kSpeedPidP;
     speed_I_l = car_config::kSpeedPidI;
     speed_D_l = car_config::kSpeedPidD;
@@ -238,8 +285,12 @@ bool Speed_decision(void)
 
     speed_out_l = 0;
     speed_out_r = 0;
+    speed_integral_L = 0;
+    speed_integral_R = 0;
+    speed_last_out_l = 0;
+    speed_last_out_r = 0;
 
-    cascade_ctrl.init(); // 初始化姿态三串级控制器参�?
+    cascade_ctrl.init(); // 初始化姿态三串级控制器参�?
     static bool imu_inited = false;
     if (!imu_inited) {
         if (!imu.init()) {   // 初始化IMU
@@ -252,29 +303,64 @@ bool Speed_decision(void)
     return true;
 }
 
+static void update_speed_integral(float error, float &integral)
+{
+    constexpr float kIntegralSignResetErr = 0.005f;
+    if (error > kIntegralSignResetErr && integral < 0.0f) integral = 0.0f;
+    if (error < -kIntegralSignResetErr && integral > 0.0f) integral = 0.0f;
+
+    integral += error;
+    integral = clamp_float(
+        integral,
+        -car_config::kSpeedPidIntegralLimit,
+        car_config::kSpeedPidIntegralLimit);
+}
+
 void Speed_PID_L(void)
 {
     speed_erro_L = Speed_Goal_l - speed_encoder_L;
-    static float speed_prev_erro_L = 0.0f;
 
     if (Speed_Goal_l <= 0.02f) {
         speed_out_l = 0.0f;
         speed_last_erro_L = 0.0f;
-        speed_prev_erro_L = 0.0f;
+        speed_integral_L = 0.0f;
+        speed_last_out_l = 0.0f;
         return;
     }
 
-    const float delta =
-        speed_P_l * (speed_erro_L - speed_last_erro_L) +
-        speed_I_l * speed_erro_L +
-        speed_D_l * (speed_erro_L - 2.0f * speed_last_erro_L + speed_prev_erro_L);
+    // 位置式 PID: output = P*err + Ki*integral + Kd*derivative
+    update_speed_integral(speed_erro_L, speed_integral_L);
 
-    speed_out_l += delta;
-    speed_prev_erro_L = speed_last_erro_L;
+    const float derivative = speed_erro_L - speed_last_erro_L;
+    float raw_out = speed_P_l * speed_erro_L +
+                    speed_I_l * speed_integral_L +
+                    speed_D_l * derivative;
+    if (speed_erro_L > 0.0f) {
+        raw_out += car_config::kSpeedPidFeedForwardPerMS * Speed_Goal_l;
+    }
+
+    // 输出限幅 + 有限反拖制动
+    // 正向限幅到MAX_PWM
+    if (raw_out > MAX_PWM) raw_out = MAX_PWM;
+    // 反拖制动：超速>阈值时允许有限负PWM，避免慢轮被快轮拖着转
+    if (raw_out < 0.0f) {
+        // 只在超速明显时触发反拖
+        float overshoot = speed_encoder_L - Speed_Goal_l;  // 正=超速
+        if (overshoot > car_config::kSpeedBrakeThreshold) {
+            // 有限反拖：限制到kSpeedBrakeMaxPwm，避免慢轮被快轮拖着走。
+            if (raw_out < car_config::kSpeedBrakeMaxPwm)
+                raw_out = car_config::kSpeedBrakeMaxPwm;
+        } else {
+            raw_out = 0.0f;  // 轻微超速时仍截到0
+        }
+    }
+    float slew = raw_out - speed_last_out_l;
+    if (slew > car_config::kSpeedPidSlewRate) raw_out = speed_last_out_l + car_config::kSpeedPidSlewRate;
+    if (slew < -car_config::kSpeedPidSlewRate) raw_out = speed_last_out_l - car_config::kSpeedPidSlewRate;
+
     speed_last_erro_L = speed_erro_L;
-
-    if (speed_out_l > MAX_PWM) speed_out_l = MAX_PWM;
-    if (speed_out_l < 0.0f) speed_out_l = 0.0f;
+    speed_last_out_l = raw_out;
+    speed_out_l = raw_out;
 }
 
 
@@ -282,26 +368,46 @@ void Speed_PID_L(void)
 void Speed_PID_R(void)
 {
     speed_erro_R = Speed_Goal_r - speed_encoder_R;
-    static float speed_prev_erro_R = 0.0f;
 
     if (Speed_Goal_r <= 0.02f) {
         speed_out_r = 0.0f;
         speed_last_erro_R = 0.0f;
-        speed_prev_erro_R = 0.0f;
+        speed_integral_R = 0.0f;
+        speed_last_out_r = 0.0f;
         return;
     }
 
-    const float delta =
-        speed_P_r * (speed_erro_R - speed_last_erro_R) +
-        speed_I_r * speed_erro_R +
-        speed_D_r * (speed_erro_R - 2.0f * speed_last_erro_R + speed_prev_erro_R);
+    // 位置式 PID: output = P*err + Ki*integral + Kd*derivative
+    update_speed_integral(speed_erro_R, speed_integral_R);
 
-    speed_out_r += delta;
-    speed_prev_erro_R = speed_last_erro_R;
+    const float derivative = speed_erro_R - speed_last_erro_R;
+    float raw_out = speed_P_r * speed_erro_R +
+                    speed_I_r * speed_integral_R +
+                    speed_D_r * derivative;
+    if (speed_erro_R > 0.0f) {
+        raw_out += car_config::kSpeedPidFeedForwardPerMS * Speed_Goal_r;
+    }
+
+    if (raw_out > MAX_PWM) raw_out = MAX_PWM;
+    // 反拖制动：超速>阈值时允许有限负PWM
+    if (raw_out < 0.0f) {
+        float overshoot = speed_encoder_R - Speed_Goal_r;
+        if (overshoot > car_config::kSpeedBrakeThreshold) {
+            if (raw_out < car_config::kSpeedBrakeMaxPwm)
+                raw_out = car_config::kSpeedBrakeMaxPwm;
+        } else {
+            raw_out = 0.0f;
+        }
+    }
+
+    // 输出变化率限制
+    float slew = raw_out - speed_last_out_r;
+    if (slew > car_config::kSpeedPidSlewRate) raw_out = speed_last_out_r + car_config::kSpeedPidSlewRate;
+    if (slew < -car_config::kSpeedPidSlewRate) raw_out = speed_last_out_r - car_config::kSpeedPidSlewRate;
+
     speed_last_erro_R = speed_erro_R;
-
-    if (speed_out_r > MAX_PWM) speed_out_r = MAX_PWM;
-    if (speed_out_r < 0.0f) speed_out_r = 0.0f;
+    speed_last_out_r = raw_out;
+    speed_out_r = raw_out;
 }
 
 
@@ -310,10 +416,34 @@ void Speed_PID_R(void)
 // [5] Basic cascade control
 // ===============================================================================
 
-//差�?
-// 【中外环替代：姿态串级差速逻辑】将基于 MPU6050 实现三串级：目标角度 -> 目标角角速度 -> 目标差�?
+//差�?
+// 【中外环替代：姿态串级差速逻辑】将基于 MPU6050 实现三串级：目标角度 -> 目标角角速度 -> 目标差�?
 static void distribute_wheel_speeds(float speed_goal, float diff_speed, float effective_min_wheel) {
-    (void)effective_min_wheel;
+    // 动态差速限幅：偏差大时放大差速，回中后退回温和差速。
+    const float diff_limit_err = std::fabs(dbg_steer_error);
+    float diff_limit_ratio = 0.65f;
+    if (diff_limit_err >= 8.0f) {
+        diff_limit_ratio = 0.80f;
+    } else if (diff_limit_err > 3.0f) {
+        const float u = (diff_limit_err - 3.0f) / (8.0f - 3.0f);
+        diff_limit_ratio = 0.65f + (0.80f - 0.65f) * u;
+    }
+    float dynamic_diff_limit = speed_goal * diff_limit_ratio;
+    if (effective_min_wheel > 0.0f && effective_min_wheel < speed_goal) {
+        const float tight_turn_limit = speed_goal - effective_min_wheel;
+        if (tight_turn_limit > dynamic_diff_limit) {
+            dynamic_diff_limit = tight_turn_limit;
+        }
+    }
+    if (dynamic_diff_limit > car_config::kGyroPidOutputLimit)
+        dynamic_diff_limit = car_config::kGyroPidOutputLimit;
+    if (diff_speed > dynamic_diff_limit) diff_speed = dynamic_diff_limit;
+    if (diff_speed < -dynamic_diff_limit) diff_speed = -dynamic_diff_limit;
+
+    // 记录限幅后实际执行值（供日志打印）
+    dbg_diff_cmd = diff_speed;
+    dbg_diff_limit = dynamic_diff_limit;
+
     Speed_Goal_l = speed_goal - diff_speed;
     Speed_Goal_r = speed_goal + diff_speed;
 
@@ -338,6 +468,11 @@ void speed_dif_cascade(float inner_dt)
     static float steer_integral = 0.0f;
     static float target_gyro_z = 0.0f;
     static float raw_steer_error = 0.0f;
+    static float min_wheel_for_diff = 0.0f;
+    static float guarded_turn_sign = 0.0f;
+    static float guarded_turn_release_ratio = 0.0f;
+    static float last_diff_slew = 0.0f;
+    static int imu_consecutive_fail = 0;
 
     if (SystemData.Stop == 1) {
         Speed_Goal_l = 0.0f;
@@ -346,7 +481,12 @@ void speed_dif_cascade(float inner_dt)
         steer_integral = 0.0f;
         target_gyro_z = 0.0f;
         raw_steer_error = 0.0f;
+        min_wheel_for_diff = 0.0f;
+        guarded_turn_sign = 0.0f;
+        guarded_turn_release_ratio = 0.0f;
         planned_speed_goal = 0.0f;
+        last_diff_slew = 0.0f;
+        imu_consecutive_fail = 0;
         cascade_ctrl.reset_runtime_state();
 
         dbg_steer_error = 0.0f;
@@ -371,10 +511,50 @@ void speed_dif_cascade(float inner_dt)
         return;
     }
 
+    const long long last_frame_ms =
+        g_control_last_vision_frame_ms.load(std::memory_order_acquire);
+    const long long vision_age_ms =
+        (last_frame_ms > 0) ? (control_now_ms() - last_frame_ms) : 0;
+    const bool vision_frame_stale =
+        (last_frame_ms > 0) && (vision_age_ms > kVisionFreshTimeoutMs);
     const uint32_t current_seq = g_control_vision_frame_seq.load(std::memory_order_acquire);
     const bool new_frame_arrived = (current_seq != last_processed_seq);
 
-    if (new_frame_arrived) {
+    if (vision_frame_stale) {
+        if (new_frame_arrived) {
+            last_processed_seq = current_seq;
+        }
+        const bool hold_turn =
+            (vision_age_ms <= kVisionStaleTurnHoldMs) &&
+            (std::fabs(last_steer_error) > (float)car_config::kSteerDeadBand);
+
+        if (hold_turn) {
+            raw_steer_error = last_steer_error;
+            guarded_turn_sign = (last_steer_error > 0.0f) ? 1.0f : -1.0f;
+            guarded_turn_release_ratio = 0.0f;
+            planned_speed_goal =
+                (min_wheel_for_diff > 0.0f) ? kVisionRecoverySpeedGoal : kVisionStaleSpeedGoal;
+        } else {
+            last_steer_error = 0.0f;
+            steer_integral = 0.0f;
+            target_gyro_z = 0.0f;
+            raw_steer_error = 0.0f;
+            min_wheel_for_diff = 0.0f;
+            guarded_turn_sign = 0.0f;
+            guarded_turn_release_ratio = 0.0f;
+            planned_speed_goal = kVisionStaleSpeedGoal;
+        }
+
+        dbg_raw_steer_error = raw_steer_error;
+        dbg_steer_error = hold_turn ? last_steer_error : 0.0f;
+        dbg_diff_steer = 0.0f;
+        dbg_visual_pd_out = target_gyro_z;
+        dbg_target_gyro_z = target_gyro_z;
+        dbg_target_delta = 0.0f;
+        dbg_dt = 0.0f;
+        dbg_deadband_active = 5;
+        dbg_max_diff = car_config::kGyroPidOutputLimit;
+    } else if (new_frame_arrived) {
         VisionSnapshot local_vision;
         {
             std::lock_guard<std::mutex> lock(g_vision_mutex);
@@ -393,10 +573,94 @@ void speed_dif_cascade(float inner_dt)
 
         raw_steer_error = local_vision.MiddleLine - local_vision.Det_True;
         float steer_error = raw_steer_error;
-        if (std::fabs(steer_error) <= (float)car_config::kSteerDeadBand) {
+
+        // --- 丢线/丢边保护 ---
+        // 三级保护，越严重干预越强
+        //
+        // Level 1: 全丢线 OFFLine>40 → steer_error衰减到上次50%
+        // Level 2: 单侧严重丢边 (ll>20 && rl<=3) 或 (rl>20 && ll<=3)
+        //          → 不信任det，steer_error衰减到上次30%，强制降速
+        // Level 3: 正常死区 |err|<=2 → steer_error=0
+        //
+        // 单侧丢边保护原理：弯道里一侧边界丢失后，DrawExtensionLine补的边界
+        // 往往贴图像边缘（tpL=0~2），导致Center和det严重偏移。
+        // 此时近端边界也可能不可靠，不能简单外推，只能保护性回中。
+
+        const bool left_severe_loss =
+            (local_vision.Left_Line > 20 && local_vision.Right_Line <= 3);
+        const bool right_severe_loss =
+            (local_vision.Right_Line > 20 && local_vision.Left_Line <= 3);
+
+        // 单侧中度丢边(>12)时记录持续帧数，用于检测"det持续偏差锁死"
+        // 即使丢边不到20，但如果det持续大偏差+单侧丢边，也说明中线不可信
+        static int left_loss_persist = 0;
+        static int right_loss_persist = 0;
+        static int det_stuck_count = 0;  // det持续大偏差计数
+
+        if (local_vision.Left_Line > 12 && local_vision.Right_Line <= 5) {
+            left_loss_persist++;
+        } else {
+            left_loss_persist = 0;
+        }
+        if (local_vision.Right_Line > 12 && local_vision.Left_Line <= 5) {
+            right_loss_persist++;
+        } else {
+            right_loss_persist = 0;
+        }
+
+        // det持续偏差检测：|err|>8 连续超过8帧，且当前有单侧丢边
+        // 说明中线被补线拉偏，不可信
+        const bool det_stuck_with_loss =
+            (std::fabs(steer_error) > 8.0f) &&
+            (left_loss_persist > 8 || right_loss_persist > 8) &&
+            (local_vision.Left_Line > 8 || local_vision.Right_Line > 8);
+
+        min_wheel_for_diff = 0.0f;
+
+        if (local_vision.OFFLine > 40) {
+            // 全丢线：如果刚才已经在急弯，低速保持上一帧转向方向，避免直角弯里被拉直。
+            const float max_err_on_full_loss = 26.0f;
+            steer_error = clamp_float(
+                last_steer_error,
+                -max_err_on_full_loss,
+                max_err_on_full_loss);
+            if (std::fabs(steer_error) > (float)car_config::kSteerDeadBand) {
+                min_wheel_for_diff = kTurnRecoveryMinWheel;
+                guarded_turn_sign = (steer_error > 0.0f) ? 1.0f : -1.0f;
+                guarded_turn_release_ratio = 0.0f;
+            } else {
+                guarded_turn_sign = 0.0f;
+                guarded_turn_release_ratio = 0.0f;
+            }
+            dbg_deadband_active = 2;
+        } else if (left_severe_loss || right_severe_loss) {
+            // 单侧严重丢边(>20)：直角弯需要明显更大的角速度目标，不能过早反向刹转。
+            const float max_err_on_loss = 34.0f;
+            if (steer_error > max_err_on_loss) steer_error = max_err_on_loss;
+            if (steer_error < -max_err_on_loss) steer_error = -max_err_on_loss;
+            min_wheel_for_diff = kTurnRecoveryMinWheel;
+            guarded_turn_sign = (std::fabs(steer_error) > (float)car_config::kSteerDeadBand) ?
+                ((steer_error > 0.0f) ? 1.0f : -1.0f) : 0.0f;
+            guarded_turn_release_ratio = 0.0f;
+            dbg_deadband_active = 3;
+        } else if (det_stuck_with_loss) {
+            // det持续偏差+单侧丢边：保留较强转弯能力，但略低于明确单侧丢边。
+            const float max_err_on_stuck = 28.0f;
+            if (steer_error > max_err_on_stuck) steer_error = max_err_on_stuck;
+            if (steer_error < -max_err_on_stuck) steer_error = -max_err_on_stuck;
+            min_wheel_for_diff = kTurnRecoveryMinWheel;
+            guarded_turn_sign = (std::fabs(steer_error) > (float)car_config::kSteerDeadBand) ?
+                ((steer_error > 0.0f) ? 1.0f : -1.0f) : 0.0f;
+            guarded_turn_release_ratio = kGuardedTurnReleaseRatio;
+            dbg_deadband_active = 4;
+        } else if (std::fabs(steer_error) <= (float)car_config::kSteerDeadBand) {
             steer_error = 0.0f;
+            guarded_turn_sign = 0.0f;
+            guarded_turn_release_ratio = 0.0f;
             dbg_deadband_active = 1;
         } else {
+            guarded_turn_sign = 0.0f;
+            guarded_turn_release_ratio = 0.0f;
             dbg_deadband_active = 0;
         }
 
@@ -404,7 +668,10 @@ void speed_dif_cascade(float inner_dt)
             steer_integral + steer_error * visual_dt,
             -car_config::kSteerIntegralLimit,
             car_config::kSteerIntegralLimit);
-        const float diff_steer = steer_error - last_steer_error;
+
+        // D 项 dt 归一化：换算到 10ms 标称周期，消除帧率波动对 D 项增益和 curve_score 的影响
+        const float dt_ratio = visual_dt / 0.010f;
+        const float diff_steer = (steer_error - last_steer_error) / dt_ratio;
 
         float visual_pid_out =
             car_config::kSteerKp * steer_error +
@@ -416,8 +683,50 @@ void speed_dif_cascade(float inner_dt)
             car_config::kSteerOutputLimitDps);
 
         target_gyro_z = visual_pid_out;
+
+        // --- 速度规划：基于视觉误差和误差变化率计算目标速度 ---
+        // curve_score = |error| + w * |dError/dt|，综合当前偏差和入弯趋势
+        const float abs_err = std::fabs(steer_error);
+        const float abs_diff = std::fabs(diff_steer);
+        const float curve_score = abs_err + car_config::kSpeedPlanDerivWeight * abs_diff;
+
+        // 线性插值：误差 2 开始减速，误差 8 降到弯道速度
+        const float curve_u = clamp_float(
+            (curve_score - car_config::kSpeedPlanSlowStart) /
+            (car_config::kSpeedPlanFullCurve - car_config::kSpeedPlanSlowStart),
+            0.0f,
+            1.0f);
+        const float vision_loss_score = (float)std::max(
+            local_vision.OFFLine,
+            std::max(local_vision.Left_Line, local_vision.Right_Line));
+        const float vision_loss_u = clamp_float(
+            (vision_loss_score - car_config::kVisionLossSlowStart) /
+            (car_config::kVisionLossFullCurve - car_config::kVisionLossSlowStart),
+            0.0f,
+            1.0f);
+        const float u = std::max(curve_u, vision_loss_u);
+
+        float speed_to_plan = car_config::kBaseSpeedGoal +
+            (car_config::kCurveSpeedGoal - car_config::kBaseSpeedGoal) * u;
+
+        if (SystemData.Stop == 1) {
+            speed_to_plan = 0.0f;
+        }
+
+        // 十字入口锁向、单侧严重丢边或det持续偏差时保持独立降级速度，
+        // 不随正常弯道提速，确保进入十字前已经完成预减速。
+        if (local_vision.OFFLine > 40) {
+            speed_to_plan = kVisionRecoverySpeedGoal;
+        } else if (local_vision.Road_type == Cross ||
+                   local_vision.Road_type == Cross_ture) {
+            speed_to_plan = car_config::kDegradedSpeedGoal;
+        } else if (left_severe_loss || right_severe_loss || det_stuck_with_loss) {
+            speed_to_plan = car_config::kDegradedSpeedGoal;
+        }
+
+        planned_speed_goal = speed_to_plan;
+
         last_steer_error = steer_error;
-        planned_speed_goal = (SystemData.Stop == 1) ? 0.0f : car_config::kBaseSpeedGoal;
 
         dbg_raw_steer_error = raw_steer_error;
         dbg_steer_error = steer_error;
@@ -430,20 +739,75 @@ void speed_dif_cascade(float inner_dt)
 
     Mpu6050Data imu_data;
     if (!imu.read_processed_data(imu_data)) {
-        Speed_Goal_l = 0.0f;
-        Speed_Goal_r = 0.0f;
-        speed_out_l = 0.0f;
-        speed_out_r = 0.0f;
-        target_gyro_z = 0.0f;
-        cascade_ctrl.reset_runtime_state();
+        // IMU硬失败：降级为纯视觉PD控制，不退出
         dbg_imu_ok = 0;
-        dbg_diff_speed = 0.0f;
-        dbg_diff_before_limit = 0.0f;
+        ++imu_consecutive_fail;
+
+        if (imu_consecutive_fail == 1) {
+            printf("[IMU_GUARD] I2C stale, switching to visual-only fallback\n");
+        }
+
+        // 纯视觉PD差速：用视觉误差直接计算差速，不经过陀螺仪内环
+        // 旧版55a90fa验证过的fallback逻辑，按m/s尺度标定
+        float visual_diff = 0.0f;
+        if (std::fabs(target_gyro_z) > 0.5f) {
+            // target_gyro_z已经包含视觉PD信息(Kp*err + Kd*dE)，直接按比例转差速
+            // kSteerKp=2.0时 err=20→tgt=40，视觉PD差速约0.15m/s
+            visual_diff = target_gyro_z * car_config::kGyroFeedforwardGain * 2.0f;
+            // 限幅到动态差速上限
+            float vis_limit = Speed_Goal * 0.65f;
+            if (vis_limit > car_config::kGyroPidOutputLimit)
+                vis_limit = car_config::kGyroPidOutputLimit;
+            if (visual_diff > vis_limit) visual_diff = vis_limit;
+            if (visual_diff < -vis_limit) visual_diff = -vis_limit;
+        }
+
+        // 套slew rate（不复位，保持连续性）
+        {
+            const float max_slew = car_config::kDiffSlewRatePerSec * inner_dt;
+            float slew = visual_diff - last_diff_slew;
+            if (slew > max_slew) visual_diff = last_diff_slew + max_slew;
+            if (slew < -max_slew) visual_diff = last_diff_slew - max_slew;
+            last_diff_slew = visual_diff;
+        }
+
+        // IMU fallback 保持基线验证过的降级速度，不随正常弯道提速。
+        if (planned_speed_goal > car_config::kDegradedSpeedGoal) {
+            planned_speed_goal = car_config::kDegradedSpeedGoal;
+        }
+
+        dbg_diff_speed = visual_diff;
+        dbg_diff_cmd = visual_diff;
+        dbg_diff_before_limit = visual_diff;
+        dbg_cmd_target_gyro_z = target_gyro_z;
+        dbg_real_gyro_z = 0.0f;
+        dbg_filtered_gyro_z = 0.0f;
+        dbg_gyro_error = 0.0f;
+
+        distribute_wheel_speeds(Speed_Goal, visual_diff, min_wheel_for_diff);
+        Speed_PID_L();
+        Speed_PID_R();
+        motor_Duty_R(static_cast<int>(speed_out_r));
+        motor_Duty_L(static_cast<int>(speed_out_l));
+        gpio_protect_heartbeat_pulse();
         return;
     }
+    // IMU恢复后重置失败计数
+    imu_consecutive_fail = 0;
 
     dbg_imu_ok = 1;
     const float diff_speed = cascade_ctrl.calc_diff_speed_bypass_angle(target_gyro_z, imu_data, inner_dt);
+    float guarded_diff_speed = diff_speed;
+    if (guarded_turn_sign != 0.0f && guarded_diff_speed * guarded_turn_sign < 0.0f) {
+        float release_limit = (Speed_Goal - min_wheel_for_diff) *
+            guarded_turn_release_ratio;
+        if (release_limit < 0.0f) release_limit = 0.0f;
+        if (guarded_diff_speed > release_limit) {
+            guarded_diff_speed = release_limit;
+        } else if (guarded_diff_speed < -release_limit) {
+            guarded_diff_speed = -release_limit;
+        }
+    }
 
     dbg_cmd_target_gyro_z = target_gyro_z;
     dbg_real_gyro_z = imu_data.gyro_z;
@@ -453,14 +817,63 @@ void speed_dif_cascade(float inner_dt)
     dbg_diff_speed = diff_speed;
     dbg_diff_limited = 0;
 
-    distribute_wheel_speeds(Speed_Goal, diff_speed, 0.0f);
+    // 视觉死区差速硬限制：|tgt|<5dps时陀螺噪声不应驱动大差速
+    if (std::fabs(target_gyro_z) < car_config::kDeadbandDiffTriggerDps) {
+        if (guarded_diff_speed > car_config::kDeadbandDiffLimit)
+            guarded_diff_speed = car_config::kDeadbandDiffLimit;
+        if (guarded_diff_speed < -car_config::kDeadbandDiffLimit)
+            guarded_diff_speed = -car_config::kDeadbandDiffLimit;
+    }
+
+    // 差速输出变化率限制：按inner_dt时间归一化，抑制逐帧翻转自激
+    {
+        const float max_slew = car_config::kDiffSlewRatePerSec * inner_dt;
+        float slew = guarded_diff_speed - last_diff_slew;
+        if (slew > max_slew) guarded_diff_speed = last_diff_slew + max_slew;
+        if (slew < -max_slew) guarded_diff_speed = last_diff_slew - max_slew;
+        last_diff_slew = guarded_diff_speed;
+    }
+
+    distribute_wheel_speeds(Speed_Goal, guarded_diff_speed, min_wheel_for_diff);
 
     if (car_config::kSteerDebugPrintEnable) {
         static int debug_print_count = 0;
         debug_print_count++;
         if (debug_print_count >= car_config::kSteerDebugPrintDivider) {
             debug_print_count = 0;
-            printf("[steer] det:%d mid:%d raw:%.1f err:%.1f dE:%.1f tgt:%.1f gz:%.1f ge:%.1f diff:%.2f goal:%.2f L:%.2f R:%.2f encL:%.2f encR:%.2f pwmL:%.0f pwmR:%.0f dt:%.3f imu:%d db:%d off:%d ll:%d rl:%d\n",
+            // 视觉诊断：打印 TowPoint附近行的边界信息
+            int tp = ImageStatus.TowPoint;
+            if (tp < 0) tp = 0; if (tp > 59) tp = 59;
+            int tp_c = ImageDeal[tp].Center;
+            int tp_l = ImageDeal[tp].LeftBorder;
+            int tp_r = ImageDeal[tp].RightBorder;
+            int tp_lf = (ImageDeal[tp].IsLeftFind == 'T' || ImageDeal[tp].IsLeftFind == 'H') ? 1 : 0;
+            int tp_rf = (ImageDeal[tp].IsRightFind == 'T' || ImageDeal[tp].IsRightFind == 'H') ? 1 : 0;
+            // 近端行(行55)的边界信息
+            int n_c = ImageDeal[55].Center;
+            int n_l = ImageDeal[55].LeftBorder;
+            int n_r = ImageDeal[55].RightBorder;
+            int n_lf = (ImageDeal[55].IsLeftFind == 'T' || ImageDeal[55].IsLeftFind == 'H') ? 1 : 0;
+            int n_rf = (ImageDeal[55].IsRightFind == 'T' || ImageDeal[55].IsRightFind == 'H') ? 1 : 0;
+            static lq_udp_client steer_udp;
+            static bool steer_udp_ready = false;
+            if (!steer_udp_ready) {
+                steer_udp.udp_client_init("192.168.141.22", 8080);
+                steer_udp_ready = true;
+            }
+            char udp_buf[512];
+            int udp_len = std::snprintf(udp_buf, sizeof(udp_buf),
+                "steer,det=%d,mid=%d,raw=%.1f,err=%.1f,dE=%.1f,tgt=%.1f,gz=%.1f,ge=%.1f,dRaw=%.3f,dCmd=%.3f,dLim=%.3f,goal=%.2f,L=%.2f,R=%.2f,encL=%.2f,encR=%.2f,seL=%.3f,seR=%.3f,pwmL=%.0f,pwmR=%.0f,dt=%.3f,imu=%d,db=%d,off=%d,ll=%d,rl=%d,wl=%d,tp=%d,tpC=%d,tpL=%d,tpR=%d,tpLF=%d,tpRF=%d,nC=%d,nL=%d,nR=%d,nLF=%d,nRF=%d,rt=%d,sa=%d\n",
+                ImageStatus.Det_True, ImageStatus.MiddleLine, raw_steer_error, dbg_steer_error,
+                dbg_diff_steer, dbg_target_gyro_z, dbg_real_gyro_z, dbg_gyro_error,
+                dbg_diff_speed, dbg_diff_cmd, dbg_diff_limit, Speed_Goal, Speed_Goal_l,
+                Speed_Goal_r, speed_encoder_L, speed_encoder_R, dbg_speed_err_l,
+                dbg_speed_err_r, speed_out_l, speed_out_r, dbg_dt, dbg_imu_ok,
+                dbg_deadband_active, ImageStatus.OFFLine, ImageStatus.Left_Line,
+                ImageStatus.Right_Line, ImageStatus.WhiteLine, tp, tp_c, tp_l, tp_r, tp_lf, tp_rf, n_c, n_l,
+                n_r, n_lf, n_rf, (int)ImageStatus.Road_type, ImageStatus.straight_acc);
+            if (udp_len > 0) steer_udp.udp_send(udp_buf, (size_t)udp_len);
+            printf("[steer] det:%d mid:%d raw:%.1f err:%.1f dE:%.1f tgt:%.1f gz:%.1f ge:%.1f dRaw:%.3f dCmd:%.3f dLim:%.3f goal:%.2f L:%.2f R:%.2f encL:%.2f encR:%.2f seL:%.3f seR:%.3f pwmL:%.0f pwmR:%.0f dt:%.3f imu:%d db:%d off:%d ll:%d rl:%d\n",
                    ImageStatus.Det_True,
                    ImageStatus.MiddleLine,
                    raw_steer_error,
@@ -469,12 +882,16 @@ void speed_dif_cascade(float inner_dt)
                    dbg_target_gyro_z,
                    dbg_real_gyro_z,
                    dbg_gyro_error,
-                   dbg_diff_speed,
+                   dbg_diff_speed,        // dRaw: 角速度环原始输出（限幅前）
+                   dbg_diff_cmd,          // dCmd: 动态限幅后实际执行差速
+                   dbg_diff_limit,        // dLim: 当前动态差速限幅值
                    Speed_Goal,
                    Speed_Goal_l,
                    Speed_Goal_r,
                    speed_encoder_L,
                    speed_encoder_R,
+                   dbg_speed_err_l,       // seL: 左轮速度误差(goal-enc)
+                   dbg_speed_err_r,       // seR: 右轮速度误差(goal-enc)
                    speed_out_l,
                    speed_out_r,
                    dbg_dt,
@@ -483,6 +900,12 @@ void speed_dif_cascade(float inner_dt)
                    ImageStatus.OFFLine,
                    ImageStatus.Left_Line,
                    ImageStatus.Right_Line);
+            // 视觉诊断行：TowPoint/近端行的边界信息 + Road_type
+            printf("[vis] tp:%d tpC:%d tpL:%d tpR:%d tpLF:%d tpRF:%d nC:%d nL:%d nR:%d nLF:%d nRF:%d rt:%d sa:%d\n",
+                   tp, tp_c, tp_l, tp_r, tp_lf, tp_rf,
+                   n_c, n_l, n_r, n_lf, n_rf,
+                   (int)ImageStatus.Road_type,
+                   ImageStatus.straight_acc);
         }
     }
 }
@@ -491,10 +914,10 @@ void speed_dif_cascade(float inner_dt)
 
 
 // ===============================================================================
-// [6] 外设与状态监�?
+// [6] 外设与状态监�?
 // ===============================================================================
 
-//编码器记录路�?
+//编码器记录路�?
 void Car_distance(float dt)
 {
     Record_encoder = 0.5f * (speed_encoder_L + speed_encoder_R);
@@ -509,10 +932,10 @@ void Car_distance(float dt)
 }
 
 // ===============================================================================
-// [7] 主控与调度函�?
+// [7] 主控与调度函�?
 // ===============================================================================
 
-//变速控�?
+//变速控�?
 
 
 
@@ -532,6 +955,10 @@ void Speed_BiHuan(void)
         speed_out_r = 0.0f;
         speed_last_erro_L = 0.0f;
         speed_last_erro_R = 0.0f;
+        speed_integral_L = 0.0f;
+        speed_integral_R = 0.0f;
+        speed_last_out_l = 0.0f;
+        speed_last_out_r = 0.0f;
         if (motor_L && motor_R) {
             motor_Duty_L(0);
             motor_Duty_R(0);
@@ -555,7 +982,8 @@ void Speed_BiHuan(void)
     control_start_ms = 0;
 
     const long long vision_age_ms = control_now_ms() - last_vision_ms;
-    if (vision_age_ms > kVisionFreshTimeoutMs) {
+    if (vision_age_ms > kVisionFatalTimeoutMs) {
+        // 致命超时：500ms无视觉帧，退出程序
         static int vision_guard_warn_count = 0;
         Speed_Goal = 0.0f;
         Speed_Goal_l = 0.0f;
@@ -564,20 +992,37 @@ void Speed_BiHuan(void)
         speed_out_r = 0.0f;
         speed_last_erro_L = 0.0f;
         speed_last_erro_R = 0.0f;
+        speed_integral_L = 0.0f;
+        speed_integral_R = 0.0f;
+        speed_last_out_l = 0.0f;
+        speed_last_out_r = 0.0f;
         if (motor_L && motor_R) {
             motor_Duty_L(0);
             motor_Duty_R(0);
         }
         if (vision_guard_warn_count < 8) {
             ++vision_guard_warn_count;
-            printf("[VISION_GUARD] stale frame age=%lldms; stop output, lock out (exit required)\n",
+            printf("[VISION_GUARD] fatal stale frame age=%lldms; exit\n",
                    vision_age_ms);
         }
         exit_flag.store(true, std::memory_order_relaxed);
         return;
     }
+    if (vision_age_ms > kVisionFreshTimeoutMs) {
+        // 帧超时但未致命：降速到弯道速度，保持循迹，不退出
+        static long long last_vision_warn_ms = 0;
+        long long now_ms = control_now_ms();
+        if (now_ms - last_vision_warn_ms > kVisionStaleWarnIntervalMs) {
+            last_vision_warn_ms = now_ms;
+            printf("[VISION_GUARD] stale frame age=%lldms; slowing down\n",
+                   vision_age_ms);
+        }
+        // 强制降速到独立降级速度，避免高速盲跑冲出赛道。
+        planned_speed_goal = car_config::kDegradedSpeedGoal;
+        // 继续运行控制环（不return），让小车减速循迹
+    }
 
-    // 运行�?watchdog 活性检测：gpio_manager 崩溃/重启�?heartbeat_last_ms 停止更新
+    // 运行�?watchdog 活性检测：gpio_manager 崩溃/重启�?heartbeat_last_ms 停止更新
     if (!gpio_protect_heartbeat_is_wd_alive(car_config::kWatchdogHeartbeatStallTimeoutMs)) {
         static int wd_stall_warn_count = 0;
         Speed_Goal = 0.0f;
@@ -587,6 +1032,10 @@ void Speed_BiHuan(void)
         speed_out_r = 0.0f;
         speed_last_erro_L = 0.0f;
         speed_last_erro_R = 0.0f;
+        speed_integral_L = 0.0f;
+        speed_integral_R = 0.0f;
+        speed_last_out_l = 0.0f;
+        speed_last_out_r = 0.0f;
         if (motor_L && motor_R) {
             motor_Duty_L(0);
             motor_Duty_R(0);
@@ -611,6 +1060,10 @@ void Speed_BiHuan(void)
         speed_out_r = 0.0f;
         speed_last_erro_L = 0.0f;
         speed_last_erro_R = 0.0f;
+        speed_integral_L = 0.0f;
+        speed_integral_R = 0.0f;
+        speed_last_out_l = 0.0f;
+        speed_last_out_r = 0.0f;
         if (motor_L && motor_R) {
             motor_Duty_L(0);
             motor_Duty_R(0);
@@ -639,13 +1092,31 @@ void Speed_BiHuan(void)
     Car_distance(inner_dt);
 
     static float ramped_speed_goal = 0.0f;
-    Speed_Goal = (planned_speed_goal > 0.0f) ? planned_speed_goal : 0.0f;
-    ramped_speed_goal = Speed_Goal;
+    const float desired_speed_goal = (planned_speed_goal > 0.0f) ? planned_speed_goal : 0.0f;
+    if (desired_speed_goal <= 0.0f) {
+        ramped_speed_goal = 0.0f;
+        Speed_Goal = 0.0f;
+    } else {
+        // 加速度斜坡限幅：加速 1.8 m/s^2，减速 4.0 m/s^2
+        const float speed_delta = desired_speed_goal - ramped_speed_goal;
+        const float speed_limit = (speed_delta > 0.0f) ?
+            car_config::kSpeedAccelLimit : car_config::kSpeedDecelLimit;
+        const float max_step = speed_limit * inner_dt;
+        if (speed_delta > max_step) {
+            ramped_speed_goal += max_step;
+        } else if (speed_delta < -max_step) {
+            ramped_speed_goal -= max_step;
+        } else {
+            ramped_speed_goal = desired_speed_goal;
+        }
+        if (ramped_speed_goal < 0.0f) ramped_speed_goal = 0.0f;
+        Speed_Goal = ramped_speed_goal;
+    }
 
     speed_dif_cascade(inner_dt);
 
-    // 外环弯道/丢线保护可能�?speed_dif_cascade() 内把目标速度直接压低�?
-    // 同步斜坡状态，避免保护解除时从旧的高速记忆值瞬间跳回去�?
+    // 外环弯道/丢线保护可能在 speed_dif_cascade() 内把目标速度直接压低，
+    // 同步斜坡状态，避免保护解除时从旧的高速记忆值瞬间跳回去。
     if (Speed_Goal < ramped_speed_goal) {
         ramped_speed_goal = Speed_Goal;
     }
@@ -668,6 +1139,10 @@ void Speed_BiHuan(void)
         speed_out_r = 0.0f;
         speed_last_erro_L = 0.0f;
         speed_last_erro_R = 0.0f;
+        speed_integral_L = 0.0f;
+        speed_integral_R = 0.0f;
+        speed_last_out_l = 0.0f;
+        speed_last_out_r = 0.0f;
         if (motor_L && motor_R) {
             motor_Duty_L(0);
             motor_Duty_R(0);
@@ -690,20 +1165,20 @@ void Speed_BiHuan(void)
 
     motor_Duty_R(speed_out_r); // 输出到PWM驱动
     motor_Duty_L(speed_out_l);
-    // 只有完整完成“编码器读取 �?速度�?�?电机输出”的控制周期后才续命�?
-    // 图像/UDP/调试线程不能续命，控制线程卡死时 gpio_manager 必须能超时停车�?
+    // 只有完整完成“编码器读取 �?速度�?�?电机输出”的控制周期后才续命�?
+    // 图像/UDP/调试线程不能续命，控制线程卡死时 gpio_manager 必须能超时停车�?
     gpio_protect_heartbeat_pulse();
 }
 
-//     float turn = KP * offset;  // 转向�?
+//     float turn = KP * offset;  // 转向�?
 
 //     int base_speed = Speed_Goal;  // 当前目标速度，三轮车车型最大速度设定
 
-//     // 左右轮速度由基准速度和偏差计�?
+//     // 左右轮速度由基准速度和偏差计�?
 //     Speed_Goal_l = base_speed - turn;
 //     Speed_Goal_r = base_speed + turn;
 
-//     // 限幅保护，防止速度超过范围或为�?
+//     // 限幅保护，防止速度超过范围或为�?
 //     if (Speed_Goal_l > MAX_SPEED) Speed_Goal_l = MAX_SPEED;
 //     if (Speed_Goal_l < 0)         Speed_Goal_l = 0;
 
@@ -711,7 +1186,7 @@ void Speed_BiHuan(void)
 //     if (Speed_Goal_r < 0)         Speed_Goal_r = 0;
 // }
 
-// 电机紧急停止函�?
+// 电机紧急停止函�?
 void emergency_stop() {
     Speed_Goal = 0.0f;
     Speed_Goal_l = 0.0f;
@@ -720,14 +1195,18 @@ void emergency_stop() {
     speed_out_l = 0.0f;
     speed_last_erro_R = 0.0f;
     speed_last_erro_L = 0.0f;
+    speed_integral_L = 0.0f;
+    speed_integral_R = 0.0f;
+    speed_last_out_l = 0.0f;
+    speed_last_out_r = 0.0f;
 
     if (motor_R && motor_L) {
-        motor_Duty_R(0);    // 右电机停�?
-        motor_Duty_L(0);    // 左电机停�?
+        motor_Duty_R(0);    // 右电机停�?
+        motor_Duty_L(0);    // 左电机停�?
     }
-    // [T01修正] DIR极性反转后，停车时拉到反转方向的无效端（LOW=反转，与duty=0配对无输出）
-    if (motor_R_Dir) motor_R_Dir->gpio_level_set(GPIO_LOW);
-    if (motor_L_Dir) motor_L_Dir->gpio_level_set(GPIO_LOW);
+    // [T01修正] PH极性：正转=HIGH，停车时PH=HIGH与duty=0配对（EN无输出，方向固定正转端）
+    if (motor_R_Dir) motor_R_Dir->gpio_level_set(GPIO_HIGH);
+    if (motor_L_Dir) motor_L_Dir->gpio_level_set(GPIO_HIGH);
 
     if (motor_R && motor_L) {
         motor_R->atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
@@ -739,10 +1218,10 @@ void emergency_stop() {
     printf("程序终止，电机已停止。\n");
 }
 
-// 信号处理函数（捕�?Ctrl+C 等终止信号）
+// 信号处理函数（捕�?Ctrl+C 等终止信号）
 void signal_handler(int signum) {
     (void)signum;
-    // 信号上下文只通知退出。PWM/GPIO/心跳清理�?main 的正常执行流完成�?
-    // 避免在异步信号中加锁、打印或 exit() 导致停机流程被中断�?
+    // 信号上下文只通知退出。PWM/GPIO/心跳清理�?main 的正常执行流完成�?
+    // 避免在异步信号中加锁、打印或 exit() 导致停机流程被中断�?
     exit_flag.store(true, std::memory_order_relaxed);
 }

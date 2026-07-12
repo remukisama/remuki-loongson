@@ -189,7 +189,11 @@ uint8_t lq_i2c_mpu6050_init(struct ls_i2c_dev *dev)
  ********************************************************************************/
 uint8_t lq_i2c_mpu6050_get_id(struct ls_i2c_dev *dev)
 {
-    return i2c_read_reg_byte(dev, WHO_AM_I); //获取陀螺仪设备 ID
+    u8 id = 0;
+    if (i2c_read_reg_byte(dev, WHO_AM_I, &id) != 0) {
+        return 0;  // 读取失败返回0，调用方应检查不等于0x68
+    }
+    return id;
 }
 
 /********************************************************************************

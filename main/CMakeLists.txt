@@ -46,6 +46,10 @@ set(LQ_RUNTIME_HELPER_SOURCES
     ${PROJECT_SOURCE_DIR}/../example/src/38_lq_udp_llm_pid_autotune_demo.cpp
     ${PROJECT_SOURCE_DIR}/../example/src/39_lq_motor_id_demo.cpp
     ${PROJECT_SOURCE_DIR}/../example/src/40_lq_pwm_quick_test.cpp
+    ${PROJECT_SOURCE_DIR}/../example/src/41_lq_gyro_rate_pid_tune_demo.cpp
+    ${PROJECT_SOURCE_DIR}/../example/src/42_lq_gyro_motor_pid_tune_demo.cpp
+    ${PROJECT_SOURCE_DIR}/../example/src/43_lq_diff_speed_test_demo.cpp
+    ${PROJECT_SOURCE_DIR}/../example/src/44_lq_channel_check_demo.cpp
 )
 
 list(APPEND SRC ${LQ_USER_APP_SOURCES} ${LQ_RUNTIME_HELPER_SOURCES})

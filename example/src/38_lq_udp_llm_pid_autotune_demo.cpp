@@ -201,13 +201,13 @@ void lq_udp_llm_pid_autotune_demo(void)
 
     motor_L_pwm.atim_pwm_enable();
     motor_R_pwm.atim_pwm_enable();
-    motor_L_dir.gpio_level_set(GPIO_LOW);
-    motor_R_dir.gpio_level_set(GPIO_LOW);
+    motor_L_dir.gpio_level_set(GPIO_HIGH);
+    motor_R_dir.gpio_level_set(GPIO_HIGH);
 
     auto apply_motor = [&](ls_atim_pwm &pwm, ls_gpio &dir, float v) {
         const int max_pwm = car_config::kMotorMaxPwm;
         v = std::max(0.0f, std::min((float)max_pwm, v));
-        dir.gpio_level_set(GPIO_LOW);           // 正转 DIR=LOW
+        dir.gpio_level_set(GPIO_HIGH);           // 正转 DIR=HIGH
         pwm.atim_pwm_set_duty((uint32_t)v);
     };
 

@@ -16,10 +16,41 @@
 QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ*/
 #include "lq_ncnn.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 
 #include <opencv2/imgproc.hpp>
+
+namespace {
+
+std::vector<float> softmax_logits(const ncnn::Mat& logits)
+{
+    std::vector<float> probabilities;
+    if (logits.w <= 0) return probabilities;
+
+    probabilities.resize(logits.w);
+    float max_logit = -std::numeric_limits<float>::infinity();
+    for (int i = 0; i < logits.w; ++i) {
+        max_logit = std::max(max_logit, logits[i]);
+    }
+
+    float sum = 0.0f;
+    for (int i = 0; i < logits.w; ++i) {
+        const float value = std::exp(logits[i] - max_logit);
+        probabilities[i] = value;
+        sum += value;
+    }
+    if (sum <= 0.0f) return probabilities;
+
+    for (float &value : probabilities) {
+        value /= sum;
+    }
+    return probabilities;
+}
+
+} // namespace
 
 /*LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL
  * @函数名称：LQ_NCNN::LQ_NCNN()
@@ -87,6 +118,20 @@ bool LQ_NCNN::Init()
  QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ*/
 std::string LQ_NCNN::Infer(const cv::Mat& bgr_image)
 {
+    const LQNcnnResult result = InferWithScore(bgr_image);
+    return result.valid ? result.label : std::string();
+}
+
+/*LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL
+ * @函数名称：LQNcnnResult LQ_NCNN::InferWithScore(const cv::Mat& bgr_image)
+ * @功能说明：带置信度的推理函数
+ * @参数说明：bgr_image : 输入BGR图像
+ * @函数返回：推理结果结构体
+ * @调用方法：LQNcnnResult result = ncnn.InferWithScore(image);
+ * @备注说明：对模型原始logits做softmax得到置信度
+ QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ*/
+LQNcnnResult LQ_NCNN::InferWithScore(const cv::Mat& bgr_image)
+{
     if (!m_initialized) {
         throw std::runtime_error("NCNN not initialized. Call Init() first.");
     }
@@ -125,11 +170,24 @@ std::string LQ_NCNN::Infer(const cv::Mat& bgr_image)
         throw std::runtime_error("Failed to get class id from output logits.");
     }
 
-    // 返回类别名称或编号
-    if (class_id >= 0 && class_id < static_cast<int>(m_labels.size())) {
-        return m_labels[class_id];
+    LQNcnnResult result;
+    result.class_id = class_id;
+    result.valid = true;
+    result.logits.reserve(logits.w);
+    for (int i = 0; i < logits.w; ++i) {
+        result.logits.push_back(logits[i]);
     }
-    return std::to_string(class_id);
+    result.probabilities = softmax_logits(logits);
+    if (class_id >= 0 && class_id < static_cast<int>(result.probabilities.size())) {
+        result.confidence = result.probabilities[class_id];
+    }
+
+    if (class_id >= 0 && class_id < static_cast<int>(m_labels.size())) {
+        result.label = m_labels[class_id];
+    } else {
+        result.label = std::to_string(class_id);
+    }
+    return result;
 }
 
 /*LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL

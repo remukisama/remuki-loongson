@@ -28,7 +28,7 @@ static void safe_sleep(int ms) {
 
 void lq_pwm_quick_test(void)
 {
-    const int PWM = 4000;
+    const int PWM = 3000;
     const int DURATION_MS = 500000000;
     const int LOG_PERIOD_MS = 50;
 

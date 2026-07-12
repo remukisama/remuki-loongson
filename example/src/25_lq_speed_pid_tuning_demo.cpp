@@ -106,20 +106,20 @@ void lq_speed_pid_tuning_demo(void)
         // ==============================================
         // 左轮输出
         if (speed_out_L >= 0) {
-            motor_L_Dir.gpio_level_set(GPIO_LOW);  // 假设 LOW 为正转
-            motor_L.atim_pwm_set_active_low_duty(speed_out_L);
+            motor_L_Dir.gpio_level_set(GPIO_HIGH);  // 实测 HIGH 为正转
+            motor_L.atim_pwm_set_duty(speed_out_L);
         } else {
-            motor_L_Dir.gpio_level_set(GPIO_HIGH); // 反转
-            motor_L.atim_pwm_set_active_low_duty(-speed_out_L);
+            motor_L_Dir.gpio_level_set(GPIO_LOW); // 反转
+            motor_L.atim_pwm_set_duty(-speed_out_L);
         }
 
         // 右轮输出
         if (speed_out_R >= 0) {
-            motor_R_Dir.gpio_level_set(GPIO_LOW);  // 假设 LOW 为正转
-            motor_R.atim_pwm_set_active_low_duty(speed_out_R);
+            motor_R_Dir.gpio_level_set(GPIO_HIGH);  // 实测 HIGH 为正转
+            motor_R.atim_pwm_set_duty(speed_out_R);
         } else {
-            motor_R_Dir.gpio_level_set(GPIO_HIGH); // 反转
-            motor_R.atim_pwm_set_active_low_duty(-speed_out_R);
+            motor_R_Dir.gpio_level_set(GPIO_LOW); // 反转
+            motor_R.atim_pwm_set_duty(-speed_out_R);
         }
 
         // ==============================================
@@ -144,8 +144,8 @@ void lq_speed_pid_tuning_demo(void)
 
     // 退出程序时的安全断电逻辑
     std::cout << "正在关闭电机..." << std::endl;
-    motor_L.atim_pwm_set_active_low_duty(0);
-    motor_R.atim_pwm_set_active_low_duty(0);
+    motor_L.atim_pwm_set_duty(0);
+    motor_R.atim_pwm_set_duty(0);
     motor_L.atim_pwm_enable();
     motor_R.atim_pwm_enable();
 }

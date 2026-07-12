@@ -41,6 +41,10 @@ void lq_llm_pid_autotune_demo(void); // LLM自动PID调参Demo（配合llm-pid-t
 void lq_udp_llm_pid_autotune_demo(void); // UDP版LLM自动PID调参Demo（配合tuner.py --udp无线调参）
 void lq_motor_id_demo(void);              // 电机辨识：PWM阶跃扫描，采集摩擦力/负载模型
 void lq_pwm_quick_test(void);             // 快速开环PWM测试
+int lq_gyro_rate_pid_tune_demo(void);     // 41. 无电机纯陀螺仪角速度环调参
+int lq_gyro_motor_pid_tune_demo(int argc, char **argv); // 42. 电机参与角速度环调参
+int lq_diff_speed_test_demo(void);                       // 43. 差速执行测试
+int lq_channel_check_demo(void);                         // 44. 四路通道确认（架空专用）
 void lq_parameter_step_tuning_demo(void); // 33. PARAMETER_TUNING_METHODS.md 一体化分步调参Demo
 void lq_parameter_step_interactive_demo(void); // 33. 交互式分步调试入口（输入编号运行对应测试）
 int lq_left_ring_exit_recommend_demo(void); // 34. 左环岛出环防兜圈专项Demo

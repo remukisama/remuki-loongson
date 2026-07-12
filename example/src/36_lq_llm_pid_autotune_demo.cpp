@@ -247,20 +247,20 @@ void lq_llm_pid_autotune_demo(void)
         // ==============================================
         // 左轮
         if (pwm_L >= 0) {
-            motor_L_Dir.gpio_level_set(GPIO_LOW);
-            motor_L.atim_pwm_set_active_low_duty((int)pwm_L);
-        } else {
             motor_L_Dir.gpio_level_set(GPIO_HIGH);
-            motor_L.atim_pwm_set_active_low_duty((int)(-pwm_L));
+            motor_L.atim_pwm_set_duty((int)pwm_L);
+        } else {
+            motor_L_Dir.gpio_level_set(GPIO_LOW);
+            motor_L.atim_pwm_set_duty((int)(-pwm_L));
         }
         
         // 右轮
         if (pwm_R >= 0) {
-            motor_R_Dir.gpio_level_set(GPIO_LOW);
-            motor_R.atim_pwm_set_active_low_duty((int)pwm_R);
-        } else {
             motor_R_Dir.gpio_level_set(GPIO_HIGH);
-            motor_R.atim_pwm_set_active_low_duty((int)(-pwm_R));
+            motor_R.atim_pwm_set_duty((int)pwm_R);
+        } else {
+            motor_R_Dir.gpio_level_set(GPIO_LOW);
+            motor_R.atim_pwm_set_duty((int)(-pwm_R));
         }
         
         // ==============================================
@@ -305,8 +305,8 @@ void lq_llm_pid_autotune_demo(void)
     // ==============================================
     // 清理：关闭电机
     // ==============================================
-    motor_L.atim_pwm_set_active_low_duty(0);
-    motor_R.atim_pwm_set_active_low_duty(0);
+    motor_L.atim_pwm_set_duty(0);
+    motor_R.atim_pwm_set_duty(0);
     
     std::cout << std::endl;
     std::cout << "# Demo stopped. Final PID: P=" << pid_left.kp 

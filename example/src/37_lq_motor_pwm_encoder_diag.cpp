@@ -1,5 +1,6 @@
 #include "lq_all_demo.hpp"
 #include "user_app.hpp"
+#include "lq_udp_client.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -109,7 +110,7 @@ const char *other_wheel_verdict(const StepResult &r)
     return std::fabs(other_avg(r)) <= kOtherWheelThresholdMS ? "OK" : "COUPLED";
 }
 
-StepResult run_step(char wheel, int duty)
+StepResult run_step(char wheel, int duty, lq_udp_client &udp_log)
 {
     StepResult r{};
     r.wheel = wheel;
@@ -134,6 +135,16 @@ StepResult run_step(char wheel, int duty)
             r.peak_abs_l = std::max(r.peak_abs_l, std::fabs(enc_l));
             r.peak_abs_r = std::max(r.peak_abs_r, std::fabs(enc_r));
             ++r.samples;
+        }
+
+        // Send UDP: ware:wheel_duty,encL,encR,rawL,rawR
+        char send_buf[128];
+        int len = std::snprintf(send_buf, sizeof(send_buf),
+            "ware:%c%d,%.3f,%.3f,%.3f,%.3f\n",
+            wheel, duty, enc_l, enc_r,
+            encoder_raw_last_L(), encoder_raw_last_R());
+        if (len > 0) {
+            udp_log.udp_send(send_buf, len);
         }
 
         if ((now_ms % 150) == 0 || now_ms == kHoldMs) {
@@ -265,21 +276,26 @@ const char *hand_phase_for_ms(int t_ms)
 int lq_motor_pwm_encoder_diag(void)
 {
     std::printf("\n======================================================\n");
-    std::printf("   Motor PWM + Encoder Airborne Diagnostic\n");
+    std::printf("   Motor PWM + Encoder Airborne Diagnostic (UDP)\n");
     std::printf("======================================================\n");
     std::printf("[PWM_DIAG] duties: +/-1200, +/-2500, +/-4500; encoder unit: m/s\n");
     std::printf("[PWM_DIAG] expected: same-sign encoder speed, and |4500| >= |2500|.\n");
+    std::printf("[PWM_DIAG] UDP waveform -> 192.168.7.22:8080\n");
 
     if (!gpio_protect_heartbeat_require_ready(1500)) {
         std::printf("[PWM_DIAG][FATAL] gpio_manager watchdog is not ready; refuse non-zero PWM.\n");
         return 2;
     }
 
+    lq_udp_client udp_log;
+    udp_log.udp_client_init("192.168.7.22", 8080);
+    std::printf("[PWM_DIAG] UDP waveform sender initialized.\n");
+
     motor_Init();
     encoder_reset_state();
     stop_motors_and_settle();
 
-    const int duties[] = {1200, 2500, 4500, -1200, -2500, -4500};
+    const int duties[] = {800, 1500, 2500, -800, -1500, -2500};
     StepResult results[12];
     int result_count = 0;
 
@@ -290,7 +306,7 @@ int lq_motor_pwm_encoder_diag(void)
                             duty, car_config::kMotorMaxPwm);
                 continue;
             }
-            results[result_count++] = run_step(wheel, duty);
+            results[result_count++] = run_step(wheel, duty, udp_log);
             if (should_exit()) {
                 break;
             }
@@ -301,6 +317,7 @@ int lq_motor_pwm_encoder_diag(void)
     }
 
     stop_motors_and_settle();
+    udp_log.udp_close();
 
     bool ok = true;
     for (int i = 0; i < result_count; ++i) {
@@ -326,6 +343,9 @@ int lq_forward_pwm_sweep_diag(void)
         std::printf("[PWM_SWEEP][FATAL] gpio_manager watchdog is not ready; refuse non-zero PWM.\n");
         return 2;
     }
+
+    lq_udp_client udp_log;
+    udp_log.udp_client_init("192.168.7.22", 8080);
 
     motor_Init();
     encoder_reset_state();
@@ -363,7 +383,7 @@ int lq_forward_pwm_sweep_diag(void)
                             duty, car_config::kMotorMaxPwm);
                 continue;
             }
-            results[result_count++] = run_step(wheel, duty);
+            results[result_count++] = run_step(wheel, duty, udp_log);
             if (should_exit()) {
                 break;
             }
@@ -418,33 +438,46 @@ int lq_forward_pwm_sweep_diag(void)
 int lq_speed_loop_step_diag(void)
 {
     std::printf("\n======================================================\n");
-    std::printf("   Wheel-speed PI Step Diagnostic\n");
+    std::printf("   Wheel-speed PI Step Diagnostic (UDP waveform)\n");
     std::printf("======================================================\n");
     std::printf("[SPEED_STEP] current PID P=%.1f I=%.1f D=%.1f max_pwm=%d\n",
                 car_config::kSpeedPidP, car_config::kSpeedPidI,
                 car_config::kSpeedPidD, car_config::kMotorMaxPwm);
+    std::printf("[SPEED_STEP] UDP waveform -> 192.168.7.22:8080\n");
+    std::printf("[SPEED_STEP] FireWater protocol: ware:target_L,actual_L,target_R,actual_R,pwm_L,pwm_R\n");
 
     if (!gpio_protect_heartbeat_require_ready(1500)) {
         std::printf("[SPEED_STEP][FATAL] gpio_manager watchdog is not ready; refuse non-zero PWM.\n");
         return 2;
     }
 
+    // UDP client for waveform logging
+    lq_udp_client udp_log;
+    udp_log.udp_client_init("192.168.7.22", 8080);
+    std::printf("[SPEED_STEP] UDP waveform sender initialized.\n");
+
     motor_Init();
     if (!Speed_decision()) {
         motor_Duty_L(0);
         motor_Duty_R(0);
         std::printf("[SPEED_STEP][FATAL] Speed_decision/IMU init failed.\n");
+        udp_log.udp_close();
         return 3;
     }
 
     encoder_reset_state();
     stop_motors_and_settle();
 
-    const float targets[] = {0.30f, 0.45f};
+    // Track-safe speed-loop tuning: low-speed steps only, short enough for ~5m straight.
+    // const float targets[] = {0.16f, 0.30f, 0.45f};
+    const float targets[] = {0.16f, 0.30f, 0.45f};
+    const int step_duration_ms = 3000;
+    const int settle_duration_ms = 300;
+    const int summary_start_ms = 1000;
     bool ok = true;
 
     for (float target : targets) {
-        std::printf("\n[SPEED_STEP][TARGET] target=%.2f m/s duration=3000ms\n", target);
+        std::printf("\n[SPEED_STEP][TARGET] target=%.2f m/s duration=%dms\n", target, step_duration_ms);
         Speed_Goal_l = 0.0f;
         Speed_Goal_r = 0.0f;
         Speed_PID_L();
@@ -463,7 +496,7 @@ int lq_speed_loop_step_diag(void)
         float last_pwm_r = 0.0f;
         bool tripped = false;
 
-        for (int t = 0; t <= 3000 && !should_exit(); t += 5) {
+        for (int t = 0; t <= step_duration_ms && !should_exit(); t += 5) {
             speed_encoder_L = encoder_num_L();
             speed_encoder_R = encoder_num_R();
             Speed_Goal_l = target;
@@ -477,10 +510,21 @@ int lq_speed_loop_step_diag(void)
 
             peak_l = std::max(peak_l, std::fabs(speed_encoder_L));
             peak_r = std::max(peak_r, std::fabs(speed_encoder_R));
-            if (t >= 1800) {
+            if (t >= summary_start_ms) {
                 sum_l += speed_encoder_L;
                 sum_r += speed_encoder_R;
                 ++samples;
+            }
+
+            // Send UDP waveform every 20ms (every 4th iteration)
+            if ((t % 20) == 0) {
+                char send_buf[128];
+                int len = std::snprintf(send_buf, sizeof(send_buf),
+                    "ware:%.3f,%.3f,%.3f\n",
+                    target * 100, speed_encoder_L * 100, speed_encoder_R * 100);
+                if (len > 0) {
+                    udp_log.udp_send(send_buf, len);
+                }
             }
 
             if ((t % 100) == 0) {
@@ -505,7 +549,7 @@ int lq_speed_loop_step_diag(void)
         Speed_Goal_r = 0.0f;
         Speed_PID_L();
         Speed_PID_R();
-        sleep_with_heartbeat(500);
+        sleep_with_heartbeat(settle_duration_ms);
 
         const float avg_l = samples > 0 ? sum_l / static_cast<float>(samples) : 0.0f;
         const float avg_r = samples > 0 ? sum_r / static_cast<float>(samples) : 0.0f;
@@ -518,6 +562,7 @@ int lq_speed_loop_step_diag(void)
     }
 
     stop_motors_and_settle();
+    udp_log.udp_close();
     std::printf("\n[SPEED_STEP][RESULT] %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

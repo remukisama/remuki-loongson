@@ -22,6 +22,15 @@ QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ
 #include <opencv2/core.hpp>
 #include <ncnn/net.h>
 
+struct LQNcnnResult {
+    int class_id = -1;
+    std::string label;
+    float confidence = 0.0f;
+    std::vector<float> logits;
+    std::vector<float> probabilities;
+    bool valid = false;
+};
+
 /*!
  * @brief NCNN推理类
  * @details 用于加载NCNN模型并进行图像分类推理
@@ -46,6 +55,13 @@ public:
      * @return  推理结果（类别名称或编号）
      */
     std::string Infer(const cv::Mat& bgr_image);
+
+    /*!
+     * @brief   带置信度的推理函数
+     * @param   bgr_image : 输入BGR图像
+     * @return  class_id/label/logits/softmax置信度
+     */
+    LQNcnnResult InferWithScore(const cv::Mat& bgr_image);
 
     /*!
      * @brief   设置模型路径

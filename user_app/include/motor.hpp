@@ -24,6 +24,8 @@ void motor_Duty_L(int duty);
 void motor_Duty_R(int duty);
 void control_mark_vision_frame_ready(void);
 void control_reset_vision_health(void);
+void control_set_imu_async_cache_only(bool enabled);
+void imu_thread_1(void);
 
 //闭环
 bool Speed_decision(void);

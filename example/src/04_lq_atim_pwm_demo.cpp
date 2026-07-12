@@ -58,8 +58,8 @@ void lq_atim_pwm_demo(void)
     signal(SIGHUP, atim_pwm_test_signal_handler);
     signal(SIGQUIT, atim_pwm_test_signal_handler);
 
-    pwm1dir.gpio_level_set(GPIO_LOW);
-    pwm2dir.gpio_level_set(GPIO_LOW);
+    pwm1dir.gpio_level_set(GPIO_HIGH);
+    pwm2dir.gpio_level_set(GPIO_HIGH);
     pwm1.atim_pwm_set_duty(kTestDuty);
     pwm2.atim_pwm_set_duty(kTestDuty);
     pwm1.atim_pwm_enable();
@@ -80,8 +80,8 @@ void lq_atim_pwm_demo(void)
     pwm2.atim_pwm_set_duty(car_config::kMotorPwmStopDuty);
     pwm1.atim_pwm_enable();
     pwm2.atim_pwm_enable();
-    pwm1dir.gpio_level_set(GPIO_LOW);
-    pwm2dir.gpio_level_set(GPIO_LOW);
+    pwm1dir.gpio_level_set(GPIO_HIGH);
+    pwm2dir.gpio_level_set(GPIO_HIGH);
     gpio_protect_heartbeat_deinit();
 
     printf("\n[ATIM_PWM_TEST] Both PWM channels stopped at EN high duty=0 with PWM enabled.\n");

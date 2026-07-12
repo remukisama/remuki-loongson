@@ -4,6 +4,7 @@
 #include <cmath>
 
 // 初始化编码器计数通道
+// 通道确认测试验证：ENC_PWM0_PIN64 对应物理右轮，ENC_PWM3_PIN67 对应物理左轮
 ls_encoder_pwm encoder_L(ENC_PWM3_PIN67, PIN_75);
 ls_encoder_pwm encoder_R(ENC_PWM0_PIN64, PIN_72);
 
@@ -78,7 +79,7 @@ float encoder_num_L(void)
         return 0.0f;
     }
 
-    // 取反：落地后 DIR=LOW=前进，编码器原始值为负，取反后为正
+    // 编码器方向取反：正转时原始值为负，取反后为正
     float raw = -encoder_L.encoder_get_count() * car_config::kEncoderRpsToMS;
     g_raw_last_L = raw;
     if (std::fabs(raw) > kMaxValidSpeed) {
@@ -103,7 +104,7 @@ float encoder_num_R(void)
         return 0.0f;
     }
 
-    // 取反：落地后 DIR=LOW=前进，编码器原始值为负，取反后为正
+    // 编码器方向：ENC_PWM0_PIN64 正转时原始值为正，直接使用
     float raw = encoder_R.encoder_get_count() * car_config::kEncoderRpsToMS;
     g_raw_last_R = raw;
     if (std::fabs(raw) > kMaxValidSpeed) {

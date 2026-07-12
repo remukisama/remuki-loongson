@@ -4,7 +4,7 @@
  *
  * 保护范围（心跳超时写安全值）：
  *   - 4路电机 PWM（ATIM PWM mode 1，duty=0 → EN低电平停车）
- *   - 4路方向 GPIO → LOW
+ *   - 4路方向 GPIO → HIGH（PH正转端，EN=0 无输出）
  *   - 1路舵机 PWM（GTIM CCR2 → duty=0）
  *   - 蜂鸣器 GPIO → LOW
  */

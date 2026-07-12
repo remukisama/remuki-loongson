@@ -75,18 +75,28 @@ int device_init(struct ls_i2c_dev *dev)
 int device_inspection(struct ls_i2c_dev *dev, DeviceInitFunc deviceInit)
 {
     int ret;
-    // 参数检查
+    static int consecutive_fail = 0;
+
     if (unlikely(dev == NULL)) {
         pr_err("%s: device_inspection dev is null\n", DEVICE_NAME);
         return -EINVAL;
     }
-    // 重新扫描所有设备
+
     ret = lq_i2c_mpu6050_get_id(dev);
     if (ret != MPU6050_DEV_ADDR) {
-        is_init = false;
-        printk(KERN_ERR "%s: failed to scan devices 0x%02x\n", DEVICE_NAME, dev->client->addr);
+        consecutive_fail++;
+        // 连续3次失败才标记需要重新初始化，避免瞬态I2C错误触发MPU6050复位
+        if (consecutive_fail >= 3) {
+            is_init = false;
+            printk(KERN_ERR "%s: failed to scan devices 0x%02x (3 consecutive fails)\n",
+                   DEVICE_NAME, dev->client->addr);
+        }
         return ret;
     }
+
+    // 读取成功，重置失败计数
+    consecutive_fail = 0;
+
     if (!is_init) {
         deviceInit(dev);
         is_init = true;
@@ -154,38 +164,44 @@ int i2c_open(struct inode *inode, struct file *f)
  ********************************************************************************/
 long i2c_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
-    uint8_t ID = 0;         // 设备ID，用于存放获取到的设备ID值
-    int16_t data[6] = {0};  // 存放各种数据的数组
-    // 从 file 结构体中获取对应的字符设备结构体 cdev，cdev 结构体代表了字符设备在内核中的抽象表现
+    uint8_t ID = 0;
+    int16_t data[6] = {0};
+    int ret = 0;
     struct cdev *cdev = f->f_path.dentry->d_inode->i_cdev;
-    // 使用 container_of 宏根据 cdev 结构体的地址找到自定义结构体的地址
     struct ls_i2c_dev *dev = container_of(cdev, struct ls_i2c_dev, cdev);
-    // 根据命令码执行相应的操作
     switch (cmd)
     {
-        /**************************************** MPU6050 ****************************************/
-        case I2C_GET_MPU6050_ID:    // 获取MPU6050的ID
+        case I2C_GET_MPU6050_ID:
             ID = lq_i2c_mpu6050_get_id(dev);
+            if (ID != MPU6050_DEV_ADDR) {
+                return -EIO;
+            }
             if (copy_to_user((uint8_t*)arg, &ID, sizeof(ID)))
                 return -EFAULT;
             break;
-        case I2C_GET_MPU6050_TEM:  // 获取MPU6050的温度
+        case I2C_GET_MPU6050_TEM:
             data[0] = mpu6050_get_temperature(dev);
             if (copy_to_user((int16_t*)arg, &data[0], sizeof(int16_t)))
                 return -EFAULT;
             break;
-        case I2C_GET_MPU6050_ANG:  // 获取MPU6050的角速度值
-            mpu6050_get_gyro_data(dev, &data[0], &data[1], &data[2]);
+        case I2C_GET_MPU6050_ANG:
+            ret = mpu6050_get_gyro_data(dev, &data[0], &data[1], &data[2]);
+            if (ret != 0)
+                return -EIO;
             if (copy_to_user((int16_t*)arg, data, sizeof(data[0]) * 3))
                 return -EFAULT;
             break;
-        case I2C_GET_MPU6050_ACC:  // 获取MPU6050的加速度值
-            mpu6050_get_accelerometer(dev, &data[0], &data[1], &data[2]);
+        case I2C_GET_MPU6050_ACC:
+            ret = mpu6050_get_accelerometer(dev, &data[0], &data[1], &data[2]);
+            if (ret != 0)
+                return -EIO;
             if (copy_to_user((int16_t*)arg, data, sizeof(data[0]) * 3))
                 return -EFAULT;
             break;
-        case I2C_GET_MPU6050_GYRO:  // 获取MPU6050陀螺仪的角速度值
-            mpu6050_get_raw_data(dev, &data[0], &data[1], &data[2], &data[3], &data[4], &data[5]);
+        case I2C_GET_MPU6050_GYRO:
+            ret = mpu6050_get_raw_data(dev, &data[0], &data[1], &data[2], &data[3], &data[4], &data[5]);
+            if (ret != 0)
+                return -EIO;
             if (copy_to_user((int16_t*)arg, data, sizeof(data[0]) * 6))
                 return -EFAULT;
             break;
