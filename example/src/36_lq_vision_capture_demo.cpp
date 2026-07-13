@@ -680,6 +680,16 @@ int lq_vision_capture_demo(void)
 {
     const char *dir = "/tmp/vision_capture";
     mkdir(dir, 0755);
+    int requested_frames = 12;
+    if (const char *env = std::getenv("LQ_VISION_CAPTURE_FRAMES")) {
+        const long parsed = std::strtol(env, nullptr, 10);
+        if (parsed >= 12 && parsed <= 5000) {
+            requested_frames = static_cast<int>(parsed);
+        }
+    }
+    const bool stress_mode = requested_frames > 12;
+    const int save_interval = std::max(1, requested_frames / 12);
+
     Data_Settings();
     g_enable_element_process = false;
     if (!image_cv_Init()) {
@@ -688,19 +698,67 @@ int lq_vision_capture_demo(void)
     }
 
     int saved = 0;
-    for (int i = 0; i < 12; ++i) {
-        if (!image_cv_zip()) {
-            std::printf("[VISION_CAPTURE][WARN] frame %d read failed\n", i);
+    int frames_ok = 0;
+    int frames_failed = 0;
+    int failure_streak = 0;
+    int max_failure_streak = 0;
+    int read_over_25ms = 0;
+    int read_over_50ms = 0;
+    int read_over_100ms = 0;
+    int read_over_150ms = 0;
+    std::vector<double> read_latency_ms;
+    read_latency_ms.reserve(requested_frames);
+    int pipeline_over_25ms = 0;
+    int pipeline_over_50ms = 0;
+    int pipeline_over_100ms = 0;
+    int pipeline_over_150ms = 0;
+    std::vector<double> pipeline_latency_ms;
+    pipeline_latency_ms.reserve(requested_frames);
+    const auto capture_started = std::chrono::steady_clock::now();
+    for (int i = 0; i < requested_frames; ++i) {
+        const auto read_started = std::chrono::steady_clock::now();
+        const bool read_ok = image_cv_zip();
+        const double read_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - read_started).count();
+        read_latency_ms.push_back(read_ms);
+        if (read_ms > 25.0) ++read_over_25ms;
+        if (read_ms > 50.0) ++read_over_50ms;
+        if (read_ms > 100.0) ++read_over_100ms;
+        if (read_ms > 150.0) ++read_over_150ms;
+
+        if (!read_ok) {
+            ++frames_failed;
+            ++failure_streak;
+            max_failure_streak = std::max(max_failure_streak, failure_streak);
+            if (frames_failed <= 12) {
+                std::printf("[VISION_CAPTURE][WARN] frame %d read failed\n", i);
+            }
             continue;
         }
+        ++frames_ok;
+        failure_streak = 0;
         imageprocess();
+        const double pipeline_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - read_started).count();
+        pipeline_latency_ms.push_back(pipeline_ms);
+        if (pipeline_ms > 25.0) ++pipeline_over_25ms;
+        if (pipeline_ms > 50.0) ++pipeline_over_50ms;
+        if (pipeline_ms > 100.0) ++pipeline_over_100ms;
+        if (pipeline_ms > 150.0) ++pipeline_over_150ms;
+
+        const bool save_this_frame =
+            !stress_mode || (saved < 12 && (i % save_interval) == 0);
+        if (!save_this_frame) {
+            continue;
+        }
 
         const cv::Mat raw = make_raw_roi_frame();
         const cv::Mat overlay = make_patrol_overlay_frame();
         char raw_path[160];
         char overlay_path[160];
-        std::snprintf(raw_path, sizeof(raw_path), "%s/frame_%02d_raw.jpg", dir, i);
-        std::snprintf(overlay_path, sizeof(overlay_path), "%s/frame_%02d_overlay.png", dir, i);
+        const int save_index = stress_mode ? saved : i;
+        std::snprintf(raw_path, sizeof(raw_path), "%s/frame_%02d_raw.jpg", dir, save_index);
+        std::snprintf(overlay_path, sizeof(overlay_path), "%s/frame_%02d_overlay.png", dir, save_index);
 
         const bool raw_ok = !raw.empty() && cv::imwrite(raw_path, raw);
         const bool overlay_ok = cv::imwrite(overlay_path, overlay);
@@ -718,11 +776,54 @@ int lq_vision_capture_demo(void)
                     ImageFlag.image_element_rings,
                     ImageFlag.image_element_rings_flag);
         if (raw_ok || overlay_ok) ++saved;
-        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        if (!stress_mode) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        }
     }
 
-    std::printf("[VISION_CAPTURE] saved_frames:%d dir:%s\n", saved, dir);
-    return saved > 0 ? 0 : 6;
+    const double elapsed_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - capture_started).count();
+    const double processed_fps = elapsed_s > 0.0 ? frames_ok / elapsed_s : 0.0;
+    std::sort(read_latency_ms.begin(), read_latency_ms.end());
+    std::sort(pipeline_latency_ms.begin(), pipeline_latency_ms.end());
+    const auto latency_percentile = [](const std::vector<double> &latencies, int percentile) {
+        if (latencies.empty()) return 0.0;
+        const size_t rank =
+            (latencies.size() * static_cast<size_t>(percentile) + 99U) / 100U;
+        return latencies[std::min(latencies.size() - 1U, rank - 1U)];
+    };
+    const double read_p95_ms = latency_percentile(read_latency_ms, 95);
+    const double read_p99_ms = latency_percentile(read_latency_ms, 99);
+    const double read_max_ms = read_latency_ms.empty() ? 0.0 : read_latency_ms.back();
+    const double pipeline_p95_ms = latency_percentile(pipeline_latency_ms, 95);
+    const double pipeline_p99_ms = latency_percentile(pipeline_latency_ms, 99);
+    const double pipeline_max_ms = pipeline_latency_ms.empty() ? 0.0 : pipeline_latency_ms.back();
+    std::printf(
+        "[VISION_CAPTURE] requested:%d ok:%d failed:%d max_fail_streak:%d elapsed_s:%.3f processed_fps:%.2f read_ms_p95/p99/max:%.2f/%.2f/%.2f read_over25/50/100/150:%d/%d/%d/%d pipeline_ms_p95/p99/max:%.2f/%.2f/%.2f pipeline_over25/50/100/150:%d/%d/%d/%d saved_frames:%d dir:%s\n",
+        requested_frames,
+        frames_ok,
+        frames_failed,
+        max_failure_streak,
+        elapsed_s,
+        processed_fps,
+        read_p95_ms,
+        read_p99_ms,
+        read_max_ms,
+        read_over_25ms,
+        read_over_50ms,
+        read_over_100ms,
+        read_over_150ms,
+        pipeline_p95_ms,
+        pipeline_p99_ms,
+        pipeline_max_ms,
+        pipeline_over_25ms,
+        pipeline_over_50ms,
+        pipeline_over_100ms,
+        pipeline_over_150ms,
+        saved,
+        dir);
+    if (saved <= 0) return 6;
+    return frames_failed == 0 ? 0 : 7;
 }
 
 void lq_vision_capture_maybe_save_race_frame(int frame_index)

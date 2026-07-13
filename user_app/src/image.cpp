@@ -1570,9 +1570,6 @@ void GetDet()
   {
     if (ImageStatus.OFFLine >= car_config::kBadVisionCenterHoldOfflineThreshold) {
       DetTemp = car_config::kImageMiddleLine;
-      if (!g_enable_element_process && ImageFlag.image_element_rings == 0) {
-        ImageStatus.Road_type = Cross;
-      }
     } else {
       DetTemp = ImageStatus.Det_True;                                                   // 可视距离很短但未全丢时，暂时保持上一帧偏差
     }
@@ -1594,7 +1591,7 @@ void GetDet()
       ImageStatus.Left_Line >= car_config::kCrossHoldEnterSideLossMin &&
       ImageStatus.Right_Line >= car_config::kCrossHoldEnterSideLossMin;
   const bool entering_cross =
-      !g_enable_element_process && !repaired_cross &&
+      !g_enable_element_process && car_config::kBasicCrossRepairEnable && !repaired_cross &&
       (ImageStatus.WhiteLine >= car_config::kCrossMinWhiteLine ||
        both_sides_weak);
   if (repaired_cross) {

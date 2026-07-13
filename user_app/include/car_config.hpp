@@ -27,24 +27,47 @@ constexpr int kWatchdogHeartbeatStallTimeoutMs = 100;
 constexpr float kSpeedPidP = 1200.0f;
 constexpr float kSpeedPidI = 300.0f;
 constexpr float kSpeedPidD = 30.0f;
-constexpr float kSpeedPidFeedForwardPerMS = 4500.0f; // 欠速前馈；用于验证地面负载下位置式PID基础PWM不足的问题
+// 地面转弯负载需要较强欠速前馈；实测连续低前馈会使外轮欠速、实际差速仅实现指令约22%。
+constexpr float kSpeedPidFeedForwardPerMS = 4500.0f;
 constexpr float kSpeedPidIntegralLimit = 8.0f;     // Integral state limit; output contribution is I * limit.
 constexpr float kSpeedPidSlewRate = 800.0f;        // 输出变化率限制(每帧最大变化)，防止PWM突变冲击驱动板
 constexpr int kMotorMaxPwm = 8000;
-constexpr float kSpeedBrakeThreshold = 0.03f;      // 反拖制动触发阈值：降低后让慢轮在地面负载下更早制动
-constexpr float kSpeedBrakeMaxPwm = -600.0f;        // 反拖制动最大负PWM（有限反拖，避免驱动板过热）
-constexpr float kBaseSpeedGoal = 0.504f;          // 激进对照：正常直线目标在0.42基线上整体提高20%。
+// DRV8701E 的 EN=0 已是低侧慢衰减制动；直道/外轮不主动反转。
+// 明确弯道的内轮被车身拖行时，允许有限反拖以建立必要的左右轮差速。
+constexpr float kSpeedBrakeThreshold = 0.03f;
+constexpr float kSpeedBrakeMaxPwm = 0.0f;
+constexpr float kSpeedTurnBrakeMaxPwm = -1200.0f;
+constexpr float kBaseSpeedGoal = 0.74f;           // 激进提速：直线目标相对0.42基线提高约76%，用短时实跑逐级验证。
 constexpr float kMaxWheelSpeedGoal = 4.0f;
 
 // [1/3] 视觉外环 PID: 中线偏差 -> 目标角速度
 // Kp×kGyroPidP必须 < kGyroPidOutputLimit/max_err，否则差速饱和
 // 1.0×0.080=0.080, err=10时差速=0.80刚好不饱和
-constexpr float kSteerKp = 2.0f;
+constexpr float kSteerKp = 2.55f;
 constexpr float kSteerKi = 0.0f;
 constexpr float kSteerKd = 0.8f;
 constexpr float kSteerIntegralLimit = 80.0f;
 constexpr float kSteerOutputLimitDps = 60.0f;
 constexpr int kSteerDeadBand = 2;
+// 远端 Det 已回中但车身仍横向偏离时，用可信近端中心补足出弯姿态回正；不参与十字/丢线帧。
+constexpr float kNearCenterSteerGainDpsPerPx = 0.90f;
+constexpr float kNearCenterSteerErrorLimitPx = 12.0f;
+constexpr float kNearCenterSteerDeadBandPx = 2.0f;
+constexpr int kNearCenterSteerMaxOffline = 20;
+// 近/远中线反向且远端边界明显丢失时，说明前瞻中心可能落到横向白区或错误支路。
+// 这只是几何置信度降权，不识别道路元素；近端双边仍可信时继续沿当前中线通过。
+constexpr float kNearFarConflictMinFarErrorPx = 6.0f;
+constexpr int kNearFarConflictSideLossMin = 12;
+constexpr float kNearFarConflictFarScale = 0.0f; // 歧义期完全忽略错误远端，只沿可信近端中线继续。
+constexpr int kNearFarConflictMaxHoldMs = 2300;  // 防止状态永久锁存；正常情况由连续走廊恢复提前释放。
+constexpr int kNearFarConflictNearHoldMs = 100;  // 近端短暂失效时保持最后可信误差，跨过单帧/短时白区。
+constexpr int kNearFarConflictNearDecayMs = 150; // 保持期后平滑衰减到直行，避免用陈旧近端持续转向。
+constexpr int kNearFarConflictReleaseCenterGapPx = 5; // 前瞻/近端中心重新接续到同一纵向走廊才允许释放。
+constexpr int kNearFarConflictOutletGapMaxPx = 18; // 错误方向翻转且出口走廊有效时允许较大远近差，提前跟随出十字弯。
+constexpr int kNearFarConflictReleaseTowWidthMinPx = 10;
+constexpr int kNearFarConflictReleaseTowWidthMaxPx = 42; // TowPoint=18期望宽约26px；拒绝横向支路的超宽假走廊。
+constexpr int kNearFarConflictReleaseFrames = 3; // 连续多帧确认，不能因一帧边界计数恢复就交还远端。
+constexpr int kNearFarConflictRecoveryBlendMs = 250; // 远端权重由0渐增到1，消除恢复瞬间的大角速度跳变。
 
 // [2/3] 角度/角速度 PID: 目标角速度 -> 左右轮差速
 constexpr float kAnglePidP = 11.0f;
@@ -55,7 +78,8 @@ constexpr float kAnglePidOutputLimit = 120.0f;
 constexpr float kAngleTargetToleranceDeg = 1.2f;
 constexpr float kAngleSettleGyroDps = 5.0f;
 
-constexpr float kGyroPidP = 0.014f;
+// 新双路驱动板的主动反拖更强；降低角速度反馈占比，避免实测角速度轻微过冲时差速反号。
+constexpr float kGyroPidP = 0.007f;
 constexpr float kGyroPidI = 0.0f;
 // 实车日志里 5ms 周期下 gyro D 项会把小幅陀螺噪声放大成满幅交替差速，先关闭。
 constexpr float kGyroPidD = 0.0f;
@@ -63,10 +87,12 @@ constexpr float kGyroPidIntegralLimit = 50.0f;
 constexpr float kGyroPidOutputLimit = 0.80f;
 
 // 差速输出调理参数
-constexpr float kGyroFeedforwardGain = 0.0020f;  // 目标角速度前馈(m/s per dps)：tgt=28dps时贡献0.056m/s基础差速
+constexpr float kGyroFeedforwardGain = 0.0032f;  // 目标角速度前馈(m/s per dps)：以稳定同向差速为主，反馈只修正剩余误差
 constexpr float kDiffSlewRatePerSec = 5.0f;       // 差速输出变化率限制(m/s²)，8ms帧约0.040m/s，抑制逐帧翻转自激
-constexpr float kDeadbandDiffLimit = 0.05f;       // 视觉死区/|tgt|<5dps时差速硬上限(m/s)，防止陀螺噪声驱动差速
-constexpr float kDeadbandDiffTriggerDps = 5.0f;   // |target_gyro_z|低于此值时启用死区差速限制
+constexpr float kDiffTurnBuildSlewRatePerSec = 9.0f; // 普通弯道同方向建立转向时加快差速。
+constexpr float kDiffTurnReleaseSlewRatePerSec = 12.0f; // 普通弯道出弯卸差速/反向纠偏更快，减少出弯外抛。
+constexpr float kDeadbandDiffLimit = 0.05f;       // 近直线小角度目标时的差速硬上限，防止快速回中后振荡。
+constexpr float kDeadbandDiffTriggerDps = 6.0f;   // 仅限制近零角速度；保留出弯 3~4 像素偏差所需的回正差速。
 
 // 角速度环信号调理参数
 constexpr float kGyroRawSpikeRejectDps = 120.0f;   // 实车目标上限60dps；超过2倍目标的读数按电机EMI尖峰拒绝。
@@ -75,15 +101,19 @@ constexpr float kGyroLpfAlpha = 0.70f;              // 陀螺仪一阶低通滤�
 constexpr float kGyroDeadBandDps = 3.0f;            // 角速度死区，|gyro_z| < 3°/s 时归零，过滤 MPU6050 静止零漂。
 
 // 速度规划参数
-constexpr float kCurveSpeedGoal = 0.288f;           // 激进对照：正常弯道目标在0.24基线上整体提高20%。
-constexpr float kDegradedSpeedGoal = 0.22f;         // 严重单边丢线、IMU fallback/视觉降级保持原安全速度，不随正常弯道提速。
-constexpr float kSpeedAccelLimit = 1.8f;            // 目标速度上升限幅 m/s^2，0→0.45m/s 约 0.25s，减少起步大阶跃。
+constexpr float kCurveSpeedGoal = 0.50f;            // 弯道目标相对0.24基线提高约108%，是本轮平均速度提升的主要来源。
+constexpr float kDegradedSpeedGoal = 0.22f;         // 十字、IMU fallback保持原安全速度，不随正常赛道提速。
+constexpr float kSingleSideLossSpeedGoal = 0.30f;   // 单侧严重丢边仍保留恢复转向，同时避免长期锁死在0.22m/s。
+constexpr float kDetStuckSpeedGoal = 0.26f;         // det持续偏差阶段小幅提速，但低于普通弯道目标。
+constexpr float kCrossExitSpeedGoal = 0.26f;        // 十字释放后先限制车速，让出口转向角速度建立。
+constexpr int kCrossExitSpeedHoldMs = 160;          // 出口短时接管窗口；只设速度上限，不削弱转向。
+constexpr float kSpeedAccelLimit = 4.0f;            // 缩短出弯再加速时间，避免长时间停留在弯道速度。
 constexpr float kSpeedDecelLimit = 4.0f;            // 目标速度下降限幅 m/s^2，0.45→0.20 仅需 62ms，入弯减速足够快。
-constexpr float kSpeedPlanSlowStart = 1.5f;         // 误差达到该值时开始减速。
-constexpr float kSpeedPlanFullCurve = 6.5f;         // 误差达到该值时降至完整弯道速度。
-constexpr float kSpeedPlanDerivWeight = 0.35f;      // 误差变化率在曲率评分中的权重，提前感知入弯趋势。
-constexpr float kVisionLossSlowStart = 8.0f;        // OFFLine/单侧丢线达到该值时提前降速。
-constexpr float kVisionLossFullCurve = 24.0f;       // 视觉质量严重变差时直接降到弯道速度。
+constexpr float kSpeedPlanSlowStart = 3.0f;         // 小偏差保持直线速度，减少轻微摆动导致的无效刹车。
+constexpr float kSpeedPlanFullCurve = 14.0f;        // 只有明确弯道才降至完整弯道速度。
+constexpr float kSpeedPlanDerivWeight = 0.15f;      // 降低瞬时偏差变化率对刹车的放大，缩短弯前低速区。
+constexpr float kVisionLossSlowStart = 14.0f;       // 轻微边界缺失不再过早降速。
+constexpr float kVisionLossFullCurve = 34.0f;       // 严重视觉退化时才降到完整弯道速度。
 
 constexpr bool kSteerDebugPrintEnable = true;
 constexpr int kSteerDebugPrintDivider = 10;
@@ -95,14 +125,14 @@ constexpr int kMpu6050GyroBiasSamples = 200;     // 陀螺仪零偏采样次数�
 constexpr int kMpu6050BiasSampleDelayUs = 10000; // 零偏采样间隔，10000us 即 10ms；采样太快噪声相关性高，建议保持 5-10ms。
 
 // =====================================================================
-// 双路摄像头参数：320x240 用于 NCNN 推理，内部下采样 160x120 用于循迹
+// 摄像头参数：高速赛道模式采用160x120原生帧；当前NCNN观测关闭。
 // =====================================================================
-constexpr int kCameraHiresWidth = 320;           // 摄像头高分辨率采集宽度，用于 NCNN 模型推理输入。
-constexpr int kCameraHiresHeight = 240;          // 摄像头高分辨率采集高度。
+constexpr int kCameraHiresWidth = 160;           // 180fps档位使用160x120；循迹原生即为该分辨率。
+constexpr int kCameraHiresHeight = 120;          // 320x240会被驱动协商回120fps，因此使用传感器高速档。
 constexpr int kCameraWidth = 160;                // 循迹下采样宽度，保持与既有算法兼容；修改此值需同步调整 ROI 和采样步长。
 constexpr int kCameraHeight = 120;               // 循迹下采样高度。
-constexpr int kCameraFps = 120;                  // 160x120 HIGH_MJPG 在180fps有间歇空帧，先降到120fps换稳定性。
-constexpr lq_camera_format_t kCameraFormat = LQ_CAMERA_HIGH_MJPG; // 高帧率模式；0CPU_MJPG帧延迟过大导致VISION_GUARD退出
+constexpr int kCameraFps = 180;                  // 请求180fps；新 DHZJ 摄像头在 0CPU 模式下实际协商为 YUYV 156fps。
+constexpr lq_camera_format_t kCameraFormat = LQ_CAMERA_0CPU_MJPG; // 赛道测试配置：低 CPU 枚举；实测约141~146fps，请勿按180fps估算处理周期。
 constexpr const char *kCameraDevicePath = LQ_CAMERA_PATH; // 摄像头设备节点，默认 /dev/video0；换摄像头编号时改这里。
 constexpr int kCameraManualExposure = 55;       // T03白占比0.563偏高，先降到历史安全甜点55，优先压过曝/反光导致的动态丢边。
 
@@ -164,8 +194,10 @@ constexpr const char *kNcnnLabel2 = "weapons";
 constexpr bool kNcnnObserveEnable = false;      // 速度调试阶段暂时关闭 NCNN 观测与推理。
 constexpr int kNcnnObserveUdpEveryFrames = 10;  // 每 N 帧提交一次异步观测，避免推理拖慢图像主循环。
 constexpr int kNcnnObserveJpegQuality = 55;     // UDP 图传 JPEG 质量。
-constexpr const char *kNcnnObserveUdpHost = "192.168.141.22"; // 上位机 UDP 图传地址。
+constexpr const char *kNcnnObserveUdpHost = "192.168.145.22"; // 上位机 UDP 图传地址。
 constexpr int kNcnnObserveUdpPort = 8081;       // 上位机 UDP 图传端口。
+constexpr const char *kRaceTelemetryUdpHost = "192.168.145.22"; // 上位机转向遥测地址。
+constexpr int kRaceTelemetryUdpPort = 8080;     // 上位机转向遥测端口。
 constexpr int kCameraRoiX = 0;                   // ROI 左上角 X，通常保持 0；摄像头画面横向偏移明显时先机械校正，再微调。
 constexpr int kCameraRoiY = 58;                  // T06入弯后OFF/单侧丢边高，ROI略前移2行多看远端，避免动态闭环看太近。
 constexpr int kCameraRoiWidth = 160;             // ROI 宽度，应与采集宽度和压缩逻辑匹配；非必要不要改。
@@ -211,7 +243,17 @@ constexpr int kCrossHoldCoreWhiteLineMin = 16;    // 白线宽度达到该值后
 constexpr int kCrossHoldReleaseOfflineMax = 20;   // 十字入口锁向后，OFFLine恢复到该值以下才允许开始释放。
 constexpr int kCrossHoldReleaseWhiteLineMax = 3;  // 双丢边行基本消失后才认为已经越过十字核心区。
 constexpr int kCrossHoldReleaseSideLossMax = 10;  // 双边恢复或越过核心后任一侧恢复到该值以下，允许重新接管出口弯。
-constexpr int kCrossHoldReleaseFrames = 6;         // 恢复条件连续满足的图像帧数，过滤十字出口的一帧假恢复。
+constexpr int kCrossHoldReleaseFrames = 3;         // 实测约117fps时约26ms，减少十字出口欠转，同时过滤一帧假恢复。
+constexpr float kCrossSteerErrorLimit = 4.0f;      // 十字锁向只保留小姿态修正，防止侧支路把车持续拉向岔口。
+constexpr float kCrossSteerKd = 0.8f;              // 十字保持已验证的原始D响应；普通弯道继续使用快速回中参数。
+constexpr int kCrossEntryHeadingNearRow = 55;      // 用近端与前瞻中心差估计出弯后的车头姿态残差。
+constexpr int kCrossEntryHeadingMaxOffline = 20;  // 只记忆边界仍可信的弯道末端姿态，避免十字坏帧污染参考。
+constexpr float kCrossEntryHeadingLimitPx = 10.0f; // 限制入口姿态残差，防止单边补线异常造成过度反打。
+constexpr int kCrossEntryHeadingMemoryMs = 160;    // 十字触发前短时保留最后可信姿态，覆盖入口瞬间的丢边帧。
+constexpr int kCrossEntryAlignDurationMs = 220;    // 首次进入十字后的短时对正窗口，不贯穿整个交叉区。
+constexpr float kCrossEntryHeadingGainDps = 1.6f; // 每像素近远中心差对应的反向对正角速度。
+constexpr float kCrossEntryHeadingLimitDps = 16.0f;// 对正角速度上限；足以消除残余偏航，又低于正常急弯目标。
+constexpr int kCrossEntryRearmNormalFrames = 18;   // 连续正常约150ms后才允许下一次入口触发，过滤Road_type抖动。
 constexpr int kStraightVarianceAccThreshold = 12; // 静态直道 var≈9.96 已贴近阈值，略放宽到 12，避免直道在边界处反复 Normol/Straight。
 constexpr int kStraightOfflineMax = 8;           // 直道允许的顶边丢线数，调大更容易判直道但可能误判弯道；丢线多时先查二值化再改。
 constexpr int kStraightLeftLineMax = 3;          // 直道允许的左丢边数，调大更宽松；左边界不稳定时先调曝光和 HSV，再微调。
@@ -219,10 +261,10 @@ constexpr int kStraightRightLineMax = 3;         // 直道允许的右丢边数�
 
 // 稳定中心线重构：按边界可信度做补线，避免单侧丢线/宽度异常时中线乱飘。
 constexpr bool kRaceUdpDebugEnable = true;        // car 调试模式：只在异常视觉帧稀疏发送 JPEG 图传。
-constexpr int kRaceUdpDebugMaxFrames = 80;        // 定点十字调试覆盖完整弯道/入口/出口；约5fps时可记录16秒异常段。
+constexpr int kRaceUdpDebugMaxFrames = 600;       // 约5fps时覆盖完整120秒调试；仅异常帧触发，单次编码负载不变。
 constexpr int kRaceUdpDebugIntervalFrames = 24;   // 120fps下约5fps，兼顾时序分辨率与JPEG编码/UDP负载。
-constexpr bool kBasicLineBaselineMode = true;     // 基础循迹基线：无元素模式跳过曲线跨帧补偿。
-constexpr bool kBasicCrossRepairEnable = true;    // 无元素模式只启用十字几何补线，不启用圆环/斑马线等元素逻辑。
+constexpr bool kBasicLineBaselineMode = false;    // 纯中线循迹也启用单侧边界中线重构，避免弯道丢一侧后中线贴边。
+constexpr bool kBasicCrossRepairEnable = false;   // 纯中线循迹不识别十字；十字与普通弯道统一依靠连续边界补线。
 constexpr bool kCurveCenterCompEnable = true;     // 开启轻量级可信度补线；基础基线模式会临时跳过。
 constexpr int kCurveCenterLossStart = 4;          // 单侧丢线达到该值后提高单边重构权重；过小会误伤普通小弯，过大则大弯介入偏晚。
 constexpr int kCurveCenterOppositeLossMax = 12;   // 对侧也严重丢线时少信单侧边界，改走本帧行间预测，避免双边弱观测乱补。

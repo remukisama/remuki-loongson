@@ -21,7 +21,7 @@ char img5[120][160];
 //摄像头初始化，成功返回true，失败返回false；
 bool image_cv_Init(void)
 {
-    // 使用高分辨率采集（320x240），内部下采样到 160x120 供既有循迹算法
+    // 按配置采集；高速赛道模式使用160x120原生180fps，循迹尺寸保持不变。
     cam_ex = std::make_unique<lq_camera_ex>(
         car_config::kCameraHiresWidth,
         car_config::kCameraHiresHeight,
@@ -65,7 +65,7 @@ bool image_cv_zip(void)
 {
     if (!cam_ex) return false;
 
-    // 读取摄像头一帧原始图像（320x240）
+    // 读取摄像头一帧原始图像（尺寸由car_config配置）
     cv::Mat raw = cam_ex->get_frame_raw();
     if (raw.empty())
     {

@@ -32,7 +32,7 @@
 //   Phase 10: 停车
 //
 // 输出格式：
-//   [DIFF] t=<time> phase=<n> gL=<goal_L> gR=<goal_R> eL=<enc_L> eR=<enc_R>
+//   [DIFF] t=<time> phase=<n> gL=<goal_L> gR=<goal_R> eL=<enc_L> eR=<enc_R> 
 //          errL=<err_L> errR=<err_R> pwmL=<pwm_L> pwmR=<pwm_R> gz=<gyro_z>
 // ============================================================
 
