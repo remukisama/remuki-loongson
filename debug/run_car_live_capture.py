@@ -26,7 +26,7 @@ ROOT = pathlib.Path(
     "/home/zoumaguanbei/SmartCar_Project/"
     "Loongson_2k300_301_Library-master/Loongson_2K300_301_LIB"
 )
-BOARD = "root@192.168.141.100"
+BOARD = "root@192.168.145.100"
 SSH_BASE = [
     "ssh",
     "-o", "BatchMode=yes",
@@ -41,6 +41,11 @@ SSH_BASE = [
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("duration", nargs="?", type=int, default=15)
+    parser.add_argument(
+        "--board",
+        default=BOARD,
+        help="board SSH target (default: root@192.168.145.100)",
+    )
     parser.add_argument("--no-images", action="store_true")
     parser.add_argument("--wheel-guard", type=float, default=1.20)
     return parser.parse_args()
@@ -91,11 +96,14 @@ def remote_stop() -> None:
 
 
 def main() -> int:
+    global BOARD
     args = parse_args()
     if args.duration < 5 or args.duration > 120:
         raise SystemExit("duration must be in [5, 120] seconds")
     if args.wheel_guard < 0.1 or args.wheel_guard > 5.0:
         raise SystemExit("wheel guard must be in [0.1, 5.0] m/s")
+    BOARD = args.board if "@" in args.board else f"root@{args.board}"
+    SSH_BASE[-1] = BOARD
 
     ts = time.strftime("%Y%m%d_%H%M%S")
     debug = ROOT / "debug"
@@ -249,7 +257,16 @@ def main() -> int:
                     state["images"] += 1
                     if not ok:
                         state["image_bad"] += 1
-                    log.write(f"done idx={index} bytes={len(jpg)} ok={int(ok)}\n")
+                    image_now = time.monotonic()
+                    image_host_t = (
+                        image_now - state["first_packet"]
+                        if state["first_packet"]
+                        else -1.0
+                    )
+                    log.write(
+                        f"done idx={index} host_t={image_host_t:.6f} "
+                        f"bytes={len(jpg)} ok={int(ok)}\n"
+                    )
                     log.flush()
                     expected = None
                     buf.clear()
@@ -264,12 +281,18 @@ def main() -> int:
 
     remote_stop()
     time.sleep(0.3)
+    board_hard_limit = args.duration + 12
     remote_cmd = [
-        "timeout", "-s", "TERM", "-k", "3s", f"{args.duration}s",
+        "timeout", "-s", "TERM", "-k", "3s", f"{board_hard_limit}s",
         "env", "LQ_RACE_CAPTURE=0", "stdbuf", "-oL", "-eL",
         "./main", "--mode=car",
     ]
-    print(f"[LIVE] starting bounded car run: {args.duration}s", flush=True)
+    print(
+        f"[LIVE] starting car run: {args.duration}s active telemetry "
+        f"({board_hard_limit}s board hard limit) on {BOARD}",
+        flush=True,
+    )
+    started_at = time.monotonic()
     proc = subprocess.Popen(
         SSH_BASE + remote_cmd,
         stdout=subprocess.PIPE,
@@ -278,8 +301,8 @@ def main() -> int:
         bufsize=1,
     )
 
-    started_at = time.monotonic()
     last_stdout = started_at
+    active_duration_complete = False
     with stdout_log.open("w", encoding="utf-8") as out:
         assert proc.stdout is not None
         while proc.poll() is None:
@@ -307,6 +330,18 @@ def main() -> int:
             now = time.monotonic()
             first_packet = state["first_packet"]
             last_packet = state["last_packet"]
+            active_duration = (
+                last_packet - first_packet
+                if first_packet and last_packet >= first_packet
+                else 0.0
+            )
+            if not active_duration_complete and active_duration >= args.duration:
+                active_duration_complete = True
+                print(
+                    f"[LIVE] reached {args.duration}s active telemetry; stopping",
+                    flush=True,
+                )
+                remote_stop()
             if (
                 first_packet
                 and not fallback_active.is_set()
@@ -358,9 +393,19 @@ def main() -> int:
     gyro_err = [s.get("ge", 0.0) for s in snapshot if abs(s.get("tgt", 0.0)) >= 5.0]
     se_l = [s.get("seL", 0.0) for s in snapshot]
     se_r = [s.get("seR", 0.0) for s in snapshot]
+    first_packet_delay = (
+        state["first_packet"] - started_at if state["first_packet"] else math.nan
+    )
+    active_telemetry_duration = (
+        state["last_packet"] - state["first_packet"]
+        if state["first_packet"] and state["last_packet"] >= state["first_packet"]
+        else 0.0
+    )
 
     summary = {
         "ts": ts,
+        "run_mode": "car",
+        "board": BOARD,
         "duration_requested_s": args.duration,
         "duration_actual_s": f"{elapsed:.3f}",
         "ssh_exit": ssh_exit,
@@ -371,6 +416,11 @@ def main() -> int:
         "udp_image_bad": state["image_bad"],
         "fallback_events": state["fallback_events"],
         "fallback_recoveries": state["fallback_recoveries"],
+        "active_duration_complete": int(active_duration_complete),
+        "first_packet_delay_s": (
+            f"{first_packet_delay:.3f}" if math.isfinite(first_packet_delay) else "nan"
+        ),
+        "active_telemetry_duration_s": f"{active_telemetry_duration:.3f}",
         "raw_error": metric(raw),
         "avg_speed_error": metric(speed_err),
         "gyro_error_active": metric(gyro_err),
@@ -388,7 +438,9 @@ def main() -> int:
     print(f"META={meta_log}")
     for key, value in summary.items():
         print(f"{key}={value}")
-    return 0 if not post.stdout.strip() else 2
+    if post.stdout.strip():
+        return 2
+    return 0 if active_duration_complete and not guard_reason else 1
 
 
 if __name__ == "__main__":

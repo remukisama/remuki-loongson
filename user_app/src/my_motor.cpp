@@ -91,6 +91,7 @@ float dbg_cross_align_dps = 0.0f;
 int dbg_cross_align_active = 0;
 float dbg_near_center_error_px = 0.0f;
 float dbg_near_center_add_dps = 0.0f;
+float dbg_near_center_persistent_add_dps = 0.0f;
 float dbg_near_control_error_px = 0.0f;
 float dbg_near_far_scale = 1.0f;
 int dbg_near_far_ambiguous = 0;
@@ -522,9 +523,13 @@ void speed_dif_cascade(float inner_dt)
     static float near_far_conflicting_sign = 0.0f;
     static float near_far_last_valid_near_error = 0.0f;
     static long long near_far_last_valid_near_ms = 0;
+    static float near_far_entry_near_error = 0.0f;
     static int near_far_release_confirm_frames = 0;
     static long long near_far_recovery_blend_start_ms = 0;
     static int near_far_release_reason = 0;
+    static float near_center_persistent_add_dps = 0.0f;
+    static float near_center_persistent_sign = 0.0f;
+    static long long near_center_persistent_since_ms = 0;
 
     if (SystemData.Stop == 1) {
         Speed_Goal_l = 0.0f;
@@ -551,9 +556,13 @@ void speed_dif_cascade(float inner_dt)
         near_far_conflicting_sign = 0.0f;
         near_far_last_valid_near_error = 0.0f;
         near_far_last_valid_near_ms = 0;
+        near_far_entry_near_error = 0.0f;
         near_far_release_confirm_frames = 0;
         near_far_recovery_blend_start_ms = 0;
         near_far_release_reason = 0;
+        near_center_persistent_add_dps = 0.0f;
+        near_center_persistent_sign = 0.0f;
+        near_center_persistent_since_ms = 0;
         cascade_ctrl.reset_runtime_state();
 
         dbg_steer_error = 0.0f;
@@ -580,6 +589,7 @@ void speed_dif_cascade(float inner_dt)
         dbg_cross_align_active = 0;
         dbg_near_center_error_px = 0.0f;
         dbg_near_center_add_dps = 0.0f;
+        dbg_near_center_persistent_add_dps = 0.0f;
         dbg_near_control_error_px = 0.0f;
         dbg_near_far_scale = 1.0f;
         dbg_near_far_ambiguous = 0;
@@ -597,6 +607,10 @@ void speed_dif_cascade(float inner_dt)
     const bool new_frame_arrived = (current_seq != last_processed_seq);
 
     if (vision_frame_stale) {
+        near_center_persistent_add_dps = 0.0f;
+        near_center_persistent_sign = 0.0f;
+        near_center_persistent_since_ms = 0;
+        dbg_near_center_persistent_add_dps = 0.0f;
         if (new_frame_arrived) {
             last_processed_seq = current_seq;
         }
@@ -819,6 +833,8 @@ void speed_dif_cascade(float inner_dt)
 
         // Det 使用前瞻中心，适合建立弯道角速度；近端中心反映车身当前横向位置。
         // 两侧近端边界都可信时叠加一个小修正，消除“远端已回中、车身仍贴边”的出弯盲区。
+        const float previous_near_error = near_far_last_valid_near_error;
+        const long long previous_near_ms = near_far_last_valid_near_ms;
         float near_center_error = 0.0f;
         const bool near_center_valid =
             !current_vision_is_cross &&
@@ -855,9 +871,14 @@ void speed_dif_cascade(float inner_dt)
             local_vision.TowLeftFound && local_vision.TowRightFound &&
             local_vision.TowWidth >= car_config::kNearFarConflictReleaseTowWidthMinPx &&
             local_vision.TowWidth <= car_config::kNearFarConflictReleaseTowWidthMaxPx;
+        // 112404第二次出口的Tow/Near虽短暂只差5px，但Det仍在错误横支路（raw=-18px）。
+        // reason1只允许远端本身已经回中；大误差反向出口继续由reason3接管。
+        const bool release_far_centered =
+            std::fabs(raw_steer_error) < car_config::kNearFarConflictMinFarErrorPx;
         const bool release_corridor_aligned =
             near_center_valid && tow_corridor_valid &&
-            near_far_center_gap <= car_config::kNearFarConflictReleaseCenterGapPx;
+            near_far_center_gap <= car_config::kNearFarConflictReleaseCenterGapPx &&
+            release_far_centered;
         // 横支路错误方向在交叉核心后翻转，并重新形成正常宽度的纵向走廊，
         // 表示真实出口已经出现。连续确认后提前柔和接管，避免等硬超时才大幅回拉。
         const bool release_outlet_reversed =
@@ -893,29 +914,48 @@ void speed_dif_cascade(float inner_dt)
             }
         }
 
+        bool near_far_recovery_guard_active = false;
         bool near_far_recovery_blend_active = false;
         if (!near_far_ambiguous && near_far_recovery_blend_start_ms > 0) {
             const long long blend_age_ms =
                 current_frame_time_ms - near_far_recovery_blend_start_ms;
             if (blend_age_ms >= 0 &&
-                blend_age_ms < car_config::kNearFarConflictRecoveryBlendMs) {
-                near_far_recovery_blend_active = true;
+                blend_age_ms < car_config::kNearFarConflictRecoveryGuardMs) {
+                near_far_recovery_guard_active = true;
+                near_far_recovery_blend_active =
+                    blend_age_ms < car_config::kNearFarConflictRecoveryBlendMs;
             } else {
                 near_far_recovery_blend_start_ms = 0;
                 near_far_release_reason = 0;
             }
         }
+        // 105453实测：首次交权后260~415ms，横向白区令前瞻双边再次同时失效，
+        // 远端误差瞬间从正确的+6px跳到错误的-19px。保护窗内仅屏蔽这种无效走廊；
+        // 有效出口在200ms渐变结束后仍立即全量接管，不额外拖慢出弯。
+        const bool near_far_recovery_corridor_invalid =
+            near_far_recovery_guard_active && !tow_corridor_valid;
 
-        if (!near_far_ambiguous && !near_far_recovery_blend_active &&
+        if (!near_far_ambiguous && !near_far_recovery_guard_active &&
             near_far_conflict_trigger) {
             near_far_conflicting_sign = (steer_error > 0.0f) ? 1.0f : -1.0f;
             near_far_conflict_until_ms =
                 current_frame_time_ms + car_config::kNearFarConflictMaxHoldMs;
             near_far_release_confirm_frames = 0;
             near_far_release_reason = 0;
+            near_far_entry_near_error = near_center_error;
+            const long long previous_near_age_ms = current_frame_time_ms - previous_near_ms;
+            if (previous_near_ms > 0 && previous_near_age_ms >= 0 &&
+                previous_near_age_ms <= car_config::kNearFarConflictNearHoldMs &&
+                previous_near_error * near_center_error > 0.0f &&
+                std::fabs(previous_near_error) > std::fabs(near_far_entry_near_error)) {
+                near_far_entry_near_error = previous_near_error;
+            }
             near_far_ambiguous = true;
         }
 
+        const bool near_far_protection_active =
+            near_far_ambiguous || near_far_recovery_blend_active ||
+            near_far_recovery_corridor_invalid;
         float near_control_error = near_center_error;
         if (near_far_ambiguous && !near_center_valid && near_far_last_valid_near_ms > 0) {
             const long long near_age_ms = current_frame_time_ms - near_far_last_valid_near_ms;
@@ -932,9 +972,22 @@ void speed_dif_cascade(float inner_dt)
                 near_control_error = 0.0f;
             }
         }
+        if (near_far_protection_active &&
+            std::fabs(near_far_entry_near_error) > car_config::kNearCenterSteerDeadBandPx) {
+            const float entry_hold_error = near_far_entry_near_error *
+                car_config::kNearFarConflictEntryHoldRatio;
+            const bool current_near_missing =
+                std::fabs(near_control_error) <= car_config::kNearCenterSteerDeadBandPx;
+            const bool current_near_same_but_weaker =
+                near_control_error * entry_hold_error > 0.0f &&
+                std::fabs(near_control_error) < std::fabs(entry_hold_error);
+            if (current_near_missing || current_near_same_but_weaker) {
+                near_control_error = entry_hold_error;
+            }
+        }
 
         float far_confidence = 1.0f;
-        if (near_far_ambiguous) {
+        if (near_far_ambiguous || near_far_recovery_corridor_invalid) {
             far_confidence = car_config::kNearFarConflictFarScale;
         } else if (near_far_recovery_blend_active) {
             const long long blend_age_ms =
@@ -950,13 +1003,104 @@ void speed_dif_cascade(float inner_dt)
             guarded_turn_sign = 0.0f;
             guarded_turn_release_ratio = 0.0f;
         }
-        const float near_center_add =
-            near_control_error * car_config::kNearCenterSteerGainDpsPerPx;
+        const bool near_center_far_not_opposing =
+            std::fabs(steer_error) <= car_config::kSteerDeadBand ||
+            near_control_error * steer_error >= 0.0f;
+        const bool near_center_large_correction =
+            near_far_protection_active ||
+            (std::fabs(near_control_error) >=
+                 car_config::kNearCenterSteerLargeErrorThresholdPx &&
+             near_center_far_not_opposing);
+        const float near_center_gain = near_center_large_correction ?
+            car_config::kNearCenterSteerLargeErrorGainDpsPerPx :
+            car_config::kNearCenterSteerGainDpsPerPx;
+        const float near_center_add = near_control_error * near_center_gain;
         const float far_pid =
             car_config::kSteerKp * steer_error +
             car_config::kSteerKi * steer_integral +
             steer_kd * diff_steer;
-        float visual_pid_out = far_confidence * far_pid + near_center_add;
+        const float visual_without_persistent =
+            far_confidence * far_pid + near_center_add;
+
+        // 纯中线持续偏差补偿：只有近端双边可信、近远方向一致且车身已与弯道近似平行时，
+        // 才对普通单侧丢边弯道缓慢增加少量曲率。它不识别道路元素，也不带入NF/十字。
+        const float persistent_candidate_sign =
+            (near_control_error > 0.0f) ? 1.0f : -1.0f;
+        const int persistent_curve_side_loss =
+            (steer_error > 0.0f) ? local_vision.Left_Line : local_vision.Right_Line;
+        const int persistent_other_side_loss =
+            (steer_error > 0.0f) ? local_vision.Right_Line : local_vision.Left_Line;
+        const float near_heading_error_px =
+            (float)(local_vision.NearCenter - local_vision.TowCenter);
+        const bool persistent_geometry_valid =
+            !near_far_protection_active && !near_far_recovery_guard_active &&
+            near_center_valid &&
+            near_center_far_not_opposing &&
+            std::fabs(steer_error) >= car_config::kNearFarConflictMinFarErrorPx &&
+            std::fabs(steer_error) <= car_config::kNearCenterPersistentFarErrorMaxPx &&
+            std::fabs(near_heading_error_px) <=
+                car_config::kNearCenterPersistentHeadingMaxPx &&
+            persistent_curve_side_loss > car_config::kNearCenterPersistentSideLossMin &&
+            persistent_other_side_loss <= car_config::kNearCenterPersistentOtherLossMax;
+        const bool persistent_enter_error =
+            std::fabs(near_control_error) >= car_config::kNearCenterPersistentEnterErrorPx;
+        const bool persistent_hold_error =
+            near_center_persistent_sign * persistent_candidate_sign > 0.0f &&
+            std::fabs(near_control_error) > car_config::kNearCenterPersistentExitErrorPx;
+        const bool persistent_candidate =
+            persistent_geometry_valid && (persistent_enter_error || persistent_hold_error);
+        const bool persistent_direction_conflict =
+            near_center_persistent_sign != 0.0f &&
+            near_control_error * near_center_persistent_sign <= 0.0f;
+        const bool persistent_base_near_saturation =
+            std::fabs(visual_without_persistent) >=
+            car_config::kSteerOutputLimitDps - car_config::kNearCenterPersistentLimitDps;
+        const bool persistent_hard_reset =
+            near_far_protection_active || near_far_recovery_guard_active ||
+            !near_center_valid ||
+            !near_center_far_not_opposing || persistent_direction_conflict ||
+            persistent_base_near_saturation;
+        const float persistent_dt =
+            (visual_dt < 0.020f) ? visual_dt : 0.020f;
+
+        if (persistent_hard_reset) {
+            near_center_persistent_add_dps = 0.0f;
+            near_center_persistent_sign = 0.0f;
+            near_center_persistent_since_ms = 0;
+        } else if (persistent_candidate) {
+            if (near_center_persistent_sign * persistent_candidate_sign <= 0.0f) {
+                near_center_persistent_add_dps = 0.0f;
+                near_center_persistent_sign = persistent_candidate_sign;
+                near_center_persistent_since_ms = current_frame_time_ms;
+            } else if (near_center_persistent_since_ms <= 0) {
+                near_center_persistent_since_ms = current_frame_time_ms;
+            }
+            const long long persistent_age_ms =
+                current_frame_time_ms - near_center_persistent_since_ms;
+            if (persistent_age_ms >= car_config::kNearCenterPersistentConfirmMs) {
+                near_center_persistent_add_dps = clamp_float(
+                    near_center_persistent_add_dps +
+                        near_center_persistent_sign *
+                        car_config::kNearCenterPersistentRiseDpsPerSec * persistent_dt,
+                    -car_config::kNearCenterPersistentLimitDps,
+                    car_config::kNearCenterPersistentLimitDps);
+            }
+        } else {
+            near_center_persistent_since_ms = 0;
+            const float persistent_decay =
+                car_config::kNearCenterPersistentDecayDpsPerSec * persistent_dt;
+            if (near_center_persistent_add_dps > persistent_decay) {
+                near_center_persistent_add_dps -= persistent_decay;
+            } else if (near_center_persistent_add_dps < -persistent_decay) {
+                near_center_persistent_add_dps += persistent_decay;
+            } else {
+                near_center_persistent_add_dps = 0.0f;
+                near_center_persistent_sign = 0.0f;
+            }
+        }
+
+        float visual_pid_out =
+            visual_without_persistent + near_center_persistent_add_dps;
         if (cross_entry_align_active) {
             visual_pid_out += cross_entry_align_dps;
         }
@@ -1016,6 +1160,10 @@ void speed_dif_cascade(float inner_dt)
             speed_to_plan > car_config::kCrossExitSpeedGoal) {
             speed_to_plan = car_config::kCrossExitSpeedGoal;
         }
+        if (near_far_protection_active &&
+            speed_to_plan > car_config::kCrossExitSpeedGoal) {
+            speed_to_plan = car_config::kCrossExitSpeedGoal;
+        }
 
         planned_speed_goal = speed_to_plan;
 
@@ -1033,6 +1181,7 @@ void speed_dif_cascade(float inner_dt)
         dbg_cross_align_active = cross_entry_align_active ? 1 : 0;
         dbg_near_center_error_px = near_center_error;
         dbg_near_center_add_dps = near_center_add;
+        dbg_near_center_persistent_add_dps = near_center_persistent_add_dps;
         dbg_near_control_error_px = near_control_error;
         dbg_near_far_scale = far_confidence;
         dbg_near_far_ambiguous = near_far_ambiguous ? 1 : 0;
@@ -1182,12 +1331,13 @@ void speed_dif_cascade(float inner_dt)
             }
             char udp_buf[768];
             int udp_len = std::snprintf(udp_buf, sizeof(udp_buf),
-                "steer,det=%d,mid=%d,raw=%.1f,err=%.1f,dE=%.1f,tgt=%.1f,hErr=%.1f,xAdd=%.1f,xOn=%d,nErr=%.1f,nUse=%.1f,nAdd=%.1f,fSc=%.2f,nfAmb=%d,nfRel=%d,gz=%.1f,fgz=%.1f,ge=%.1f,dRaw=%.3f,dCmd=%.3f,dLim=%.3f,goal=%.2f,L=%.2f,R=%.2f,encL=%.2f,encR=%.2f,seL=%.3f,seR=%.3f,pwmL=%.0f,pwmR=%.0f,dt=%.3f,imu=%d,db=%d,off=%d,ll=%d,rl=%d,wl=%d,tp=%d,tpC=%d,tpL=%d,tpR=%d,tpLF=%d,tpRF=%d,nC=%d,nL=%d,nR=%d,nLF=%d,nRF=%d,rt=%d,sa=%d\n",
+                "steer,det=%d,mid=%d,raw=%.1f,err=%.1f,dE=%.1f,tgt=%.1f,hErr=%.1f,xAdd=%.1f,xOn=%d,nErr=%.1f,nUse=%.1f,nAdd=%.1f,nBias=%.1f,fSc=%.2f,nfAmb=%d,nfRel=%d,gz=%.1f,fgz=%.1f,ge=%.1f,dRaw=%.3f,dCmd=%.3f,dLim=%.3f,goal=%.2f,L=%.2f,R=%.2f,encL=%.2f,encR=%.2f,seL=%.3f,seR=%.3f,pwmL=%.0f,pwmR=%.0f,dt=%.3f,imu=%d,db=%d,off=%d,ll=%d,rl=%d,wl=%d,tp=%d,tpC=%d,tpL=%d,tpR=%d,tpLF=%d,tpRF=%d,nC=%d,nL=%d,nR=%d,nLF=%d,nRF=%d,rt=%d,sa=%d\n",
                 ImageStatus.Det_True, ImageStatus.MiddleLine, raw_steer_error, dbg_steer_error,
                 dbg_diff_steer, dbg_target_gyro_z, dbg_cross_heading_error_px,
                 dbg_cross_align_dps, dbg_cross_align_active,
                 dbg_near_center_error_px, dbg_near_control_error_px,
-                dbg_near_center_add_dps, dbg_near_far_scale,
+                dbg_near_center_add_dps, dbg_near_center_persistent_add_dps,
+                dbg_near_far_scale,
                 dbg_near_far_ambiguous, dbg_near_far_release_reason,
                 dbg_real_gyro_z, dbg_filtered_gyro_z, dbg_gyro_error,
                 dbg_diff_speed, dbg_diff_cmd, dbg_diff_limit, Speed_Goal, Speed_Goal_l,

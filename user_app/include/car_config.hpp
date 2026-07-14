@@ -50,7 +50,19 @@ constexpr float kSteerIntegralLimit = 80.0f;
 constexpr float kSteerOutputLimitDps = 60.0f;
 constexpr int kSteerDeadBand = 2;
 // 远端 Det 已回中但车身仍横向偏离时，用可信近端中心补足出弯姿态回正；不参与十字/丢线帧。
-constexpr float kNearCenterSteerGainDpsPerPx = 0.90f;
+constexpr float kNearCenterSteerGainDpsPerPx = 1.10f; // 115031普通弯仍有约7.9px偏差；提高可信近端位置的基础回中权重。
+constexpr float kNearCenterSteerLargeErrorThresholdPx = 7.0f; // 110245弯中外切稳定在8~10px；只对已确认的大横向偏差增强回中。
+constexpr float kNearCenterSteerLargeErrorGainDpsPerPx = 1.80f; // 十字前偏差会在约0.5s内快速增大，需立即补足而不能等待持续项建立。
+constexpr float kNearCenterPersistentEnterErrorPx = 6.0f; // 113036稳态外切约8.6px；持续达到6px才开始确认，拒绝普通小误差。
+constexpr float kNearCenterPersistentExitErrorPx = 4.0f; // 补偿建立后保留到4px，避免在6px阈值附近反复启停。
+constexpr float kNearCenterPersistentHeadingMaxPx = 3.0f; // 近远中心近似平行才判为横向稳态偏置，不在入弯姿态变化期抢控制。
+constexpr float kNearCenterPersistentFarErrorMaxPx = 12.0f; // 急弯/输出接近饱和时不继续积累额外角速度。
+constexpr int kNearCenterPersistentSideLossMin = 12; // 仅在弯内侧远端边界持续丢失、弯向明确时建立曲率补偿。
+constexpr int kNearCenterPersistentOtherLossMax = 5;
+constexpr int kNearCenterPersistentConfirmMs = 250;
+constexpr float kNearCenterPersistentRiseDpsPerSec = 8.0f; // 115031在6dps顶限维持约4s仍偏6.4px，允许更快建立所需曲率。
+constexpr float kNearCenterPersistentDecayDpsPerSec = 32.0f; // 10dps上限仍约0.31s衰减完；方向冲突/NF则立即清零。
+constexpr float kNearCenterPersistentLimitDps = 10.0f;
 constexpr float kNearCenterSteerErrorLimitPx = 12.0f;
 constexpr float kNearCenterSteerDeadBandPx = 2.0f;
 constexpr int kNearCenterSteerMaxOffline = 20;
@@ -67,7 +79,9 @@ constexpr int kNearFarConflictOutletGapMaxPx = 18; // 错误方向翻转且出�
 constexpr int kNearFarConflictReleaseTowWidthMinPx = 10;
 constexpr int kNearFarConflictReleaseTowWidthMaxPx = 42; // TowPoint=18期望宽约26px；拒绝横向支路的超宽假走廊。
 constexpr int kNearFarConflictReleaseFrames = 3; // 连续多帧确认，不能因一帧边界计数恢复就交还远端。
-constexpr int kNearFarConflictRecoveryBlendMs = 250; // 远端权重由0渐增到1，消除恢复瞬间的大角速度跳变。
+constexpr float kNearFarConflictEntryHoldRatio = 0.80f; // 入口右偏10~11px时保留8~8.8px，确保十字核心回中量越过6dps差速死区。
+constexpr int kNearFarConflictRecoveryBlendMs = 200; // 缩短出口交权，兼顾平滑与及时回中；实测250ms会让车身继续贴右侧行驶。
+constexpr int kNearFarConflictRecoveryGuardMs = 600; // 交权后短时核验前瞻走廊；只在走廊再次失效时恢复近端保护。
 
 // [2/3] 角度/角速度 PID: 目标角速度 -> 左右轮差速
 constexpr float kAnglePidP = 11.0f;
@@ -269,7 +283,7 @@ constexpr bool kCurveCenterCompEnable = true;     // 开启轻量级可信度补
 constexpr int kCurveCenterLossStart = 4;          // 单侧丢线达到该值后提高单边重构权重；过小会误伤普通小弯，过大则大弯介入偏晚。
 constexpr int kCurveCenterOppositeLossMax = 12;   // 对侧也严重丢线时少信单侧边界，改走本帧行间预测，避免双边弱观测乱补。
 constexpr int kCurveCenterWidthTolerance = 16;    // 宽度偏离期望赛道宽度超过该值时，即使标记为T也按不可靠边界处理。
-constexpr int kCurveCenterSingleSideBias = 0;     // 当前过弯偏内切，先取消单边补线向弯内的额外偏置。
+constexpr int kCurveCenterSingleSideBias = 0;     // 保持几何中线无偏；物理外切由可信近端位置外环纠正，避免恢复历史上的提前内切。
 constexpr int kCurveCenterMaxRowStep = 5;         // TFT显示/控制中线相邻行最大跳变，抑制大弯远端中线突然冲出边界。
 constexpr int kCurveCenterFrameMaxStep = 4;       // 同一行跨帧最大接纳步长，吸收抖动但允许真实弯道连续移动。
 constexpr int kCurveCenterBadFrameMaxStep = 1;    // 双边都弱或宽度明显异常时跨帧更保守，避免坏图像把控制目标带飞。
