@@ -352,8 +352,9 @@ int main(int argc, char **argv)
         return 5;
     }
 
-    g_enable_element_process = false;
-    std::printf("[RACE_MODE] no-element race mode: element process disabled, main loop enabled.\n");
+    g_enable_element_process = !car_config::kNoElementCompetitionMode;
+    std::printf("[RACE_MODE] element process %s, main loop enabled.\n",
+                g_enable_element_process ? "enabled" : "disabled");
 
     lq_udp_client udp_debug;
     if (car_config::kRaceUdpDebugEnable) {
@@ -395,7 +396,7 @@ int main(int argc, char **argv)
         }
 
         imageprocess();
-        if (!car_config::kNoElementCompetitionMode) {
+        if (car_config::kRaceFrameCaptureEnable) {
             lq_vision_capture_maybe_save_race_frame(udp_frame_count);
         }
         control_mark_vision_frame_ready();
@@ -410,13 +411,19 @@ int main(int argc, char **argv)
             const bool strong_turn = std::abs(raw_error) >= 12;
             const bool side_loss = ImageStatus.Left_Line >= 18 || ImageStatus.Right_Line >= 18;
             const bool full_loss = ImageStatus.OFFLine >= 45;
-            const bool abnormal = strong_turn || side_loss || full_loss;
+            const bool ring_candidate =
+                dbg_el_l_confirm > 0 || dbg_el_r_confirm > 0 ||
+                dbg_el_l_geom != 0 || dbg_el_l_loss != 0 ||
+                dbg_el_r_geom != 0 || dbg_el_r_loss != 0;
+            const bool ring_active = ImageFlag.image_element_rings != 0;
+            const bool abnormal = strong_turn || side_loss || full_loss ||
+                                  ring_candidate || ring_active;
             const bool entering_full_loss = full_loss && !udp_debug_last_full_loss;
             const bool sparse_enough =
                 (udp_frame_count - udp_debug_last_frame) >=
                 car_config::kRaceUdpDebugIntervalFrames;
-            if (abnormal && (entering_full_loss || sparse_enough)) {
-                std::printf("[UDP_DEBUG] trigger frame:%d det:%d mid:%d err:%d off:%d ll:%d rl:%d full:%d sent:%d\n",
+            if (abnormal && (ring_candidate || entering_full_loss || sparse_enough)) {
+                std::printf("[UDP_DEBUG] trigger frame:%d det:%d mid:%d err:%d off:%d ll:%d rl:%d full:%d ring:%d stage:%d sent:%d\n",
                             udp_frame_count,
                             ImageStatus.Det_True,
                             ImageStatus.MiddleLine,
@@ -425,6 +432,8 @@ int main(int argc, char **argv)
                             ImageStatus.Left_Line,
                             ImageStatus.Right_Line,
                             full_loss ? 1 : 0,
+                            ImageFlag.image_element_rings,
+                            ImageFlag.image_element_rings_flag,
                             udp_debug_sent);
                 lq_udp_center_line_send_one_frame(udp_debug, 55);
                 udp_debug_last_frame = udp_frame_count;

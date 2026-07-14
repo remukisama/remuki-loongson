@@ -2,6 +2,7 @@
 #define __IMAGE_H__
 
 #include <stdint.h>
+#include <atomic>
 
 #define CAMERA_H 60
 #define CAMERA_W 80
@@ -44,6 +45,31 @@ typedef enum
   Cross_ture,
   Barn_in,      //入库
 } RoadType_e;
+
+typedef enum
+{
+  ElementScene_Normal = 0,
+  ElementScene_LeftRing,
+  ElementScene_RightRing,
+  ElementScene_Zebra,
+  ElementScene_Garage,
+} ElementScene_e;
+
+extern ElementScene_e g_element_scene;       // 当前元素场景锁，避免多个元素同时抢状态
+extern uint8 g_element_cooldown_frames;      // 元素退出后的识别冷却帧数
+extern int g_ring_redetect_lock_frames;      // 完成后同一环岛的防重复识别窗口
+extern int g_ring_cross_exit_lock_frames;    // 十字核心后的环岛误识别抑制窗口
+extern int g_ring_cross_exit_clear_frames;   // 最短锁定结束后的稳定车道确认进度
+extern int g_ring_active_frames;             // 当前环岛已持续的图像帧数
+extern int g_ring_stage_frames;              // 当前环岛阶段已持续的图像帧数
+extern int g_ring_stage_age_ms;              // 当前环岛阶段已持续的单调时钟毫秒数
+extern int g_ring_inner_lower_missing;        // 环心侧近端缺边行数，用于核对入口开口经过时机
+extern std::atomic<int> g_ring_turn_yaw_mdeg; // 从进环阶段5开始累计的同向转角，毫度
+extern int dbg_el_detect_open;
+extern int dbg_el_l_block, dbg_el_l_geom, dbg_el_l_loss, dbg_el_l_susp;
+extern int dbg_el_l_confirm, dbg_el_l_p1, dbg_el_l_p2, dbg_el_l_help;
+extern int dbg_el_r_block, dbg_el_r_geom, dbg_el_r_loss, dbg_el_r_susp;
+extern int dbg_el_r_confirm, dbg_el_r_p1, dbg_el_r_p2, dbg_el_r_help;
 
 extern uint8 TP, TP_O1,TP_O2;
 extern uint8 Circle[5];

@@ -128,6 +128,9 @@ def main() -> int:
         "last_packet": 0.0,
         "full_loss_run": 0,
         "cross_full_loss_started": 0.0,
+        "ring_full_loss_started": 0.0,
+        "ring_full_loss_stage": 0,
+        "ring_full_loss_last_progress": 0.0,
         "slow_dt_run": 0,
         "fallback_events": 0,
         "fallback_recoveries": 0,
@@ -174,15 +177,42 @@ def main() -> int:
 
                     off = sample.get("off", 0.0)
                     road_type = int(sample.get("rt", 0.0))
+                    ring_side = int(sample.get("ring", 0.0))
+                    ring_stage = int(sample.get("rs", 0.0))
+                    target_gyro = sample.get("tgt", 0.0)
+                    real_gyro = sample.get("gz", 0.0)
                     dt = sample.get("dt", 0.0)
                     enc_l = sample.get("encL", 0.0)
                     enc_r = sample.get("encR", 0.0)
-                    if off >= 45 and road_type in (3, 7):
+                    if off >= 45 and ring_side and ring_stage:
                         state["full_loss_run"] = 0
+                        state["cross_full_loss_started"] = 0.0
+                        if (
+                            not state["ring_full_loss_started"]
+                            or state["ring_full_loss_stage"] != ring_stage
+                        ):
+                            state["ring_full_loss_started"] = now
+                            state["ring_full_loss_stage"] = ring_stage
+                            state["ring_full_loss_last_progress"] = now
+                        ring_turn_tracking = (
+                            abs(target_gyro) >= 20.0
+                            and target_gyro * real_gyro > 0.0
+                            and abs(real_gyro) >= max(8.0, 0.25 * abs(target_gyro))
+                        )
+                        if ring_turn_tracking:
+                            state["ring_full_loss_last_progress"] = now
+                    elif off >= 45 and road_type in (3, 7):
+                        state["full_loss_run"] = 0
+                        state["ring_full_loss_started"] = 0.0
+                        state["ring_full_loss_stage"] = 0
+                        state["ring_full_loss_last_progress"] = 0.0
                         if not state["cross_full_loss_started"]:
                             state["cross_full_loss_started"] = now
                     else:
                         state["cross_full_loss_started"] = 0.0
+                        state["ring_full_loss_started"] = 0.0
+                        state["ring_full_loss_stage"] = 0
+                        state["ring_full_loss_last_progress"] = 0.0
                         state["full_loss_run"] = state["full_loss_run"] + 1 if off >= 45 else 0
                     state["slow_dt_run"] = state["slow_dt_run"] + 1 if dt >= 0.08 else 0
 
@@ -195,7 +225,8 @@ def main() -> int:
                             f"gz={sample.get('gz', math.nan):+.1f} "
                             f"goal={sample.get('goal', math.nan):.2f} "
                             f"enc={enc_l:.2f}/{enc_r:.2f} "
-                            f"off/ll/rl={off:.0f}/{sample.get('ll', 0):.0f}/{sample.get('rl', 0):.0f}",
+                            f"off/ll/rl={off:.0f}/{sample.get('ll', 0):.0f}/{sample.get('rl', 0):.0f} "
+                            f"ring={ring_side}/{ring_stage}",
                             flush=True,
                         )
 
@@ -210,6 +241,20 @@ def main() -> int:
                         request_guard_stop(
                             f"cross full line loss persisted for 1.2s off={off:.0f}"
                         )
+                    elif state["ring_full_loss_started"]:
+                        ring_loss_age = now - state["ring_full_loss_started"]
+                        ring_progress_age = now - state["ring_full_loss_last_progress"]
+                        if ring_loss_age >= 3.0:
+                            request_guard_stop(
+                                "ring full line loss stayed in one stage for "
+                                f"3.0s stage={ring_stage} off={off:.0f}"
+                            )
+                        elif ring_loss_age >= 1.2 and ring_progress_age >= 0.6:
+                            request_guard_stop(
+                                "ring turn stopped tracking for 0.6s "
+                                f"stage={ring_stage} off={off:.0f} "
+                                f"tgt/gz={target_gyro:.1f}/{real_gyro:.1f}"
+                            )
                     elif state["slow_dt_run"] >= 3:
                         request_guard_stop(f"control dt stalled at {dt:.3f}s")
                 out.flush()

@@ -41,28 +41,95 @@ def sample(host_t: float, target: float) -> dict[str, float]:
 
 
 class TrackValidationTests(unittest.TestCase):
-    def test_no_element_competition_profile_keeps_t02_speed_and_disables_debug_io(self) -> None:
+    def test_element_competition_profile_keeps_elements_and_disables_debug_io(self) -> None:
         config = (ROOT / "user_app" / "include" / "car_config.hpp").read_text(encoding="utf-8")
         main = (ROOT / "main" / "main.cpp").read_text(encoding="utf-8")
+        cmake = (ROOT / "main" / "CMakeLists.txt").read_text(encoding="utf-8")
         motor = (ROOT / "user_app" / "src" / "my_motor.cpp").read_text(
             encoding="utf-8", errors="surrogateescape"
         )
+        image = (ROOT / "user_app" / "src" / "image.cpp").read_text(
+            encoding="utf-8", errors="surrogateescape"
+        )
+        roundabout = (ROOT / "user_app" / "src" / "roundabout_controller.cpp").read_text(
+            encoding="utf-8", errors="surrogateescape"
+        )
 
-        self.assertIn("constexpr bool kNoElementCompetitionMode = true;", config)
+        self.assertIn("constexpr bool kNoElementCompetitionMode = false;", config)
+        self.assertIn("constexpr bool kCompetitionQuietMode = true;", config)
         self.assertIn(
-            "constexpr bool kSteerDebugPrintEnable = !kNoElementCompetitionMode;",
+            "constexpr bool kSteerDebugPrintEnable = !kCompetitionQuietMode;",
             config,
         )
         self.assertIn(
-            "constexpr bool kRaceUdpDebugEnable = !kNoElementCompetitionMode;",
+            "constexpr bool kElementDebugLogEnable = !kCompetitionQuietMode;",
             config,
         )
+        self.assertIn(
+            "constexpr bool kRaceFrameCaptureEnable = !kCompetitionQuietMode;",
+            config,
+        )
+        self.assertIn(
+            "constexpr bool kRaceUdpDebugEnable = !kCompetitionQuietMode;",
+            config,
+        )
+        self.assertIn("constexpr int kRaceUdpDebugMaxFrames = 1200;", config)
+        self.assertIn("constexpr int kRingRedetectLockFrames = 600;", config)
+        self.assertIn("constexpr int kRingAbortRedetectLockFrames = 180;", config)
+        self.assertIn("constexpr int kRingCrossExitLockFrames = 520;", config)
+        self.assertIn("constexpr int kRingCrossExitClearFrames = 90;", config)
+        self.assertIn("constexpr int kRingAlignInnerLossMax = 10;", config)
+        self.assertIn("constexpr float kRingTurnInMinGyroDps = 36.0f;", config)
+        self.assertIn("constexpr float kRingInnerAdaptiveEarlyMinGyroDps = 24.0f;", config)
+        self.assertIn("constexpr float kRingInnerAdaptiveLateMinGyroDps = 12.0f;", config)
+        self.assertIn("constexpr float kRingInnerAdaptiveMaxGyroDps = 40.0f;", config)
+        self.assertIn("constexpr float kRingInnerOutwardGainDpsPerPx = 2.5f;", config)
+        self.assertIn("constexpr float kRingInnerInwardGainDpsPerPx = 0.5f;", config)
+        self.assertIn("constexpr float kRingExitOppositeGyroLimitDps = 6.0f;", config)
+        self.assertIn("constexpr float kRingExitGyroLimitDps = 26.0f;", config)
+        self.assertIn("constexpr float kRingExitAlignGyroLimitDps = 26.0f;", config)
+        self.assertIn("constexpr float kRingExitAlignOppositeGyroLimitDps = 12.0f;", config)
+        self.assertIn("constexpr int kRingOrbitExitGeometryMinMs = 6000;", config)
+        self.assertIn("constexpr int kRingSeekEntranceAbortMs = 1300;", config)
+        self.assertIn('reason = "entrance-evidence-timeout";', roundabout)
+        self.assertNotIn("entrance-seek-timeout", roundabout)
+        self.assertIn("[RING_ABORT] side=%d reason=%s", image)
+        self.assertIn("if (car_config::kElementDebugLogEnable)", image)
+        self.assertIn("car_config::kRingAbortRedetectLockFrames", image)
+        self.assertIn("car_config::kLeftRingLossOnlyMaxSignedEntryError", image)
+        self.assertIn("car_config::kRightRingLossOnlyMinSignedEntryError", image)
+        self.assertIn("&& g_ring_redetect_lock_frames == 0", image)
+        self.assertIn("&& g_ring_cross_exit_lock_frames == 0", image)
+        self.assertIn("ImageStatus.WhiteLine >= car_config::kCrossHoldCoreWhiteLineMin", image)
+        self.assertIn("[RING_DETECT_LOCK] reason=cross-core", image)
+        self.assertIn("[RING_DETECT_UNLOCK] reason=cross-exit-stable", image)
+        self.assertIn("g_ring_cross_exit_lock_frames == 1", image)
+        self.assertIn("ImageStatus.Left_Line <= 6", image)
+        self.assertIn("ImageStatus.Left_Line > car_config::kRingAlignInnerLossMax", image)
+        self.assertIn("const bool ring_exit_center_reconstructed =", image)
+        self.assertIn("!ring_exit_center_reconstructed &&", image)
+        self.assertIn("Element_ForceCenterFromLeftBoundary();", image)
+        self.assertIn("Element_ForceCenterFromRightBoundary();", image)
+        self.assertIn("const float adaptive_gain = (ring_center_error < 0.0f) ?", motor)
+        self.assertIn("car_config::kRingInnerAdaptiveMaxGyroDps", motor)
+        self.assertIn(
+            "ring_gyro_limit = car_config::kRingInnerAdaptiveMaxGyroDps;",
+            motor,
+        )
+        self.assertIn("ring_direction * visual_pid_out < -opposite_limit", motor)
+        self.assertIn("dbg_speed_err_r,       // seR:", motor)
+        self.assertIn("const float ring_speed_goal = (ring_control_stage >= 8) ?", motor)
         self.assertIn("constexpr bool kNcnnObserveEnable = false;", config)
         self.assertIn("constexpr float kBaseSpeedGoal = 0.74f;", config)
         self.assertIn("constexpr float kCurveSpeedGoal = 0.50f;", config)
-        self.assertIn("g_enable_element_process = false;", main)
         self.assertIn(
-            "if (!car_config::kNoElementCompetitionMode) {\n"
+            "g_enable_element_process = !car_config::kNoElementCompetitionMode;",
+            main,
+        )
+        self.assertNotIn("roundabout_controller", main)
+        self.assertIn("user_app/src/roundabout_controller.cpp", cmake)
+        self.assertIn(
+            "if (car_config::kRaceFrameCaptureEnable) {\n"
             "            lq_vision_capture_maybe_save_race_frame(udp_frame_count);\n"
             "        }",
             main,
@@ -201,6 +268,8 @@ class TrackValidationTests(unittest.TestCase):
         self.assertIn("persistent_base_near_saturation", motor)
         self.assertIn("visual_without_persistent + near_center_persistent_add_dps", motor)
         self.assertIn("nBias=%.1f", motor)
+        self.assertIn("xlock=%d", motor)
+        self.assertIn("xclear=%d", motor)
         self.assertIn("far_confidence * far_pid + near_center_add", motor)
 
         def gain(near_error: float, far_error: float, protected: bool = False) -> float:

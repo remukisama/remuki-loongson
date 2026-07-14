@@ -1,7 +1,9 @@
 #include "image.hpp"
 #include "user_app.hpp"
 #include "car_config.hpp"
+#include "roundabout_controller.hpp"
 #include <atomic>
+#include <chrono>
 #include <iostream>
 #include <cstdlib>
 
@@ -18,6 +20,11 @@ int imgdisplay[60][80];//打印到中端图像数组
 
 uint8 Garage_Location_Flag=0;//斑马线累积初始次数
 bool g_enable_element_process = true; // 默认启用元素判断与元素处理
+ElementScene_e g_element_scene = ElementScene_Normal;
+uint8 g_element_cooldown_frames = 0;
+int g_ring_redetect_lock_frames = 0;
+int g_ring_cross_exit_lock_frames = 0;
+int g_ring_cross_exit_clear_frames = 0;
 uint8 Garage_num=2;//斑马线设定次数
 int Zebra_num1=10000;//斑马线编码器计数设定值
 int Zebra_num2=1000;//停车斑马线编码器计数设定值
@@ -52,6 +59,20 @@ int Right_RingsFlag_Point1_Ysite, Right_RingsFlag_Point2_Ysite; //右圆环判�
 uint8 Ring_Help_Flag = 0;                      //进环辅助标志
 static uint8 left_ring_confirm_frames = 0;     // 左圆环连续确认帧数
 static uint8 right_ring_confirm_frames = 0;    // 右圆环连续确认帧数
+static uint8 ring_exit_straight_hold_frames = 0;
+int g_ring_active_frames = 0;
+int g_ring_stage_frames = 0;
+int g_ring_stage_age_ms = 0;
+int g_ring_inner_lower_missing = 0;
+std::atomic<int> g_ring_turn_yaw_mdeg(0);
+static roundabout::Controller ring_controller;
+int dbg_el_detect_open = 0;
+int dbg_el_l_block = 0, dbg_el_l_geom = 0, dbg_el_l_loss = 0, dbg_el_l_susp = 0;
+int dbg_el_l_confirm = 0, dbg_el_l_p1 = 0, dbg_el_l_p2 = 0, dbg_el_l_help = 0;
+int dbg_el_r_block = 0, dbg_el_r_geom = 0, dbg_el_r_loss = 0, dbg_el_r_susp = 0;
+int dbg_el_r_confirm = 0, dbg_el_r_p1 = 0, dbg_el_r_p2 = 0, dbg_el_r_help = 0;
+static int ring_trace_last_side = -1;
+static int ring_trace_last_stage = -1;
 ImageFlagtypedef ImageFlag;
 int Point_Xsite,Point_Ysite;                   //拐点横纵坐标
 int Repair_Point_Xsite,Repair_Point_Ysite;     //补线点横纵坐标
@@ -63,6 +84,292 @@ uint8 Half_Road_Wide[60] =                      //直到赛道半宽
        23,23,23,24,24,25,25,25,26,26,
        27,28,28,28,29,30,31,31,31,32,
 };
+
+static void Element_SyncStatusFromFlag(void)
+{
+  ImageStatus.image_element_rings = ImageFlag.image_element_rings;
+  ImageStatus.image_element_rings_flag = ImageFlag.image_element_rings_flag;
+  ImageStatus.ring_big_small = ImageFlag.ring_big_small;
+}
+
+static long long Element_NowMs(void)
+{
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static void Element_ResetRingStageProgress(void)
+{
+  ring_controller.reset();
+  g_ring_stage_frames = 0;
+  g_ring_stage_age_ms = 0;
+  g_ring_inner_lower_missing = 0;
+  g_ring_turn_yaw_mdeg.store(0, std::memory_order_relaxed);
+}
+
+static void Element_ResetRingCounters(void)
+{
+  left_ring_confirm_frames = 0;
+  right_ring_confirm_frames = 0;
+  dbg_el_l_confirm = 0;
+  dbg_el_r_confirm = 0;
+  Element_ResetRingStageProgress();
+}
+
+static int Element_ClampCenter(int center)
+{
+  if (center < 8) return 8;
+  if (center > 71) return 71;
+  return center;
+}
+
+// 环岛补线可能把 OFFLine 提到 56，但控制前瞻仍取 TowPoint（当前为18）。
+// 中线修正必须至少覆盖到控制采样行，否则图像底部虽已补线，控制器读到的仍是旧直线。
+static int Element_RingCenterBottomRow(void)
+{
+  int bottom_row = ImageStatus.OFFLine;
+  int tow_row = ImageStatus.TowPoint;
+  if (tow_row < 0) tow_row = 0;
+  if (tow_row > 59) tow_row = 59;
+  if (bottom_row >= tow_row) bottom_row = tow_row - 1;
+  if (bottom_row < 0) bottom_row = 0;
+  return bottom_row;
+}
+
+static void Element_ForceLeftRingCenter(uint8 bias)
+{
+  const int bottom_row = Element_RingCenterBottomRow();
+  for (int y = 59; y > bottom_row; --y)
+    ImageDeal[y].Center = Element_ClampCenter(
+        ImageDeal[y].RightBorder - Half_Road_Wide[y] - bias);
+}
+
+static void Element_ForceRightRingCenter(uint8 bias)
+{
+  const int bottom_row = Element_RingCenterBottomRow();
+  for (int y = 59; y > bottom_row; --y)
+    ImageDeal[y].Center = Element_ClampCenter(
+        ImageDeal[y].LeftBorder + Half_Road_Wide[y] + bias);
+}
+
+static void Element_ForceLeftRingOuterCenter(uint8 bias)
+{
+  const int bottom_row = Element_RingCenterBottomRow();
+  for (int y = 59; y > bottom_row; --y)
+    ImageDeal[y].Center = Element_ClampCenter(
+        ImageDeal[y].RightBorder - Half_Road_Wide[y] + bias);
+}
+
+static void Element_ForceRightRingOuterCenter(uint8 bias)
+{
+  const int bottom_row = Element_RingCenterBottomRow();
+  for (int y = 59; y > bottom_row; --y)
+    ImageDeal[y].Center = Element_ClampCenter(
+        ImageDeal[y].LeftBorder + Half_Road_Wide[y] - bias);
+}
+
+static void Element_ForceCenterFromLeftBoundary(void)
+{
+  const int bottom_row = Element_RingCenterBottomRow();
+  for (int y = 59; y > bottom_row; --y)
+    ImageDeal[y].Center = Element_ClampCenter(
+        ImageDeal[y].LeftBorder + Half_Road_Wide[y]);
+}
+
+static void Element_ForceCenterFromRightBoundary(void)
+{
+  const int bottom_row = Element_RingCenterBottomRow();
+  for (int y = 59; y > bottom_row; --y)
+    ImageDeal[y].Center = Element_ClampCenter(
+        ImageDeal[y].RightBorder - Half_Road_Wide[y]);
+}
+
+static void Element_BeginRing(uint8 ring_side)
+{
+  Element_ResetRingCounters();
+  const roundabout::Side side = (ring_side == 1) ?
+      roundabout::Side::Left : roundabout::Side::Right;
+  ring_controller.begin(side, Element_NowMs());
+  ImageFlag.image_element_rings = ring_side;
+  ImageFlag.image_element_rings_flag =
+      static_cast<uint8>(roundabout::Phase::Approach);
+  ImageFlag.ring_big_small = 1;
+  g_ring_active_frames = 0;
+  g_element_scene = (ring_side == 1) ? ElementScene_LeftRing : ElementScene_RightRing;
+  ImageStatus.Road_type = (ring_side == 1) ? LeftCirque : RightCirque;
+  Element_SyncStatusFromFlag();
+}
+
+static void Element_ApplyRingExitHold(void)
+{
+  if (ring_exit_straight_hold_frames == 0) return;
+  const int bottom_row = Element_RingCenterBottomRow();
+  for (int y = 59; y > bottom_row; --y)
+    ImageDeal[y].Center = ImageStatus.MiddleLine;
+  ImageStatus.Road_type = Normol;
+  --ring_exit_straight_hold_frames;
+}
+
+static void Element_FinishRing(uint8 ring_side, bool hold_straight)
+{
+  ImageFlag.image_element_rings_flag = 0;
+  ImageFlag.image_element_rings = 0;
+  ImageFlag.ring_big_small = 0;
+  g_element_scene = ElementScene_Normal;
+  g_element_cooldown_frames = car_config::kElementCooldownFrames;
+  g_ring_redetect_lock_frames = car_config::kRingRedetectLockFrames;
+  g_ring_active_frames = 0;
+  ring_exit_straight_hold_frames = hold_straight ?
+      car_config::kElementRingExitStraightHoldFrames : 0;
+  ImageStatus.Road_type = Normol;
+  Element_ResetRingCounters();
+  Element_SyncStatusFromFlag();
+  ++circle_num;
+  if (car_config::kElementDebugLogEnable)
+    std::printf("[RING_DONE] side=%d cooldown=%d rearm=%d hold=%d\n",
+                ring_side, g_element_cooldown_frames,
+                g_ring_redetect_lock_frames, ring_exit_straight_hold_frames);
+}
+
+static void Element_AbortRing(uint8 ring_side, const char* reason)
+{
+  ImageFlag.image_element_rings_flag = 0;
+  ImageFlag.image_element_rings = 0;
+  ImageFlag.ring_big_small = 0;
+  g_element_scene = ElementScene_Normal;
+  g_element_cooldown_frames = car_config::kElementCooldownFrames;
+  g_ring_redetect_lock_frames = car_config::kRingAbortRedetectLockFrames;
+  g_ring_active_frames = 0;
+  ring_exit_straight_hold_frames = 0;
+  ImageStatus.Road_type = Normol;
+  Element_ResetRingCounters();
+  Element_SyncStatusFromFlag();
+  if (car_config::kElementDebugLogEnable)
+    std::printf("[RING_ABORT] side=%d reason=%s cooldown=%d rearm=%d\n",
+                ring_side, reason, g_element_cooldown_frames,
+                g_ring_redetect_lock_frames);
+}
+
+static bool Element_UpdateRoundaboutController(
+    const roundabout::Observation& observation)
+{
+  g_ring_inner_lower_missing = observation.inner_lower_missing;
+  const roundabout::Update update = ring_controller.update(observation);
+  ImageFlag.image_element_rings_flag = static_cast<uint8>(update.phase);
+  g_ring_stage_frames = update.phase_frames;
+  g_ring_stage_age_ms = update.phase_age_ms;
+
+  if (update.aborted)
+  {
+    Element_AbortRing(static_cast<uint8>(update.side), update.reason);
+    return true;
+  }
+
+  if (update.changed)
+  {
+    if (update.phase == roundabout::Phase::Enter)
+      g_ring_turn_yaw_mdeg.store(0, std::memory_order_relaxed);
+    if (car_config::kElementDebugLogEnable)
+      std::printf("[RING_PHASE] side=%d phase=%d name=%s reason=%s active=%d off=%d lower=%d inner=%d outer=%d tow=%d yaw=%.1f err=%d\n",
+                  static_cast<int>(update.side), static_cast<int>(update.phase),
+                  roundabout::phase_name(update.phase), update.reason,
+                  g_ring_active_frames, observation.offline,
+                  observation.inner_lower_missing,
+                  observation.inner_line_loss, observation.outer_line_loss,
+                  observation.inner_tow_found ? 1 : 0,
+                  observation.turn_yaw_deg,
+                  observation.center_error);
+  }
+  if (!update.finished) return false;
+
+  if (car_config::kElementDebugLogEnable)
+    std::printf("[RING_EXIT_READY] side=%d reason=%s stage_age_ms=%d off=%d inner=%d outer=%d err=%d\n",
+                static_cast<int>(update.side), update.reason,
+                update.phase_age_ms, observation.offline,
+                observation.inner_line_loss, observation.outer_line_loss,
+                observation.center_error);
+  const bool hold_straight =
+      std::abs(observation.center_error) <= car_config::kRingExitCenterErrorMax;
+  Element_FinishRing(static_cast<uint8>(update.side), hold_straight);
+  return true;
+}
+
+static bool Element_CanDetectNewScene(void)
+{
+  return g_enable_element_process
+      && g_element_scene == ElementScene_Normal
+      && g_element_cooldown_frames == 0
+      && g_ring_redetect_lock_frames == 0
+      && g_ring_cross_exit_lock_frames == 0
+      && ImageFlag.image_element_rings == 0
+      && ImageStatus.Road_type != Ramp
+      && ImageStatus.Road_type != Barn_in;
+}
+
+static void Element_UpdateRingCrossExitLock(void)
+{
+  const bool strong_cross_core =
+      g_element_scene == ElementScene_Normal &&
+      ImageFlag.image_element_rings == 0 &&
+      ImageStatus.WhiteLine >= car_config::kCrossHoldCoreWhiteLineMin &&
+      ImageStatus.Left_Line >= car_config::kCrossHoldEnterSideLossMin &&
+      ImageStatus.Right_Line >= car_config::kCrossHoldEnterSideLossMin;
+  if (strong_cross_core)
+  {
+    if (g_ring_cross_exit_lock_frames == 0 &&
+        car_config::kElementDebugLogEnable)
+      std::printf("[RING_DETECT_LOCK] reason=cross-core hold=%d wl=%d ll=%d rl=%d\n",
+                  car_config::kRingCrossExitLockFrames,
+                  ImageStatus.WhiteLine, ImageStatus.Left_Line,
+                  ImageStatus.Right_Line);
+    g_ring_cross_exit_lock_frames = car_config::kRingCrossExitLockFrames;
+    g_ring_cross_exit_clear_frames = 0;
+    return;
+  }
+
+  if (g_ring_cross_exit_lock_frames > 1)
+  {
+    --g_ring_cross_exit_lock_frames;
+    return;
+  }
+
+  if (g_ring_cross_exit_lock_frames == 1)
+  {
+    const bool stable_lane =
+        ImageStatus.OFFLine <= 10 &&
+        ImageStatus.WhiteLine <= 3 &&
+        ImageStatus.Left_Line <= 6 &&
+        ImageStatus.Right_Line <= 6;
+    if (stable_lane)
+      ++g_ring_cross_exit_clear_frames;
+    else
+      g_ring_cross_exit_clear_frames = 0;
+
+    if (g_ring_cross_exit_clear_frames >=
+        car_config::kRingCrossExitClearFrames)
+    {
+      g_ring_cross_exit_lock_frames = 0;
+      g_ring_cross_exit_clear_frames = 0;
+      if (car_config::kElementDebugLogEnable)
+        std::printf("[RING_DETECT_UNLOCK] reason=cross-exit-stable\n");
+    }
+  }
+}
+
+static void Element_TraceRingState(void)
+{
+  if (!car_config::kElementDebugLogEnable) return;
+  const int side = ImageFlag.image_element_rings;
+  const int stage = ImageFlag.image_element_rings_flag;
+  if (side == ring_trace_last_side && stage == ring_trace_last_stage) return;
+  std::printf("[RING_STATE] side=%d stage=%d prev=%d/%d active=%d stage_frames=%d stage_age_ms=%d off=%d ll=%d rl=%d det=%d\n",
+              side, stage, ring_trace_last_side, ring_trace_last_stage,
+              g_ring_active_frames, g_ring_stage_frames, g_ring_stage_age_ms,
+              ImageStatus.OFFLine, ImageStatus.Left_Line,
+              ImageStatus.Right_Line, ImageStatus.Det_True);
+  ring_trace_last_side = side;
+  ring_trace_last_stage = stage;
+}
 
 static int clamp_image_x(int value)
 {
@@ -212,6 +519,21 @@ static void ApplyCurveCenterCompensation(void)
 
 void Data_Settings(void)           //参数赋值
 {
+
+  ImageFlag.image_element_rings = 0;
+  ImageFlag.image_element_rings_flag = 0;
+  ImageFlag.ring_big_small = 0;
+  g_element_scene = ElementScene_Normal;
+  g_element_cooldown_frames = 0;
+  g_ring_redetect_lock_frames = 0;
+  g_ring_cross_exit_lock_frames = 0;
+  g_ring_cross_exit_clear_frames = 0;
+  g_ring_active_frames = 0;
+  ring_exit_straight_hold_frames = 0;
+  ring_trace_last_side = -1;
+  ring_trace_last_stage = -1;
+  Element_ResetRingCounters();
+  Element_SyncStatusFromFlag();
 
   //图像参数
   //adcsum = 0;
@@ -1648,10 +1970,17 @@ void GetDet()
     ImageStatus.Road_type = Cross;
   }
 
+  const bool ring_exit_center_reconstructed =
+      ImageFlag.image_element_rings != 0 &&
+      (ImageFlag.image_element_rings_flag ==
+           static_cast<uint8>(roundabout::Phase::Exit) ||
+       ImageFlag.image_element_rings_flag ==
+           static_cast<uint8>(roundabout::Phase::Align));
   const bool det_bad_frame =
       cross_entry_hold_active ||
       ImageStatus.OFFLine >= car_config::kBadVisionDetHoldOfflineThreshold ||
-      (ImageStatus.Left_Line >= car_config::kCurveCenterOppositeLossMax &&
+      (!ring_exit_center_reconstructed &&
+       ImageStatus.Left_Line >= car_config::kCurveCenterOppositeLossMax &&
        ImageStatus.Right_Line >= car_config::kCurveCenterOppositeLossMax);
   if (det_bad_frame) {
     // 双边同时弱观测时，当前帧中心可能直接落到画面边缘或邻道。
@@ -1796,6 +2125,13 @@ void GetDet()
 
 void Element_Judgment_Left_Rings()
 {
+    dbg_el_l_block = 0;
+    dbg_el_l_geom = 0;
+    dbg_el_l_loss = 0;
+    dbg_el_l_susp = 0;
+    dbg_el_l_p1 = 0;
+    dbg_el_l_p2 = 0;
+    dbg_el_l_help = 0;
     // ==================== 原左圆环判断逻辑（保留注释，便于回退对比） ====================
     // if (       ImageStatus.Right_Line > 5
     //         || ImageStatus.Left_Line < 9
@@ -1863,29 +2199,23 @@ void Element_Judgment_Left_Rings()
     if (ImageFlag.image_element_rings_flag != 0)
     {
         left_ring_confirm_frames = 0;
+        dbg_el_l_confirm = 0;
         return;
     }
 
     const bool base_blocked = (
-               ImageStatus.Right_Line > 5
-            || ImageStatus.Left_Line < 9
-            || ImageStatus.OFFLine > 10
-            || ImageDeal[58].RightBorder > 75
-            || ImageDeal[57].RightBorder > 75
-            || ImageDeal[56].RightBorder > 75
-            || ImageDeal[55].RightBorder > 75
-            || ImageDeal[54].RightBorder > 75
-            || ImageDeal[52].IsLeftFind == 'W'
-            || ImageDeal[53].IsLeftFind == 'W'
-            || ImageDeal[54].IsLeftFind == 'W'
-            || ImageDeal[55].IsLeftFind == 'W'
-            || ImageDeal[56].IsLeftFind == 'W'
-            || ImageDeal[57].IsLeftFind == 'W'
-            || ImageDeal[58].IsLeftFind == 'W');
+               ImageStatus.Right_Line > car_config::kLeftRingRightLineBlockMax
+            || ImageStatus.Left_Line < car_config::kLeftRingMinLeftLost
+            || ImageStatus.OFFLine > car_config::kLeftRingOfflineBlockMax
+            || ImageDeal[58].RightBorder > 77
+            || ImageDeal[57].RightBorder > 77
+            || ImageDeal[56].RightBorder > 77);
 
     if (base_blocked)
     {
         left_ring_confirm_frames = 0;
+        dbg_el_l_block = 1;
+        dbg_el_l_confirm = 0;
         return;
     }
 
@@ -1921,38 +2251,48 @@ void Element_Judgment_Left_Rings()
         }
     }
 
-    const bool right_side_suspicious = (
-           ImageStatus.Right_Line >= 10
-        || ImageDeal[58].LeftBorder < 8
-        || ImageDeal[57].LeftBorder < 8
-        || ImageDeal[56].LeftBorder < 8);
+    const bool right_side_suspicious =
+        ImageStatus.Right_Line >= car_config::kLeftRingRightLineBlockMax + 4;
 
-    const bool left_candidate = (
+    const bool left_geometry_candidate = (
            Left_RingsFlag_Point2_Ysite > Left_RingsFlag_Point1_Ysite + 2
         && Ring_Help_Flag == 1
-        && ImageStatus.Left_Line > 12
+        && ImageStatus.Left_Line >= car_config::kLeftRingMinLeftLost
         && Left_RingsFlag_Point1_Ysite != 0
-        && Left_RingsFlag_Point2_Ysite < 35
-        && Left_RingsFlag_Point2_Ysite - Left_RingsFlag_Point1_Ysite < 10);
+        && Left_RingsFlag_Point2_Ysite < car_config::kLeftRingMaxPoint2Y
+        && Left_RingsFlag_Point2_Ysite - Left_RingsFlag_Point1_Ysite < 14);
+    const bool left_loss_candidate = (
+           ImageStatus.Left_Line >= car_config::kRingLossOnlyMinLost
+        && ImageStatus.Right_Line <= car_config::kLeftRingRightLineBlockMax
+        && ImageStatus.OFFLine <= car_config::kLeftRingOfflineBlockMax
+        && std::abs(ImageStatus.MiddleLine - ImageStatus.Det_True) <=
+               car_config::kRingLossOnlyMaxEntryError
+        && ImageStatus.MiddleLine - ImageStatus.Det_True <=
+               car_config::kLeftRingLossOnlyMaxSignedEntryError
+        && ImageDeal[56].RightBorder < 77);
+    const bool left_candidate = left_geometry_candidate || left_loss_candidate;
+
+    dbg_el_l_p1 = Left_RingsFlag_Point1_Ysite;
+    dbg_el_l_p2 = Left_RingsFlag_Point2_Ysite;
+    dbg_el_l_help = Ring_Help_Flag;
+    dbg_el_l_geom = left_geometry_candidate ? 1 : 0;
+    dbg_el_l_loss = left_loss_candidate ? 1 : 0;
+    dbg_el_l_susp = right_side_suspicious ? 1 : 0;
 
     if (left_candidate && !right_side_suspicious)
     {
-        if (left_ring_confirm_frames < 3)
+        if (left_ring_confirm_frames < car_config::kElementRingConfirmFrames)
             left_ring_confirm_frames++;
     }
     else
     {
         left_ring_confirm_frames = 0;
     }
+    dbg_el_l_confirm = left_ring_confirm_frames;
 
-    if (left_ring_confirm_frames >= 2)
+    if (left_ring_confirm_frames >= car_config::kElementRingConfirmFrames)
     {
-        ImageFlag.image_element_rings = 1;
-        ImageFlag.image_element_rings_flag = 1;
-        ImageFlag.ring_big_small = 1;
-        ImageStatus.Road_type = LeftCirque;
-        left_ring_confirm_frames = 0;
-        right_ring_confirm_frames = 0;
+        Element_BeginRing(1);
     }
 
     Ring_Help_Flag = 0;
@@ -1966,6 +2306,13 @@ void Element_Judgment_Left_Rings()
 
 void Element_Judgment_Right_Rings()
 {
+    dbg_el_r_block = 0;
+    dbg_el_r_geom = 0;
+    dbg_el_r_loss = 0;
+    dbg_el_r_susp = 0;
+    dbg_el_r_p1 = 0;
+    dbg_el_r_p2 = 0;
+    dbg_el_r_help = 0;
     // ==================== 原右圆环判断逻辑（保留注释，便于回退对比） ====================
     // if (   ImageStatus.Left_Line > 5
     //     || ImageStatus.Right_Line < 10
@@ -2033,29 +2380,23 @@ void Element_Judgment_Right_Rings()
     if (ImageFlag.image_element_rings_flag != 0)
     {
         right_ring_confirm_frames = 0;
+        dbg_el_r_confirm = 0;
         return;
     }
 
     const bool base_blocked = (
-           ImageStatus.Left_Line > 5
-        || ImageStatus.Right_Line < 10
-        || ImageStatus.OFFLine > 10
-        || ImageDeal[58].LeftBorder < 6
-        || ImageDeal[57].LeftBorder < 6
-        || ImageDeal[56].LeftBorder < 6
-        || ImageDeal[55].LeftBorder < 6
-        || ImageDeal[54].LeftBorder < 6
-        || ImageDeal[52].IsRightFind == 'W'
-        || ImageDeal[53].IsRightFind == 'W'
-        || ImageDeal[54].IsRightFind == 'W'
-        || ImageDeal[55].IsRightFind == 'W'
-        || ImageDeal[56].IsRightFind == 'W'
-        || ImageDeal[57].IsRightFind == 'W'
-        || ImageDeal[58].IsRightFind == 'W');
+           ImageStatus.Left_Line > car_config::kRightRingLeftLineBlockMax
+        || ImageStatus.Right_Line < car_config::kRightRingMinRightLost
+        || ImageStatus.OFFLine > car_config::kRightRingOfflineBlockMax
+        || ImageDeal[58].LeftBorder < 3
+        || ImageDeal[57].LeftBorder < 3
+        || ImageDeal[56].LeftBorder < 3);
 
     if (base_blocked)
     {
         right_ring_confirm_frames = 0;
+        dbg_el_r_block = 1;
+        dbg_el_r_confirm = 0;
         return;
     }
 
@@ -2090,37 +2431,45 @@ void Element_Judgment_Right_Rings()
         }
     }
 
-    const bool left_side_suspicious = (
-           ImageStatus.Left_Line >= 10
-        || ImageDeal[58].RightBorder > 71
-        || ImageDeal[57].RightBorder > 71
-        || ImageDeal[56].RightBorder > 71);
+    const bool left_side_suspicious =
+        ImageStatus.Left_Line >= car_config::kRightRingLeftLineBlockMax + 4;
 
-    const bool right_candidate = (
+    const bool right_geometry_candidate = (
            Right_RingsFlag_Point2_Ysite > Right_RingsFlag_Point1_Ysite + 1
         && Ring_Help_Flag == 1
-        && ImageStatus.Right_Line > 13
+        && ImageStatus.Right_Line >= car_config::kRightRingMinRightLost
         && Right_RingsFlag_Point1_Ysite != 0
-        && Right_RingsFlag_Point2_Ysite > 25);
+        && Right_RingsFlag_Point2_Ysite > car_config::kRightRingMinPoint2Y);
+    const bool right_loss_candidate = (
+           ImageStatus.Right_Line >= car_config::kRingLossOnlyMinLost
+        && ImageStatus.Left_Line <= car_config::kRightRingLeftLineBlockMax
+        && ImageStatus.OFFLine <= car_config::kRightRingOfflineBlockMax
+        && ImageStatus.MiddleLine - ImageStatus.Det_True >=
+               car_config::kRightRingLossOnlyMinSignedEntryError
+        && ImageDeal[56].LeftBorder > 2);
+    const bool right_candidate = right_geometry_candidate || right_loss_candidate;
+
+    dbg_el_r_p1 = Right_RingsFlag_Point1_Ysite;
+    dbg_el_r_p2 = Right_RingsFlag_Point2_Ysite;
+    dbg_el_r_help = Ring_Help_Flag;
+    dbg_el_r_geom = right_geometry_candidate ? 1 : 0;
+    dbg_el_r_loss = right_loss_candidate ? 1 : 0;
+    dbg_el_r_susp = left_side_suspicious ? 1 : 0;
 
     if (right_candidate && !left_side_suspicious)
     {
-        if (right_ring_confirm_frames < 3)
+        if (right_ring_confirm_frames < car_config::kElementRingConfirmFrames)
             right_ring_confirm_frames++;
     }
     else
     {
         right_ring_confirm_frames = 0;
     }
+    dbg_el_r_confirm = right_ring_confirm_frames;
 
-    if (right_ring_confirm_frames >= 2)
+    if (right_ring_confirm_frames >= car_config::kElementRingConfirmFrames)
     {
-        ImageFlag.image_element_rings = 2;
-        ImageFlag.image_element_rings_flag = 1;
-        ImageFlag.ring_big_small = 1;
-        ImageStatus.Road_type = RightCirque;
-        right_ring_confirm_frames = 0;
-        left_ring_confirm_frames = 0;
+        Element_BeginRing(2);
     }
 
     Ring_Help_Flag = 0;
@@ -2147,78 +2496,20 @@ void Element_Handle_Left_Rings()
     //   return;
     // }
 
-    /***************************************判断**************************************/
-    int num = 0;
+    /***************************************状态推进**************************************/
+    int lower_inner_missing = 0;
     for (int Ysite = 55; Ysite > 40; Ysite--)
     {
         if(ImageDeal[Ysite].IsLeftFind == 'W')
-            num++;
+            lower_inner_missing++;
         if(    ImageDeal[Ysite+3].IsLeftFind == 'W' && ImageDeal[Ysite+2].IsLeftFind == 'W'
             && ImageDeal[Ysite+1].IsLeftFind == 'W' && ImageDeal[Ysite].IsLeftFind == 'T')
             break;
     }
-//    tft180_show_int(60,125,num,3);
-//    int ring_ysite = 30;
-//    for (int Ysite = 5; Ysite < ring_ysite; Ysite++)
-//    {
-//        if (ImageDeal[Ysite - 1].RightBoundary_First - ImageDeal[Ysite].RightBoundary_First > 4)
-//        {
-//            Right_RingsFlag_Point1_Ysite = Ysite;
-//            break;
-//        }
-//    }
-//    for (int Ysite = 58; Ysite > ring_ysite; Ysite--)
-//    {
-//        if (ImageDeal[Ysite].RightBoundary - ImageDeal[Ysite + 1].RightBoundary > 4)
-//        {
-//            Right_RingsFlag_Point2_Ysite = Ysite;
-//            break;
-//        }
-//    }
-        //准备进环
-    if (ImageFlag.image_element_rings_flag == 1 && num>10 )//&& ImageStatus.Left_Line >25
+    Point_Ysite = 0;
+    Point_Xsite = 0;
+    if (ring_controller.phase() == roundabout::Phase::Orbit)
     {
-        ImageFlag.image_element_rings_flag = 2;
-        //wireless_uart_send_byte(2);
-    }
-
-//    if( ImageFlag.image_element_rings_flag == 2 )
-//    {
-//        if( SaiDaoKuanDu() > 62)
-//        ImageFlag.image_element_rings_flag = 3;
-//
-//    }
-
-
-    if (ImageFlag.image_element_rings_flag == 2 && num<9)//&& ImageStatus.Left_Line <15
-    {
-        ImageFlag.image_element_rings_flag = 5;
-        //wireless_uart_send_byte(5);
-    }
-//    if(ImageFlag.image_element_rings_flag == 3 && ImageStatus.Left_Line >20)
-//    {
-//        ImageFlag.image_element_rings_flag = 5;
-//    }
-
-        //进环
-    if(ImageFlag.image_element_rings_flag == 5 && /*num>15)*/ImageStatus.Right_Line>10)
-    {
-        ImageFlag.image_element_rings_flag = 6;
-     //   ImageStatus.Road_type = LeftCirque;
-        //wireless_uart_send_byte(6);
-    }
-        //进环小圆环
-    if(ImageFlag.image_element_rings_flag == 6 && ImageStatus.Right_Line<3)
-    {
-        //Stop = 1;
-        ImageFlag.image_element_rings_flag = 7;
-        //wireless_uart_send_byte(8);
-    }
-        //环内 大圆环判断
-    if ( ImageFlag.image_element_rings_flag == 7)
-    {
-        Point_Ysite = 0;
-        Point_Xsite = 0;
         for (int Ysite = 50; Ysite > ImageStatus.OFFLine+3 ; Ysite--)
         {
             if (    ImageDeal[Ysite].RightBorder <= ImageDeal[Ysite + 2].RightBorder
@@ -2235,80 +2526,39 @@ void Element_Handle_Left_Rings()
                 break;
             }
         }
-        if (Point_Ysite > 15 && ImageStatus.Right_Line > 10)
-        {
-            ImageFlag.image_element_rings_flag = 8;
-           // wireless_uart_send_byte(8);
-            //Stop = 1;
-        }
-    }
-//        //环内 小圆环判断
-//    if (ImageFlag.image_element_rings_flag == 7 && ImageFlag.ring_big_small == 2)
-//    {
-//        Point_Ysite = 0;
-//        Point_Xsite = 0;
-//        for (int Ysite = 50; Ysite > ImageStatus.OFFLineBoundary + 3; Ysite--)
-//        {
-//            if (    ImageDeal[Ysite].RightBoundary < ImageDeal[Ysite + 2].RightBoundary
-//                 && ImageDeal[Ysite].RightBoundary < ImageDeal[Ysite - 2].RightBoundary
-//               )
-//            {
-//                Point_Xsite = ImageDeal[Ysite].RightBoundary;
-//                Point_Ysite = Ysite;
-//                break;
-//            }
-//        }
-//        if (Point_Ysite > 20)
-//          ImageFlag.image_element_rings_flag = 8;
-//    }
-    //出环后
-        if (ImageFlag.image_element_rings_flag == 8)
-        {
-             if (
-                     //Straight_Judge(2, ImageStatus.OFFLine+15, 50) < 1
-                 ImageStatus.Right_Line < 10
-                 &&  ImageStatus.OFFLine < 10
-
-                 )    //右边为直线且截止行（前瞻值）很小
-               {ImageFlag.image_element_rings_flag = 9;
-                //wireless_uart_send_byte(9);
-               }
-        }
-
-        //结束圆环进程
-        if (ImageFlag.image_element_rings_flag == 9)
-        {
-            int num=0;
-            for (int Ysite = 40; Ysite > 10; Ysite--)
-            {
-                if(ImageDeal[Ysite].IsLeftFind == 'W' )
-                    num++;
-            }
-            if(num < 5)
-            {
-//                ImageStatus.Road_type = 0;   //出环处理完道路类型清0
-                ImageFlag.image_element_rings_flag = 0;
-                ImageFlag.image_element_rings = 0;
-                ImageFlag.ring_big_small = 0;
-                ImageStatus.Road_type = Normol;
-                //wireless_uart_send_byte(0);
-                circle_num ++;
-            }
     }
 
-
+    roundabout::Observation observation;
+    observation.now_ms = Element_NowMs();
+    observation.inner_lower_missing = lower_inner_missing;
+    observation.inner_line_loss = ImageStatus.Left_Line;
+    observation.outer_line_loss = ImageStatus.Right_Line;
+    observation.offline = ImageStatus.OFFLine;
+    observation.center_error = ImageStatus.MiddleLine - ImageStatus.Det_True;
+    observation.turn_yaw_deg =
+        0.001f * static_cast<float>(
+            g_ring_turn_yaw_mdeg.load(std::memory_order_relaxed));
+    {
+        int tow_row = ImageStatus.TowPoint;
+        if (tow_row < 0) tow_row = 0;
+        if (tow_row > 59) tow_row = 59;
+        observation.inner_tow_found = ImageDeal[tow_row].IsLeftFind == 'T';
+    }
+    observation.orbit_exit_corner = Point_Ysite > 15;
+    observation.exit_lane_visible =
+        ImageStatus.Right_Line < 10 && ImageStatus.OFFLine < 10;
+    if (Element_UpdateRoundaboutController(observation)) return;
 
     /***************************************处理**************************************/
         //准备进环  半宽处理
-    if (   ImageFlag.image_element_rings_flag == 1
-        || ImageFlag.image_element_rings_flag == 2
-        || ImageFlag.image_element_rings_flag == 3
-        || ImageFlag.image_element_rings_flag == 4)
+    if (ImageFlag.image_element_rings_flag ==
+            static_cast<uint8>(roundabout::Phase::Approach) ||
+        ImageFlag.image_element_rings_flag ==
+            static_cast<uint8>(roundabout::Phase::PassOpening) ||
+        ImageFlag.image_element_rings_flag ==
+            static_cast<uint8>(roundabout::Phase::SeekEntrance))
     {
-        for (int Ysite = 57; Ysite > ImageStatus.OFFLine; Ysite--)
-        {
-            ImageDeal[Ysite].Center = ImageDeal[Ysite].RightBorder - Half_Road_Wide[Ysite];
-        }
+        Element_ForceLeftRingCenter(car_config::kRingApproachCenterBias);
     }
         //进环  补线
     if  ( ImageFlag.image_element_rings_flag == 5
@@ -2399,7 +2649,14 @@ void Element_Handle_Left_Rings()
         //环内 小环弯道减半宽 大环不减
     if (ImageFlag.image_element_rings_flag == 7)
     {
-
+        const bool outer_boundary_weak =
+            ImageStatus.Right_Line > car_config::kCurveCenterOppositeLossMax;
+        const bool inner_boundary_reliable =
+            ImageStatus.Left_Line <= car_config::kRingAlignInnerLossMax;
+        if (outer_boundary_weak && inner_boundary_reliable)
+            Element_ForceCenterFromLeftBoundary();
+        else
+            Element_ForceLeftRingOuterCenter(car_config::kRingInnerOuterBias);
     }
         //大圆环出环 补线
     if (ImageFlag.image_element_rings_flag == 8)    //大圆环
@@ -2453,12 +2710,14 @@ void Element_Handle_Left_Rings()
 //        }
 //    }
         //已出环 半宽处理
-    if (ImageFlag.image_element_rings_flag == 9 || ImageFlag.image_element_rings_flag == 10)
+    if (ImageFlag.image_element_rings_flag == 8 ||
+        (ImageFlag.image_element_rings_flag == 9 &&
+         ImageStatus.Left_Line > car_config::kRingAlignInnerLossMax))
+        Element_ForceLeftRingOuterCenter(car_config::kRingExitCenterBias);
+    if (ImageFlag.image_element_rings_flag == 5 ||
+        ImageFlag.image_element_rings_flag == 6)
     {
-        for (int Ysite = 59; Ysite > ImageStatus.OFFLine; Ysite--)
-        {
-            ImageDeal[Ysite].Center = ImageDeal[Ysite].RightBorder - Half_Road_Wide[Ysite];
-        }
+        Element_ForceLeftRingCenter(car_config::kRingEntryCenterBias);
     }
 }
 //--------------------------------------------------------------
@@ -2481,61 +2740,23 @@ void Element_Handle_Right_Rings()
     //   return;
     // }
 
-    /****************判断*****************/
-    int num =0 ;
+    /****************状态推进*****************/
+    int lower_inner_missing = 0;
     for (int Ysite = 55; Ysite > 20; Ysite--)
     {
         if(ImageDeal[Ysite].IsRightFind == 'W')
         {
-            num++;
-            // szr=num;
+            lower_inner_missing++;
         }
         if(    ImageDeal[Ysite+3].IsRightFind == 'W' && ImageDeal[Ysite+2].IsRightFind == 'W'
             && ImageDeal[Ysite+1].IsRightFind == 'W' && ImageDeal[Ysite].IsRightFind == 'T' )
             break;
     }
-        //准备进环
-    if (ImageFlag.image_element_rings_flag == 1 && num>10 )//&& ImageStatus.Right_Line >25
+
+    Point_Xsite = 0;
+    Point_Ysite = 0;
+    if (ring_controller.phase() == roundabout::Phase::Orbit)
     {
-        ImageFlag.image_element_rings_flag = 2;
-    }
-
-
-
-//    if( ImageFlag.image_element_rings_flag == 2 )
-//    {
-//        if( SaiDaoKuanDu() > 62)
-//        ImageFlag.image_element_rings_flag = 3;
-//
-//    }
-
-
-
-
-    if (ImageFlag.image_element_rings_flag == 2 && num<9 )//&& ImageStatus.Right_Line<15
-    {
-        ImageFlag.image_element_rings_flag = 5;
-    }
-//    if(ImageFlag.image_element_rings_flag = 3 && ImageStatus.Right_Line>25)//
-//    {
-//        ImageFlag.image_element_rings_flag = 5;
-//    }
-        //进环
-    if(ImageFlag.image_element_rings_flag == 5 && ImageStatus.Left_Line>=20)
-    {
-        ImageFlag.image_element_rings_flag = 6;
-       // ImageStatus.Road_type = RightCirque;
-    }
-        //进环小圆环
-    if(ImageFlag.image_element_rings_flag == 6 && ImageStatus.Left_Line<10)
-    {
-        ImageFlag.image_element_rings_flag = 7;
-        //Stop=1;
-    }
-    if (ImageFlag.image_element_rings_flag == 7)
-    {
-        Point_Xsite = 0;
-        Point_Ysite = 0;
         for (int Ysite = 50; Ysite > ImageStatus.OFFLine + 3; Ysite--)
         {
             if (    //ImageDeal[Ysite].LeftBorder >= ImageDeal[Ysite + 2].LeftBorder
@@ -2552,58 +2773,42 @@ void Element_Handle_Right_Rings()
             {
                         Point_Xsite = ImageDeal[Ysite].LeftBorder;
                         Point_Ysite = Ysite;
-                        break;
+                break;
             }
         }
-        if (Point_Ysite > 35 && ImageStatus.Left_Line > 20)
-        {
-            ImageFlag.image_element_rings_flag = 8;
-//            gpio_set_level(P33_10, 1);
-        }
     }
-    if (ImageFlag.image_element_rings_flag == 8)
-    {
-         if (   //Straight_Judge(1, ImageStatus.OFFLine+10, 45) < 1
-                     ImageStatus.Left_Line < 20
-                  && ImageStatus.OFFLine < 25
 
-             )    //右边为直线且截止行（前瞻值）很小
-            {ImageFlag.image_element_rings_flag = 9;}
-
-    }
-    if(ImageFlag.image_element_rings_flag == 9 )
+    roundabout::Observation observation;
+    observation.now_ms = Element_NowMs();
+    observation.inner_lower_missing = lower_inner_missing;
+    observation.inner_line_loss = ImageStatus.Right_Line;
+    observation.outer_line_loss = ImageStatus.Left_Line;
+    observation.offline = ImageStatus.OFFLine;
+    observation.center_error = ImageStatus.MiddleLine - ImageStatus.Det_True;
+    observation.turn_yaw_deg =
+        0.001f * static_cast<float>(
+            g_ring_turn_yaw_mdeg.load(std::memory_order_relaxed));
     {
-        int num=0;
-        for (int Ysite = 40; Ysite > 10; Ysite--)
-        {
-            if(ImageDeal[Ysite].IsRightFind == 'W' )
-            {
-                num++;
-            }
-        }
-        // szr=num;
-        if(num < 10)
-        {
-           // ImageStatus.Road_type = 0;   //出环处理完道路类型清0
-            ImageFlag.image_element_rings_flag = 0;
-            ImageFlag.image_element_rings = 0;
-            ImageFlag.ring_big_small = 0;
-            ImageStatus.Road_type = Normol;
-//            Front_Ring_Continue_Count++;
-            circle_num ++;
-        }
+        int tow_row = ImageStatus.TowPoint;
+        if (tow_row < 0) tow_row = 0;
+        if (tow_row > 59) tow_row = 59;
+        observation.inner_tow_found = ImageDeal[tow_row].IsRightFind == 'T';
     }
+    observation.orbit_exit_corner = Point_Ysite > 35;
+    observation.exit_lane_visible =
+        ImageStatus.Left_Line < 20 && ImageStatus.OFFLine < 25;
+    if (Element_UpdateRoundaboutController(observation)) return;
+
     /***************************************处理**************************************/
          //准备进环  半宽处理
-    if (   ImageFlag.image_element_rings_flag == 1
-        || ImageFlag.image_element_rings_flag == 2
-        || ImageFlag.image_element_rings_flag == 3
-        || ImageFlag.image_element_rings_flag == 4)
+    if (ImageFlag.image_element_rings_flag ==
+            static_cast<uint8>(roundabout::Phase::Approach) ||
+        ImageFlag.image_element_rings_flag ==
+            static_cast<uint8>(roundabout::Phase::PassOpening) ||
+        ImageFlag.image_element_rings_flag ==
+            static_cast<uint8>(roundabout::Phase::SeekEntrance))
     {
-        for (int Ysite = 59; Ysite > ImageStatus.OFFLine; Ysite--)
-        {
-            ImageDeal[Ysite].Center = ImageDeal[Ysite].LeftBorder + Half_Road_Wide[Ysite];
-        }
+        Element_ForceRightRingCenter(car_config::kRingApproachCenterBias);
     }
 
         //进环  补线
@@ -2697,7 +2902,14 @@ void Element_Handle_Right_Rings()
         //环内不处理
     if (ImageFlag.image_element_rings_flag == 7)
     {
-
+        const bool outer_boundary_weak =
+            ImageStatus.Left_Line > car_config::kCurveCenterOppositeLossMax;
+        const bool inner_boundary_reliable =
+            ImageStatus.Right_Line <= car_config::kRingAlignInnerLossMax;
+        if (outer_boundary_weak && inner_boundary_reliable)
+            Element_ForceCenterFromRightBoundary();
+        else
+            Element_ForceRightRingOuterCenter(car_config::kRingInnerOuterBias);
     }
         //大圆环出环 补线
     if (ImageFlag.image_element_rings_flag == 8)  //大圆环
@@ -2722,14 +2934,16 @@ void Element_Handle_Right_Rings()
             ImageDeal[Ysite].LeftBorder = ( Repair_Point_Xsite - ImageDeal[58].LeftBorder ) * (58 - Ysite) / (58 - Repair_Point_Ysite)  + ImageDeal[58].LeftBorder;
             ImageDeal[Ysite].Center = (ImageDeal[Ysite].RightBorder + ImageDeal[Ysite].LeftBorder) / 2;
         }
-    if (ImageFlag.image_element_rings_flag == 9)
-    {
-        for (int Ysite = 59; Ysite > ImageStatus.OFFLine; Ysite--)
-        {
-            ImageDeal[Ysite].Center = ImageDeal[Ysite].LeftBorder + Half_Road_Wide[Ysite];
-        }
     }
-  }
+    if (ImageFlag.image_element_rings_flag == 8 ||
+        (ImageFlag.image_element_rings_flag == 9 &&
+         ImageStatus.Right_Line > car_config::kRingAlignInnerLossMax))
+        Element_ForceRightRingOuterCenter(car_config::kRingExitCenterBias);
+    if (ImageFlag.image_element_rings_flag == 5 ||
+        ImageFlag.image_element_rings_flag == 6)
+    {
+        Element_ForceRightRingCenter(car_config::kRingEntryCenterBias);
+    }
 }
 
 
@@ -2918,11 +3132,22 @@ void Element_Test()
 //    Element_Judgment_Zebra();
 //  }
 
+  const bool can_detect_new_scene = Element_CanDetectNewScene();
+  dbg_el_detect_open = can_detect_new_scene ? 1 : 0;
+  if (!can_detect_new_scene)
+  {
+    left_ring_confirm_frames = 0;
+    right_ring_confirm_frames = 0;
+    dbg_el_l_confirm = 0;
+    dbg_el_r_confirm = 0;
+    return;
+  }
 
   if (ImageStatus.Road_type != Ramp)/*&& circle_num < 2 */    //圆环检测//&& ImageStatus.Road_type != Ramp
   {
     Element_Judgment_Left_Rings();           //左圆环检测
-    Element_Judgment_Right_Rings();          //右圆环检测
+    if (g_element_scene == ElementScene_Normal)
+      Element_Judgment_Right_Rings();        //右圆环检测
   }
 
 
@@ -2979,6 +3204,11 @@ static void get_imgdisplay()
 
 void imageprocess(void)
 {
+    if (g_element_cooldown_frames > 0)
+      --g_element_cooldown_frames;
+    if (g_ring_redetect_lock_frames > 0)
+      --g_ring_redetect_lock_frames;
+
     ImageStatus.OFFLine = 2;  //这个值根据真实距离得到，必须进行限制//图像顶边
     ImageStatus.WhiteLine = 0;//双边丢边数
     if (ImageFlag.image_element_rings == 0 &&
@@ -3002,12 +3232,15 @@ void imageprocess(void)
   drawfirstline();//绘制底边
   DrawLinesProcess();//获取基本边线
   Search_Border_OTSU(img1,CAMERA_H ,CAMERA_W, CAMERA_H - 2);//58行位底行//八邻域爬边
+  Element_UpdateRingCrossExitLock();
   //Straightacc_Test();//直线检测
   // if(ImageStatus.Road_type != LeftCirque&&ImageStatus.Road_type != RightCirque&&ImageStatus.Road_type != Ramp)
   // {Element_Test();}//元素检测
   if (g_enable_element_process) {
     Element_Test();
   }
+  if (ImageFlag.image_element_rings != 0 && g_ring_active_frames < 10000)
+    ++g_ring_active_frames;
 
   if(!g_enable_element_process || ImageFlag.image_element_rings == 0)
     {DrawExtensionLine(); } //绘制延长线
@@ -3029,10 +3262,13 @@ void imageprocess(void)
     Element_Handle();//元素处理
     Stop_Test();
   }
+  Element_ApplyRingExitHold();
   GetDet();//前瞻获取，计算偏差
   if (g_enable_element_process) {
     Stop_Test2();
   }
+  Element_SyncStatusFromFlag();
+  Element_TraceRingState();
   get_imgdisplay();//获取要打印的数据
   // lq_udp_img_trans_demo();
   // printf("stop:%.2f\n",SystemData.SpeedData.Length);

@@ -977,8 +977,13 @@ int lq_element_observe_demo(int display_mode)
                 display_mode, use_udp ? 1 : 0, use_tft ? 1 : 0);
 
     Data_Settings();
-    g_enable_element_process = false;
-    std::printf("[ELEMENT_OBSERVE] element process DISABLED for NCNN observe\n");
+    const char *element_env = std::getenv("LQ_ELEMENT_OBSERVE_PROCESS");
+    g_enable_element_process = element_env != nullptr &&
+        std::strcmp(element_env, "0") != 0 &&
+        std::strcmp(element_env, "false") != 0 &&
+        std::strcmp(element_env, "FALSE") != 0;
+    std::printf("[ELEMENT_OBSERVE] element process %s (set LQ_ELEMENT_OBSERVE_PROCESS=1 for ring preflight)\n",
+                g_enable_element_process ? "ENABLED" : "DISABLED");
 
     if (!image_cv_Init()) {
         std::printf("[ELEMENT_OBSERVE][FATAL] camera init failed\n");
@@ -1037,7 +1042,7 @@ int lq_element_observe_demo(int display_mode)
         ++frame_count;
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_print).count() >= 200) {
-            std::printf("[OBS] f:%lu road:%s det:%d err:%d off:%d ll:%d rl:%d tp:%d ring:%d/%d\n",
+            std::printf("[OBS] f:%lu road:%s det:%d err:%d off:%d ll:%d rl:%d tp:%d ring:%d/%d active:%d detect:%d L:b%d g%d x%d s%d c%d p%d/%d R:b%d g%d x%d s%d c%d p%d/%d\n",
                         (unsigned long)frame_count,
                         element_road_name(ImageStatus.Road_type),
                         ImageStatus.Det_True,
@@ -1047,7 +1052,14 @@ int lq_element_observe_demo(int display_mode)
                         ImageStatus.Right_Line,
                         ImageStatus.TowPoint,
                         ImageFlag.image_element_rings,
-                        ImageFlag.image_element_rings_flag);
+                        ImageFlag.image_element_rings_flag,
+                        g_ring_active_frames, dbg_el_detect_open,
+                        dbg_el_l_block, dbg_el_l_geom, dbg_el_l_loss,
+                        dbg_el_l_susp, dbg_el_l_confirm,
+                        dbg_el_l_p1, dbg_el_l_p2,
+                        dbg_el_r_block, dbg_el_r_geom, dbg_el_r_loss,
+                        dbg_el_r_susp, dbg_el_r_confirm,
+                        dbg_el_r_p1, dbg_el_r_p2);
             last_print = now;
         }
     }

@@ -37,6 +37,7 @@ set(LQ_USER_APP_SOURCES
     ${PROJECT_SOURCE_DIR}/../user_app/src/my_mpu6050.cpp
     ${PROJECT_SOURCE_DIR}/../user_app/src/ncnn_inference.cpp
     ${PROJECT_SOURCE_DIR}/../user_app/src/red_marker_detect.cpp
+    ${PROJECT_SOURCE_DIR}/../user_app/src/roundabout_controller.cpp
 )
 
 set(LQ_RUNTIME_HELPER_SOURCES

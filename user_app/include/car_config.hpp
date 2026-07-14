@@ -121,6 +121,78 @@ constexpr float kSingleSideLossSpeedGoal = 0.30f;   // 单侧严重丢边仍保�
 constexpr float kDetStuckSpeedGoal = 0.26f;         // det持续偏差阶段小幅提速，但低于普通弯道目标。
 constexpr float kCrossExitSpeedGoal = 0.26f;        // 十字释放后先限制车速，让出口转向角速度建立。
 constexpr int kCrossExitSpeedHoldMs = 160;          // 出口短时接管窗口；只设速度上限，不削弱转向。
+// 环岛元素闭环：入口/出口判据继承历史实车通过版本，帧数按当前约141~146fps换算。
+constexpr int kElementRingConfirmFrames = 4;        // 连续约28ms确认入口，过滤单帧跳边。
+constexpr int kElementCooldownFrames = 180;         // 调试帧率下约3s不重复识别同一环岛；正式帧率下约1.2s。
+constexpr int kRingRedetectLockFrames = 600;         // 出环后约4s禁止再次识别环岛，确保车辆完全离开同一圆环。
+constexpr int kRingAbortRedetectLockFrames = 180;    // 误判撤销只短锁约1.2s；避免跳过紧接U弯后的真实环岛。
+constexpr int kRingCrossExitLockFrames = 520;        // 十字核心后约3.5s禁止仅凭单侧丢边触发环岛，覆盖十字出口支路。
+constexpr int kRingCrossExitClearFrames = 90;        // 最短锁定结束后还需约0.6s稳定双边车道，避免在出口弯中途解锁。
+constexpr int kElementRingExitStraightHoldFrames = 30; // 出环后继续锁直约0.2~0.5s，避免尚未摆正便重新加速。
+constexpr int kRingApproachCenterBias = 0;          // 经过第一个开口前沿可信外侧边界走本车道，不向出口预偏。
+constexpr int kRingEntryCenterBias = 7;             // 切入阶段中线明确指向环心；远小于旧版30px硬拉偏置。
+constexpr int kRingInnerOuterBias = 0;              // 环内严格沿可信外侧边界减半幅，禁止累计向环外漂移。
+constexpr int kRingInnerCenterBias = kRingInnerOuterBias; // 参数显示兼容名；实际方向由环内外侧补线函数决定。
+constexpr int kRingExitCenterBias = 0;              // 出环仍保持真实车道中线；旧8px外偏会直接产生反向转向。
+constexpr int kLeftRingRightLineBlockMax = 12;
+constexpr int kLeftRingOfflineBlockMax = 18;
+constexpr int kLeftRingMinLeftLost = 8;
+constexpr int kLeftRingMaxPoint2Y = 42;
+constexpr int kRightRingLeftLineBlockMax = 18;
+constexpr int kRightRingOfflineBlockMax = 25;
+constexpr int kRightRingMinRightLost = 6;
+constexpr int kRightRingMinPoint2Y = 15;
+constexpr int kRingLossOnlyMinLost = 28;
+constexpr int kRingLossOnlyMaxEntryError = 10;
+constexpr int kLeftRingLossOnlyMaxSignedEntryError = 2; // 仅丢左边兜底不接受明确左弯；大弯实测+5，真环几何触发约-2。
+constexpr int kRightRingLossOnlyMinSignedEntryError = -2; // 仅丢右边兜底不接受急右弯；误判实测-7，真小右环触发为0。
+constexpr float kRingSpeedGoal = 0.36f;             // 首轮保守环岛速度，低于普通弯道0.50m/s。
+constexpr float kRingExitSpeedGoal = 0.32f;         // 出环冷却期禁止立刻跳回0.68m/s直线速度。
+constexpr float kRingEntryGyroLimitDps = 38.0f;
+constexpr float kRingSceneGyroLimitDps = 52.0f;
+constexpr float kRingExitGyroLimitDps = 26.0f;       // 小左环出口目标已落在车头左侧时保留额外同向曲率，减少出口外切。
+constexpr float kRingExitAlignGyroLimitDps = 26.0f;  // 阶段9误差长期顶住24dps且实车轻微出界；提高2dps加快回到出口中线。
+constexpr float kRingExitOppositeGyroLimitDps = 6.0f; // 出口补线若瞬时给出反向，只允许低幅纠偏，禁止再次反打。
+constexpr float kRingExitAlignOppositeGyroLimitDps = 12.0f; // 163832出口中线已右转但raw=-39被压成-4，实车近似直行；12dps保留受限出环转向。
+constexpr float kRingApproachMinGyroDps = 0.0f;      // 第一个开口是出口；经过它之前禁止强制向环心转向。
+constexpr float kRingTurnInMinGyroDps = 36.0f;       // 165502入口误差仅-1px仍固定38、实测43dps并轻微内切；小降2dps保留可靠切入。
+constexpr float kRingInnerMinGyroDps = 36.0f;        // 30dps时环内长期外切；取与旧42dps贴内线版本的中间值。
+constexpr float kRingInnerAdaptiveEarlyMinGyroDps = 24.0f; // 前半圈保留曲率下限，避免刚入大环时进一步外切。
+constexpr float kRingInnerAdaptiveLateMinGyroDps = 12.0f;  // 后半圈允许视觉把持续内切平滑拉回中线。
+constexpr float kRingInnerAdaptiveMaxGyroDps = 40.0f;      // 小环外切时多保留1dps曲率；回到内侧后仍由自适应下限自动释放。
+constexpr float kRingInnerOutwardGainDpsPerPx = 2.5f;      // 目标位于环外时更快释放曲率，但不越过阶段安全下限。
+constexpr float kRingInnerInwardGainDpsPerPx = 0.5f;       // 目标位于环内时渐进增加曲率，消除36到39的阈值跳变。
+constexpr float kRingInnerLateReliefYawDeg = 210.0f; // 仅后半圈启用更强释放，避免加重大环入口外切。
+constexpr int kRingInnerLateReliefMinMs = 4200;     // IMU短暂停时转角会少计；阶段时长提供不依赖陀螺仪的后半圈门控。
+constexpr int kRingPhaseConfirmFrames = 4;           // 所有阶段转换统一连续确认，禁止单帧跳态。
+constexpr int kRingApproachLowerLostMin = 6;         // 第一个开口进入近端视野，转入“经过开口”阶段。
+constexpr int kRingApproachMinMs = 80;               // 过滤刚锁定环岛时的单帧边界跳变。
+constexpr int kRingApproachForcePassMs = 400;        // 漏掉开口前沿时也进入经过开口阶段，不直接强转。
+constexpr int kRingPassOpeningPeakMissingMin = 6;    // 145322实测近端峰值仅6；达到后再等待恢复到4，锁定正确入口时机。
+constexpr int kRingPassOpeningRecoveredMax = 4;      // 近端内侧边界恢复，说明第一个开口已经从车侧后移。
+constexpr int kRingPassOpeningMinMs = 300;           // 至少保持本车道300ms，禁止再次从出口切入。
+constexpr int kRingPassOpeningForceSeekMs = 1100;    // 第一开口恢复特征漏检时只转入寻找入口，绝不直接强转。
+constexpr int kRingSeekEntranceMinMs = 220;          // 第一开口闭合后继续补线，过滤同一边缘在前瞻行附近的抖动。
+constexpr int kRingEntranceLowerLostMin = 4;         // 第二开口必须从远端前瞻行扩展到近端，禁止tow=0/lower=0时提前切入。
+constexpr int kRingEntranceLineLostMin = 24;         // 154436入口在丢24行时已稳定展开；无需再直行到近端丢4行。
+constexpr int kRingSeekEntranceAbortMs = 1300;       // 第二开口始终无近端证据时撤销误判；禁止U弯超时后反向强转。
+constexpr int kRingEnterOuterLostHigh = 10;          // 切入时对侧边界消失，说明车头已穿过入口切线。
+constexpr int kRingEnterOuterLostLow = 10;           // 沿用实车成功条件<10，并以连续4帧确认对侧边界恢复。
+constexpr int kRingEnterLossWaitMaxMs = 1500;        // 边界特征漏检时也不能永久卡在进环前半段。
+constexpr int kRingEnterRecoverMaxMs = 1200;         // 对侧恢复漏检的保守超时，仅用于防状态锁死。
+constexpr int kRingInnerMinStageMs = 900;            // 阶段7至少维持0.9s环内转向，再允许搜索结果切到出环。
+constexpr int kRingOrbitExitGeometryMinMs = 6000;    // 165055无IMU异常仍在5.0s/yaw235度过早释放；延后约1s补足至约272度再接出口。
+constexpr float kRingOrbitExitMinYawDeg = 330.0f;    // 154159在292度按角点退出后仍处环弯并丢线；角点也必须完成约330度转角。
+constexpr int kRingOrbitExitInnerLostMin = 12;       // 真出口需保持外侧车道可跟踪且内侧开口展开；挡住大环off=20/inner=0假出口。
+constexpr float kRingOrbitForceExitYawDeg = 380.0f;  // 几何证据始终漏检时才晚兜底；不再于330度无条件离开大半径弧线。
+constexpr int kRingExitSearchMinMs = 220;            // 阶段8至少跟随出口补线220ms，禁止看见一帧直线就释放。
+constexpr int kRingExitSearchMaxMs = 1200;           // 出口边界漏检时转入低幅对正，禁止阶段8无限持续。
+constexpr int kRingExitAlignMinMs = 320;             // 阶段9至少完成320ms出口对正。
+constexpr int kRingExitAlignMaxMs = 900;             // 对正条件持续缺失时转入锁直，避免无限反打。
+constexpr int kRingExitCenterErrorMax = 6;           // 出口前瞻回到中线附近才允许正常完成。
+constexpr int kRingAlignInnerLossMax = 10;            // 对正阶段内侧边界恢复后立即改用真实双边界中线。
+constexpr float kRingEntryMaxDiff = 0.24f;          // 入口至少保留约0.12m/s内轮目标。
+constexpr float kRingMaxDiff = 0.30f;               // 环内允许更大曲率但避免内轮近停。
 constexpr float kSpeedAccelLimit = 4.0f;            // 缩短出弯再加速时间，避免长时间停留在弯道速度。
 constexpr float kSpeedDecelLimit = 4.0f;            // 目标速度下降限幅 m/s^2，0.45→0.20 仅需 62ms，入弯减速足够快。
 constexpr float kSpeedPlanSlowStart = 3.0f;         // 小偏差保持直线速度，减少轻微摆动导致的无效刹车。
@@ -129,11 +201,15 @@ constexpr float kSpeedPlanDerivWeight = 0.15f;      // 降低瞬时偏差变化�
 constexpr float kVisionLossSlowStart = 14.0f;       // 轻微边界缺失不再过早降速。
 constexpr float kVisionLossFullCurve = 34.0f;       // 严重视觉退化时才降到完整弯道速度。
 
-// T02 无元素参赛版：关闭竞赛循环中的 UDP 遥测、JPEG 图传和高频日志格式化，
-// 只保留启动/故障安全提示；速度规划与已验证的中线控制参数保持不变。
-constexpr bool kNoElementCompetitionMode = true;
-// [steer]/[vis] 日志与 8080 UDP 遥测共用此编译期开关。
-constexpr bool kSteerDebugPrintEnable = !kNoElementCompetitionMode;
+// 元素总开关保持开启：当前竞赛版需要环岛、十字等元素处理。
+// 该兼容开关只控制元素处理，不再承担日志/图传开关职责。
+constexpr bool kNoElementCompetitionMode = false;
+// 纯竞赛静默模式：关闭调试日志、8080 遥测、8081 JPEG 图传和本地竞赛帧采集，
+// 仅保留启动信息以及相机、IMU、编码器、看门狗等故障安全提示。
+constexpr bool kCompetitionQuietMode = true;
+constexpr bool kSteerDebugPrintEnable = !kCompetitionQuietMode;
+constexpr bool kElementDebugLogEnable = !kCompetitionQuietMode;
+constexpr bool kRaceFrameCaptureEnable = !kCompetitionQuietMode;
 constexpr int kSteerDebugPrintDivider = 10;
 
 // MPU6050 量程换算与零偏标定参数
@@ -278,8 +354,8 @@ constexpr int kStraightLeftLineMax = 3;          // 直道允许的左丢边数�
 constexpr int kStraightRightLineMax = 3;         // 直道允许的右丢边数，调大更宽松；右边界不稳定时同样先处理图像质量。
 
 // 稳定中心线重构：按边界可信度做补线，避免单侧丢线/宽度异常时中线乱飘。
-constexpr bool kRaceUdpDebugEnable = !kNoElementCompetitionMode; // 参赛版不初始化异常帧 JPEG UDP 图传。
-constexpr int kRaceUdpDebugMaxFrames = 600;       // 约5fps时覆盖完整120秒调试；仅异常帧触发，单次编码负载不变。
+constexpr bool kRaceUdpDebugEnable = !kCompetitionQuietMode; // 纯竞赛版不初始化异常帧 JPEG UDP 图传。
+constexpr int kRaceUdpDebugMaxFrames = 1200;      // 环岛异常期会逐帧发送；覆盖A>823的完整出环与离场过程。
 constexpr int kRaceUdpDebugIntervalFrames = 24;   // 120fps下约5fps，兼顾时序分辨率与JPEG编码/UDP负载。
 constexpr bool kBasicLineBaselineMode = false;    // 纯中线循迹也启用单侧边界中线重构，避免弯道丢一侧后中线贴边。
 constexpr bool kBasicCrossRepairEnable = false;   // 纯中线循迹不识别十字；十字与普通弯道统一依靠连续边界补线。

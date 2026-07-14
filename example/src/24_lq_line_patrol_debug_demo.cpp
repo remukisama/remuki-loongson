@@ -188,6 +188,34 @@ void lq_udp_center_line_send_one_frame(lq_udp_client &client, int quality)
         if (lx >= 0 && lx < 80) frame.at<cv::Vec3b>(y, lx) = cv::Vec3b(0, 0, 255);
         if (rx >= 0 && rx < 80) frame.at<cv::Vec3b>(y, rx) = cv::Vec3b(0, 255, 0);
     }
-    client.udp_send_image(frame, quality);
-}
 
+    cv::Mat enlarged;
+    cv::resize(frame, enlarged, cv::Size(320, 240), 0, 0, cv::INTER_NEAREST);
+    cv::Mat display_frame(300, 320, CV_8UC3, cv::Scalar(0, 0, 0));
+    enlarged.copyTo(display_frame(cv::Rect(0, 0, 320, 240)));
+    char text_buf[192];
+    std::snprintf(text_buf, sizeof(text_buf),
+                  "Road:%d R:%d S:%d SF:%d/%dms A:%d Y:%d",
+                  static_cast<int>(ImageStatus.Road_type),
+                  ImageFlag.image_element_rings,
+                  ImageFlag.image_element_rings_flag,
+                  g_ring_stage_frames,
+                  g_ring_stage_age_ms,
+                  g_ring_active_frames,
+                  g_ring_turn_yaw_mdeg.load(std::memory_order_relaxed) / 1000);
+    cv::putText(display_frame, text_buf, cv::Point(6, 257),
+                cv::FONT_HERSHEY_SIMPLEX, 0.42, cv::Scalar(0, 165, 255), 1);
+    std::snprintf(text_buf, sizeof(text_buf),
+                  "det:%d off:%d ll/rl:%d/%d",
+                  ImageStatus.Det_True, ImageStatus.OFFLine,
+                  ImageStatus.Left_Line, ImageStatus.Right_Line);
+    cv::putText(display_frame, text_buf, cv::Point(6, 275),
+                cv::FONT_HERSHEY_SIMPLEX, 0.38, cv::Scalar(255, 255, 0), 1);
+    std::snprintf(text_buf, sizeof(text_buf),
+                  "L:b%d g%d x%d c%d  R:b%d g%d x%d c%d",
+                  dbg_el_l_block, dbg_el_l_geom, dbg_el_l_loss, dbg_el_l_confirm,
+                  dbg_el_r_block, dbg_el_r_geom, dbg_el_r_loss, dbg_el_r_confirm);
+    cv::putText(display_frame, text_buf, cv::Point(6, 293),
+                cv::FONT_HERSHEY_SIMPLEX, 0.38, cv::Scalar(255, 255, 255), 1);
+    client.udp_send_image(display_frame, quality);
+}

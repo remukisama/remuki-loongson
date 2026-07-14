@@ -24,6 +24,7 @@ struct VisionSnapshot {
     int Road_type;
     int image_element_rings;
     int image_element_rings_flag;
+    int element_cooldown_frames;
     int Left_Line;
     int Right_Line;
     int straight_acc;
@@ -96,6 +97,7 @@ float dbg_near_control_error_px = 0.0f;
 float dbg_near_far_scale = 1.0f;
 int dbg_near_far_ambiguous = 0;
 int dbg_near_far_release_reason = 0;
+float dbg_ring_min_gyro_dps = 0.0f;
 
 // 姿�?航向 PID串级控制对象与IMU
 AttitudeCascade cascade_ctrl;
@@ -162,6 +164,7 @@ void control_mark_vision_frame_ready(void)
         g_vision_snapshot.Road_type = ImageStatus.Road_type;
         g_vision_snapshot.image_element_rings = ImageFlag.image_element_rings;
         g_vision_snapshot.image_element_rings_flag = ImageFlag.image_element_rings_flag;
+        g_vision_snapshot.element_cooldown_frames = g_element_cooldown_frames;
         g_vision_snapshot.Left_Line = ImageStatus.Left_Line;
         g_vision_snapshot.Right_Line = ImageStatus.Right_Line;
         g_vision_snapshot.straight_acc = ImageStatus.straight_acc;
@@ -530,6 +533,9 @@ void speed_dif_cascade(float inner_dt)
     static float near_center_persistent_add_dps = 0.0f;
     static float near_center_persistent_sign = 0.0f;
     static long long near_center_persistent_since_ms = 0;
+    static bool ring_control_active = false;
+    static int ring_control_stage = 0;
+    static int ring_control_side = 0;
 
     if (SystemData.Stop == 1) {
         Speed_Goal_l = 0.0f;
@@ -563,6 +569,9 @@ void speed_dif_cascade(float inner_dt)
         near_center_persistent_add_dps = 0.0f;
         near_center_persistent_sign = 0.0f;
         near_center_persistent_since_ms = 0;
+        ring_control_active = false;
+        ring_control_stage = 0;
+        ring_control_side = 0;
         cascade_ctrl.reset_runtime_state();
 
         dbg_steer_error = 0.0f;
@@ -594,6 +603,7 @@ void speed_dif_cascade(float inner_dt)
         dbg_near_far_scale = 1.0f;
         dbg_near_far_ambiguous = 0;
         dbg_near_far_release_reason = 0;
+        dbg_ring_min_gyro_dps = 0.0f;
         return;
     }
 
@@ -655,11 +665,31 @@ void speed_dif_cascade(float inner_dt)
         const long long current_frame_time_ms = g_control_last_vision_frame_ms.load(std::memory_order_acquire);
         const bool current_vision_is_cross =
             local_vision.Road_type == Cross || local_vision.Road_type == Cross_ture;
+        const bool current_vision_is_ring =
+            local_vision.image_element_rings != 0 ||
+            local_vision.Road_type == LeftCirque ||
+            local_vision.Road_type == RightCirque;
+        const bool ring_just_finished = ring_control_active && !current_vision_is_ring;
+        ring_control_active = current_vision_is_ring;
+        ring_control_stage = current_vision_is_ring ?
+            local_vision.image_element_rings_flag : 0;
+        ring_control_side = current_vision_is_ring ?
+            local_vision.image_element_rings : 0;
+        dbg_ring_min_gyro_dps = 0.0f;
+        if (ring_just_finished) {
+            target_gyro_z = 0.0f;
+            last_diff_slew = 0.0f;
+            steer_integral = 0.0f;
+            near_center_persistent_add_dps = 0.0f;
+            near_center_persistent_sign = 0.0f;
+            near_center_persistent_since_ms = 0;
+            cascade_ctrl.reset_runtime_state();
+        }
 
         // 弯道末端的近端中心仍明显偏向一侧时，即使远端Det已经回到中线，车头姿态也可能尚未摆正。
         // 只在边界可信的非十字帧记忆“近端中心-前瞻中心”，并在首次十字触发后短时反向对正。
         const bool approach_heading_valid =
-            !current_vision_is_cross &&
+            !current_vision_is_cross && !current_vision_is_ring &&
             local_vision.OFFLine <= car_config::kCrossEntryHeadingMaxOffline &&
             local_vision.NearLeftFound && local_vision.NearRightFound &&
             (local_vision.TowLeftFound || local_vision.TowRightFound);
@@ -837,7 +867,7 @@ void speed_dif_cascade(float inner_dt)
         const long long previous_near_ms = near_far_last_valid_near_ms;
         float near_center_error = 0.0f;
         const bool near_center_valid =
-            !current_vision_is_cross &&
+            !current_vision_is_cross && !current_vision_is_ring &&
             local_vision.OFFLine <= car_config::kNearCenterSteerMaxOffline &&
             local_vision.NearLeftFound && local_vision.NearRightFound;
         if (near_center_valid) {
@@ -1108,6 +1138,92 @@ void speed_dif_cascade(float inner_dt)
             visual_pid_out,
             -car_config::kSteerOutputLimitDps,
             car_config::kSteerOutputLimitDps);
+        if (current_vision_is_ring) {
+            float ring_gyro_limit = car_config::kRingSceneGyroLimitDps;
+            if (ring_control_stage <= 6) {
+                ring_gyro_limit = car_config::kRingEntryGyroLimitDps;
+            } else if (ring_control_stage == 7) {
+                // kRingInnerAdaptiveMaxGyroDps 不只是自适应下限的上界，也必须
+                // 限制最终视觉输出。164619刚入环时raw=+26把目标推到52dps，
+                // 实测64.6dps并原地绕圈，而配置声明的环内安全上限本来是39dps。
+                ring_gyro_limit = car_config::kRingInnerAdaptiveMaxGyroDps;
+            } else if (ring_control_stage == 8) {
+                ring_gyro_limit = car_config::kRingExitGyroLimitDps;
+            } else if (ring_control_stage == 9) {
+                ring_gyro_limit = car_config::kRingExitAlignGyroLimitDps;
+            }
+            visual_pid_out = clamp_float(
+                visual_pid_out, -ring_gyro_limit, ring_gyro_limit);
+
+            // 首轮实车证据：左环阶段5时OFFLine升至56，TowPoint中线残留在车头正前方，
+            // 目标横摆长期约0°/s，车辆直行穿过环岛。阶段5/6与环内阶段7因此增加
+            // 有方向的最小横摆；视觉输出若已给出更强的同向转弯则完全保留。
+            float ring_direction = 0.0f;
+            if (local_vision.image_element_rings == 1 ||
+                local_vision.Road_type == LeftCirque) {
+                // raw_steer_error = MiddleLine - Det_True：左侧目标为正，
+                // 必须与通用丢线方向保护的正号约定保持一致。
+                ring_direction = 1.0f;
+            } else if (local_vision.image_element_rings == 2 ||
+                       local_vision.Road_type == RightCirque) {
+                ring_direction = -1.0f;
+            }
+            float ring_turn_direction = ring_direction;
+            float ring_min_gyro = 0.0f;
+            if (ring_control_stage == 1) {
+                ring_min_gyro = car_config::kRingApproachMinGyroDps;
+            } else if (ring_control_stage == 5 || ring_control_stage == 6) {
+                ring_min_gyro = car_config::kRingTurnInMinGyroDps;
+            } else if (ring_control_stage == 7) {
+                // 左环raw<0、右环raw>0表示视觉目标位于环外侧。旧版在
+                // -4/+6px阈值处把下限在24/36/39dps之间瞬切，实车表现为
+                // 先外切再内切。改为非对称连续增益，同时保留前后半圈安全下限。
+                const float ring_center_error =
+                    ring_direction * raw_steer_error;
+                const float ring_turn_yaw_deg = 0.001f * static_cast<float>(
+                    g_ring_turn_yaw_mdeg.load(std::memory_order_relaxed));
+                const bool late_orbit =
+                    ring_turn_yaw_deg >= car_config::kRingInnerLateReliefYawDeg ||
+                    g_ring_stage_age_ms >= car_config::kRingInnerLateReliefMinMs;
+                const float adaptive_floor = late_orbit ?
+                    car_config::kRingInnerAdaptiveLateMinGyroDps :
+                    car_config::kRingInnerAdaptiveEarlyMinGyroDps;
+                const float adaptive_gain = (ring_center_error < 0.0f) ?
+                    car_config::kRingInnerOutwardGainDpsPerPx :
+                    car_config::kRingInnerInwardGainDpsPerPx;
+                ring_min_gyro = clamp_float(
+                    car_config::kRingInnerMinGyroDps +
+                        adaptive_gain * ring_center_error,
+                    adaptive_floor,
+                    car_config::kRingInnerAdaptiveMaxGyroDps);
+            } else if (ring_control_stage == 8) {
+                // 出口方向交还补线决定；同向视觉允许发挥到出口上限，反向
+                // 另行限制为低幅，避免旧版从+42直接硬翻到-32。
+                ring_turn_direction = 0.0f;
+            } else if (ring_control_stage == 9) {
+                ring_turn_direction = 0.0f;
+            }
+            if (ring_direction != 0.0f &&
+                (ring_control_stage == 8 || ring_control_stage == 9)) {
+                const float opposite_limit = (ring_control_stage == 8) ?
+                    car_config::kRingExitOppositeGyroLimitDps :
+                    car_config::kRingExitAlignOppositeGyroLimitDps;
+                if (ring_direction * visual_pid_out < -opposite_limit) {
+                    visual_pid_out = -ring_direction * opposite_limit;
+                }
+            }
+            if (ring_turn_direction != 0.0f && ring_min_gyro > 0.0f) {
+                dbg_ring_min_gyro_dps = ring_turn_direction * ring_min_gyro;
+                if (ring_turn_direction * visual_pid_out < ring_min_gyro) {
+                    visual_pid_out = dbg_ring_min_gyro_dps;
+                }
+            }
+
+            // 环岛阶段由独立状态机和补线接管。通用单侧丢线锁向来自补线前的
+            // 原始误差，不能覆盖入口/环内曲率或出口的低幅视觉对正。
+            guarded_turn_sign = 0.0f;
+            guarded_turn_release_ratio = 0.0f;
+        }
 
         target_gyro_z = visual_pid_out;
 
@@ -1153,6 +1269,18 @@ void speed_dif_cascade(float inner_dt)
             speed_to_plan = car_config::kSingleSideLossSpeedGoal;
         } else if (det_stuck_with_loss) {
             speed_to_plan = car_config::kDetStuckSpeedGoal;
+        }
+
+        if (current_vision_is_ring) {
+            const float ring_speed_goal = (ring_control_stage >= 8) ?
+                car_config::kRingExitSpeedGoal : car_config::kRingSpeedGoal;
+            speed_to_plan = (local_vision.OFFLine > 50) ?
+                car_config::kDegradedSpeedGoal : ring_speed_goal;
+        }
+
+        if (!current_vision_is_ring && local_vision.element_cooldown_frames > 0 &&
+            speed_to_plan > car_config::kRingExitSpeedGoal) {
+            speed_to_plan = car_config::kRingExitSpeedGoal;
         }
 
         if (!current_vision_is_cross &&
@@ -1221,6 +1349,13 @@ void speed_dif_cascade(float inner_dt)
             if (slew < -max_slew) visual_diff = last_diff_slew - max_slew;
             last_diff_slew = visual_diff;
         }
+        if (ring_control_active) {
+            const float ring_diff_limit =
+                ring_control_stage <= 6 ? car_config::kRingEntryMaxDiff :
+                                          car_config::kRingMaxDiff;
+            visual_diff = clamp_float(visual_diff, -ring_diff_limit, ring_diff_limit);
+            last_diff_slew = visual_diff;
+        }
 
         // IMU fallback 保持基线验证过的降级速度，不随正常弯道提速。
         if (planned_speed_goal > car_config::kDegradedSpeedGoal) {
@@ -1248,6 +1383,24 @@ void speed_dif_cascade(float inner_dt)
 
     dbg_imu_ok = 1;
     const float diff_speed = cascade_ctrl.calc_diff_speed_bypass_angle(target_gyro_z, imu_data, inner_dt);
+    if (ring_control_active && ring_control_stage >= 5 &&
+        ring_control_stage <= 7 && ring_control_side != 0) {
+        const float ring_direction = ring_control_side == 1 ? 1.0f : -1.0f;
+        const float progress_rate =
+            ring_direction * cascade_ctrl.last_filtered_gyro_z();
+        if (progress_rate > 0.0f && inner_dt > 0.0f && inner_dt < 0.1f) {
+            const int delta_mdeg = static_cast<int>(
+                std::lround(progress_rate * inner_dt * 1000.0f));
+            if (delta_mdeg > 0) {
+                const int current_mdeg =
+                    g_ring_turn_yaw_mdeg.load(std::memory_order_relaxed);
+                const int next_mdeg = std::min(
+                    360000, current_mdeg + delta_mdeg);
+                g_ring_turn_yaw_mdeg.store(next_mdeg,
+                                           std::memory_order_relaxed);
+            }
+        }
+    }
     float guarded_diff_speed = diff_speed;
     if (guarded_turn_sign != 0.0f && guarded_diff_speed * guarded_turn_sign < 0.0f) {
         float release_limit = (Speed_Goal - min_wheel_for_diff) *
@@ -1274,6 +1427,13 @@ void speed_dif_cascade(float inner_dt)
             guarded_diff_speed = car_config::kDeadbandDiffLimit;
         if (guarded_diff_speed < -car_config::kDeadbandDiffLimit)
             guarded_diff_speed = -car_config::kDeadbandDiffLimit;
+    }
+    if (ring_control_active) {
+        const float ring_diff_limit =
+            ring_control_stage <= 6 ? car_config::kRingEntryMaxDiff :
+                                      car_config::kRingMaxDiff;
+        guarded_diff_speed = clamp_float(
+            guarded_diff_speed, -ring_diff_limit, ring_diff_limit);
     }
 
     // 差速输出变化率限制：按inner_dt时间归一化，抑制逐帧翻转自激
@@ -1329,9 +1489,9 @@ void speed_dif_cascade(float inner_dt)
                                           car_config::kRaceTelemetryUdpPort);
                 steer_udp_ready = true;
             }
-            char udp_buf[768];
+            char udp_buf[1024];
             int udp_len = std::snprintf(udp_buf, sizeof(udp_buf),
-                "steer,det=%d,mid=%d,raw=%.1f,err=%.1f,dE=%.1f,tgt=%.1f,hErr=%.1f,xAdd=%.1f,xOn=%d,nErr=%.1f,nUse=%.1f,nAdd=%.1f,nBias=%.1f,fSc=%.2f,nfAmb=%d,nfRel=%d,gz=%.1f,fgz=%.1f,ge=%.1f,dRaw=%.3f,dCmd=%.3f,dLim=%.3f,goal=%.2f,L=%.2f,R=%.2f,encL=%.2f,encR=%.2f,seL=%.3f,seR=%.3f,pwmL=%.0f,pwmR=%.0f,dt=%.3f,imu=%d,db=%d,off=%d,ll=%d,rl=%d,wl=%d,tp=%d,tpC=%d,tpL=%d,tpR=%d,tpLF=%d,tpRF=%d,nC=%d,nL=%d,nR=%d,nLF=%d,nRF=%d,rt=%d,sa=%d\n",
+                "steer,det=%d,mid=%d,raw=%.1f,err=%.1f,dE=%.1f,tgt=%.1f,hErr=%.1f,xAdd=%.1f,xOn=%d,nErr=%.1f,nUse=%.1f,nAdd=%.1f,nBias=%.1f,fSc=%.2f,nfAmb=%d,nfRel=%d,gz=%.1f,fgz=%.1f,ge=%.1f,dRaw=%.3f,dCmd=%.3f,dLim=%.3f,goal=%.2f,L=%.2f,R=%.2f,encL=%.2f,encR=%.2f,seL=%.3f,seR=%.3f,pwmL=%.0f,pwmR=%.0f,dt=%.3f,imu=%d,db=%d,off=%d,ll=%d,rl=%d,wl=%d,tp=%d,tpC=%d,tpL=%d,tpR=%d,tpLF=%d,tpRF=%d,nC=%d,nL=%d,nR=%d,nLF=%d,nRF=%d,rt=%d,sa=%d,ring=%d,rs=%d,rsf=%d,rsa=%d,rmin=%.1f,raf=%d,rdet=%d,xlock=%d,xclear=%d,cool=%d,rlow=%d,ryaw=%.1f,lB=%d,lG=%d,lX=%d,lS=%d,lC=%d,lP1=%d,lP2=%d,rB=%d,rG=%d,rX=%d,rS=%d,rC=%d,rP1=%d,rP2=%d\n",
                 ImageStatus.Det_True, ImageStatus.MiddleLine, raw_steer_error, dbg_steer_error,
                 dbg_diff_steer, dbg_target_gyro_z, dbg_cross_heading_error_px,
                 dbg_cross_align_dps, dbg_cross_align_active,
@@ -1345,7 +1505,20 @@ void speed_dif_cascade(float inner_dt)
                 dbg_speed_err_r, speed_out_l, speed_out_r, dbg_dt, dbg_imu_ok,
                 dbg_deadband_active, ImageStatus.OFFLine, ImageStatus.Left_Line,
                 ImageStatus.Right_Line, ImageStatus.WhiteLine, tp, tp_c, tp_l, tp_r, tp_lf, tp_rf, n_c, n_l,
-                n_r, n_lf, n_rf, (int)ImageStatus.Road_type, ImageStatus.straight_acc);
+                n_r, n_lf, n_rf, (int)ImageStatus.Road_type, ImageStatus.straight_acc,
+                ImageFlag.image_element_rings, ImageFlag.image_element_rings_flag,
+                g_ring_stage_frames, g_ring_stage_age_ms,
+                dbg_ring_min_gyro_dps, g_ring_active_frames, dbg_el_detect_open,
+                g_ring_cross_exit_lock_frames,
+                g_ring_cross_exit_clear_frames,
+                g_element_cooldown_frames,
+                g_ring_inner_lower_missing,
+                0.001f * static_cast<float>(
+                    g_ring_turn_yaw_mdeg.load(std::memory_order_relaxed)),
+                dbg_el_l_block, dbg_el_l_geom, dbg_el_l_loss, dbg_el_l_susp,
+                dbg_el_l_confirm, dbg_el_l_p1, dbg_el_l_p2,
+                dbg_el_r_block, dbg_el_r_geom, dbg_el_r_loss, dbg_el_r_susp,
+                dbg_el_r_confirm, dbg_el_r_p1, dbg_el_r_p2);
             if (udp_len > 0) steer_udp.udp_send(udp_buf, (size_t)udp_len);
             printf("[steer] det:%d mid:%d raw:%.1f err:%.1f dE:%.1f tgt:%.1f gz:%.1f ge:%.1f dRaw:%.3f dCmd:%.3f dLim:%.3f goal:%.2f L:%.2f R:%.2f encL:%.2f encR:%.2f seL:%.3f seR:%.3f pwmL:%.0f pwmR:%.0f dt:%.3f imu:%d db:%d off:%d ll:%d rl:%d\n",
                    ImageStatus.Det_True,
@@ -1375,11 +1548,23 @@ void speed_dif_cascade(float inner_dt)
                    ImageStatus.Left_Line,
                    ImageStatus.Right_Line);
             // 视觉诊断行：TowPoint/近端行的边界信息 + Road_type
-            printf("[vis] tp:%d tpC:%d tpL:%d tpR:%d tpLF:%d tpRF:%d nC:%d nL:%d nR:%d nLF:%d nRF:%d rt:%d sa:%d\n",
+            printf("[vis] tp:%d tpC:%d tpL:%d tpR:%d tpLF:%d tpRF:%d nC:%d nL:%d nR:%d nLF:%d nRF:%d rt:%d sa:%d ring:%d stage:%d sf:%d age:%d rmin:%.1f active:%d xlock:%d xclear:%d cool:%d lower:%d yaw:%.1f candL:%d/%d candR:%d/%d\n",
                    tp, tp_c, tp_l, tp_r, tp_lf, tp_rf,
                    n_c, n_l, n_r, n_lf, n_rf,
                    (int)ImageStatus.Road_type,
-                   ImageStatus.straight_acc);
+                   ImageStatus.straight_acc,
+                   ImageFlag.image_element_rings,
+                   ImageFlag.image_element_rings_flag,
+                   g_ring_stage_frames, g_ring_stage_age_ms,
+                   dbg_ring_min_gyro_dps, g_ring_active_frames,
+                   g_ring_cross_exit_lock_frames,
+                   g_ring_cross_exit_clear_frames,
+                   g_element_cooldown_frames,
+                   g_ring_inner_lower_missing,
+                   0.001f * static_cast<float>(
+                       g_ring_turn_yaw_mdeg.load(std::memory_order_relaxed)),
+                   dbg_el_l_geom || dbg_el_l_loss, dbg_el_l_confirm,
+                   dbg_el_r_geom || dbg_el_r_loss, dbg_el_r_confirm);
         }
     }
 }
