@@ -129,7 +129,11 @@ constexpr float kSpeedPlanDerivWeight = 0.15f;      // 降低瞬时偏差变化�
 constexpr float kVisionLossSlowStart = 14.0f;       // 轻微边界缺失不再过早降速。
 constexpr float kVisionLossFullCurve = 34.0f;       // 严重视觉退化时才降到完整弯道速度。
 
-constexpr bool kSteerDebugPrintEnable = true;
+// T02 无元素参赛版：关闭竞赛循环中的 UDP 遥测、JPEG 图传和高频日志格式化，
+// 只保留启动/故障安全提示；速度规划与已验证的中线控制参数保持不变。
+constexpr bool kNoElementCompetitionMode = true;
+// [steer]/[vis] 日志与 8080 UDP 遥测共用此编译期开关。
+constexpr bool kSteerDebugPrintEnable = !kNoElementCompetitionMode;
 constexpr int kSteerDebugPrintDivider = 10;
 
 // MPU6050 量程换算与零偏标定参数
@@ -274,7 +278,7 @@ constexpr int kStraightLeftLineMax = 3;          // 直道允许的左丢边数�
 constexpr int kStraightRightLineMax = 3;         // 直道允许的右丢边数，调大更宽松；右边界不稳定时同样先处理图像质量。
 
 // 稳定中心线重构：按边界可信度做补线，避免单侧丢线/宽度异常时中线乱飘。
-constexpr bool kRaceUdpDebugEnable = true;        // car 调试模式：只在异常视觉帧稀疏发送 JPEG 图传。
+constexpr bool kRaceUdpDebugEnable = !kNoElementCompetitionMode; // 参赛版不初始化异常帧 JPEG UDP 图传。
 constexpr int kRaceUdpDebugMaxFrames = 600;       // 约5fps时覆盖完整120秒调试；仅异常帧触发，单次编码负载不变。
 constexpr int kRaceUdpDebugIntervalFrames = 24;   // 120fps下约5fps，兼顾时序分辨率与JPEG编码/UDP负载。
 constexpr bool kBasicLineBaselineMode = false;    // 纯中线循迹也启用单侧边界中线重构，避免弯道丢一侧后中线贴边。

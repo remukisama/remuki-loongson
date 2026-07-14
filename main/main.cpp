@@ -395,7 +395,9 @@ int main(int argc, char **argv)
         }
 
         imageprocess();
-        lq_vision_capture_maybe_save_race_frame(udp_frame_count);
+        if (!car_config::kNoElementCompetitionMode) {
+            lq_vision_capture_maybe_save_race_frame(udp_frame_count);
+        }
         control_mark_vision_frame_ready();
 
         if (ncnn_observe_ready && (udp_frame_count % ncnn_observe_interval) == 0) {

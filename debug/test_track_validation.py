@@ -41,6 +41,39 @@ def sample(host_t: float, target: float) -> dict[str, float]:
 
 
 class TrackValidationTests(unittest.TestCase):
+    def test_no_element_competition_profile_keeps_t02_speed_and_disables_debug_io(self) -> None:
+        config = (ROOT / "user_app" / "include" / "car_config.hpp").read_text(encoding="utf-8")
+        main = (ROOT / "main" / "main.cpp").read_text(encoding="utf-8")
+        motor = (ROOT / "user_app" / "src" / "my_motor.cpp").read_text(
+            encoding="utf-8", errors="surrogateescape"
+        )
+
+        self.assertIn("constexpr bool kNoElementCompetitionMode = true;", config)
+        self.assertIn(
+            "constexpr bool kSteerDebugPrintEnable = !kNoElementCompetitionMode;",
+            config,
+        )
+        self.assertIn(
+            "constexpr bool kRaceUdpDebugEnable = !kNoElementCompetitionMode;",
+            config,
+        )
+        self.assertIn("constexpr bool kNcnnObserveEnable = false;", config)
+        self.assertIn("constexpr float kBaseSpeedGoal = 0.74f;", config)
+        self.assertIn("constexpr float kCurveSpeedGoal = 0.50f;", config)
+        self.assertIn("g_enable_element_process = false;", main)
+        self.assertIn(
+            "if (!car_config::kNoElementCompetitionMode) {\n"
+            "            lq_vision_capture_maybe_save_race_frame(udp_frame_count);\n"
+            "        }",
+            main,
+        )
+
+        telemetry_guard = motor.index("if (car_config::kSteerDebugPrintEnable) {")
+        telemetry_send = motor.index("steer_udp.udp_send", telemetry_guard)
+        telemetry_block_end = motor.index("\n    }\n}\n", telemetry_send)
+        self.assertLess(telemetry_guard, telemetry_send)
+        self.assertLess(telemetry_send, telemetry_block_end)
+
     def test_live_capture_targets_board_and_times_active_telemetry(self) -> None:
         capture = (ROOT / "debug" / "run_car_live_capture.py").read_text(encoding="utf-8")
         self.assertIn('BOARD = "root@192.168.145.100"', capture)
