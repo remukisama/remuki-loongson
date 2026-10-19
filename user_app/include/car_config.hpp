@@ -11,7 +11,7 @@ namespace car_config
 // 换算: m/s = 电机RPS * (30/68) * pi * 0.064 ~= RPS * 0.08870
 // =====================================================================
 constexpr float kEncoderRpsToMS = 0.08870f;
-constexpr int kMotorPwmFrequencyHz = 25000;
+constexpr int kMotorPwmFrequencyHz = 8000;
 // DRV8701E uses PH/EN control: PWM drives EN directly.
 // ATIM mode 1 makes software duty match output high duty:
 // duty 0 keeps EN low and brakes/stops; duty 10000 is full drive.
@@ -37,7 +37,13 @@ constexpr int kMotorMaxPwm = 8000;
 constexpr float kSpeedBrakeThreshold = 0.03f;
 constexpr float kSpeedBrakeMaxPwm = 0.0f;
 constexpr float kSpeedTurnBrakeMaxPwm = -1200.0f;
-constexpr float kBaseSpeedGoal = 0.74f;           // 激进提速：直线目标相对0.42基线提高约76%，用短时实跑逐级验证。
+constexpr float kBaseSpeedGoal = 0.94f;           // 激进提速：直线目标相对0.42基线提高约76%，用短时实跑逐级验证。
+constexpr int kStartButtonPin = 44;                // 母板按键0：GPIO44（UART2_TX复用脚，运行时切回GPIO输入）。
+constexpr int kStartButtonActiveLevel = 1;         // 原板按键电路与旧代码均为高电平按下。
+constexpr int kStartButtonDebounceMs = 35;         // 释放、按下均需稳定35ms，过滤机械抖动。
+constexpr int kStartButtonPollMs = 5;
+constexpr int kStartupStraightDurationMs = 1000;  // car模式首个有效视觉帧后先直行1s，再交还循迹/元素控制。
+constexpr float kStartupStraightSpeedGoal = kBaseSpeedGoal; // 启动直行沿用当前已验证的直道速度。
 constexpr float kMaxWheelSpeedGoal = 4.0f;
 
 // [1/3] 视觉外环 PID: 中线偏差 -> 目标角速度

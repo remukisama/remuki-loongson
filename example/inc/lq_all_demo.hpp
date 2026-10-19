@@ -45,6 +45,8 @@ int lq_gyro_rate_pid_tune_demo(void);     // 41. 无电机纯陀螺仪角速度�
 int lq_gyro_motor_pid_tune_demo(int argc, char **argv); // 42. 电机参与角速度环调参
 int lq_diff_speed_test_demo(void);                       // 43. 差速执行测试
 int lq_channel_check_demo(void);                         // 44. 四路通道确认（架空专用）
+int lq426xxm_test_demo(void);                            // 45. LQ426xxM I2C functional diagnostic
+int lq426xxm_performance_demo(void);                     // LQ426xxM 1 kHz performance diagnostic
 void lq_parameter_step_tuning_demo(void); // 33. PARAMETER_TUNING_METHODS.md 一体化分步调参Demo
 void lq_parameter_step_interactive_demo(void); // 33. 交互式分步调试入口（输入编号运行对应测试）
 int lq_left_ring_exit_recommend_demo(void); // 34. 左环岛出环防兜圈专项Demo

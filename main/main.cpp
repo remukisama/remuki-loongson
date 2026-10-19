@@ -12,9 +12,93 @@
 
 const auto timer_interval_1 = std::chrono::milliseconds(5);
 
+namespace {
+enum StartButtonWaitResult {
+    kStartButtonExitRequested = 0,
+    kStartButtonPressed = 1,
+    kStartButtonCameraFailure = -1,
+    kStartButtonGpioFailure = -2,
+};
+
+int wait_for_start_button0()
+{
+    ls_gpio start_button(
+        static_cast<gpio_pin_t>(car_config::kStartButtonPin),
+        GPIO_MODE_IN,
+        GPIO_MUX_GPIO);
+    const gpio_level_t active_level = static_cast<gpio_level_t>(
+        car_config::kStartButtonActiveLevel);
+    const gpio_level_t inactive_level =
+        active_level == GPIO_HIGH ? GPIO_LOW : GPIO_HIGH;
+
+    gpio_level_t stable_level = GPIO_LEVEL_INVALID;
+    auto stable_since = std::chrono::steady_clock::now();
+    bool released_and_armed = false;
+    int camera_fail_count = 0;
+
+    std::printf("[START_BUTTON] GPIO%d waiting: release button0, then press once to launch.\n",
+                car_config::kStartButtonPin);
+    std::fflush(stdout);
+
+    while (!exit_flag.load(std::memory_order_relaxed)) {
+        gpio_protect_heartbeat_pulse();
+
+        const char frame_ok = image_cv_zip();
+        if (!frame_ok) {
+            ++camera_fail_count;
+            if (camera_fail_count > 5) {
+                std::printf("[START_BUTTON][FATAL] camera frame failed repeatedly while waiting.\n");
+                return kStartButtonCameraFailure;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(
+                car_config::kStartButtonPollMs));
+            continue;
+        }
+        camera_fail_count = 0;
+
+        // 等待期间持续预热相机与基础视觉，但元素识别在调用方保持关闭。
+        imageprocess();
+
+        const gpio_level_t level = start_button.gpio_level_get();
+        if (level == GPIO_LEVEL_INVALID) {
+            std::printf("[START_BUTTON][FATAL] GPIO%d read failed.\n",
+                        car_config::kStartButtonPin);
+            return kStartButtonGpioFailure;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (level != stable_level) {
+            stable_level = level;
+            stable_since = now;
+        }
+        const auto stable_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - stable_since).count();
+
+        if (!released_and_armed &&
+            stable_level == inactive_level &&
+            stable_ms >= car_config::kStartButtonDebounceMs) {
+            released_and_armed = true;
+            std::printf("[START_BUTTON] armed; press button0 to launch.\n");
+            std::fflush(stdout);
+        } else if (released_and_armed &&
+                   stable_level == active_level &&
+                   stable_ms >= car_config::kStartButtonDebounceMs) {
+            std::printf("[START_BUTTON] button0 pressed; launch accepted.\n");
+            std::fflush(stdout);
+            return kStartButtonPressed;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(
+            car_config::kStartButtonPollMs));
+    }
+
+    return kStartButtonExitRequested;
+}
+} // namespace
+
 static void print_usage(const char *program)
 {
-    std::printf("Usage: %s --mode=<car|vision-capture|element-observe|motor-pwm-test|encoder-hand-test|forward-pwm-sweep|speed-loop-step|udp-pid-autotune|motor-id|gyro-rate-tune|gyro-motor-tune> [--unsafe-dev-mode] [--sine] [--speed=<m/s>] [--display=<udp|tft|both>]\n", program);
+    std::printf("Usage: %s --mode=<car|vision-capture|element-observe|motor-pwm-test|encoder-hand-test|forward-pwm-sweep|speed-loop-step|lq426xxm-test|lq426xxm-perf|udp-pid-autotune|motor-id|gyro-rate-tune|gyro-motor-tune> [--unsafe-dev-mode] [--sine] [--speed=<m/s>] [--display=<udp|tft|both>]\n", program);
     std::printf("  --mode=car             competition control mode\n");
     std::printf("  --mode=vision-capture  camera/vision capture diagnostic without motor drive\n");
     std::printf("  --mode=element-observe element observation (no motor): --display=udp|tft|both\n");
@@ -22,6 +106,9 @@ static void print_usage(const char *program)
     std::printf("  --mode=encoder-hand-test read-only hand-push encoder diagnostic\n");
     std::printf("  --mode=forward-pwm-sweep forward-only PWM startup sweep\n");
     std::printf("  --mode=speed-loop-step   airborne wheel-speed PI step diagnostic\n");
+    std::printf("  --mode=lq426xxm-test    sensor-only LQ426xxM/ICM426xx I2C diagnostic (no motor/camera)\n");
+    std::printf("  --mode=lq426xxm-perf    LQ426xxM 1 kHz throughput, latency, jitter, and noise test\n");
+    std::printf("  --mode=icm42605-test    legacy alias for lq426xxm-test\n");
     std::printf("  --mode=udp-pid-autotune  UDP wireless LLM auto PID tuning\n");
     std::printf("  --mode=motor-id          motor identification: PWM step sweep for load model\n");
     std::printf("  --mode=gyro-rate-tune    gyro rate PID tuning (no motor, IMU only)\n");
@@ -80,6 +167,19 @@ int main(int argc, char **argv)
     if (run_mode == "help") {
         print_usage(argv[0]);
         return 0;
+    }
+
+    if (run_mode == "lq426xxm-test" || run_mode == "lq426xxm-perf" ||
+        run_mode == "icm42605-test") {
+        signal(SIGINT, signal_handler);
+        signal(SIGTERM, signal_handler);
+        signal(SIGHUP, signal_handler);
+        signal(SIGQUIT, signal_handler);
+        signal(SIGPIPE, SIG_IGN);
+        if (run_mode == "lq426xxm-perf") {
+            return lq426xxm_performance_demo();
+        }
+        return lq426xxm_test_demo();
     }
 
     gpio_protect_heartbeat_init();
@@ -351,6 +451,25 @@ int main(int argc, char **argv)
         std::printf("[MAIN][FATAL] camera init failed; car mode refused.\n");
         return 5;
     }
+
+    // 发车前保持电机零输出，同时预热相机和基础视觉。必须先观察到稳定释放，
+    // 再接受一次稳定按下，避免程序启动时按键被按住或输入异常导致误发车。
+    g_enable_element_process = false;
+    const int start_button_result = wait_for_start_button0();
+    if (start_button_result != kStartButtonPressed) {
+        emergency_stop();
+        gpio_protect_heartbeat_deinit();
+        if (start_button_result == kStartButtonExitRequested) {
+            std::printf("[MAIN][CAR] start-button wait cancelled.\n");
+            return 0;
+        }
+        return 6;
+    }
+
+    // 清除等待阶段积累的视觉/元素状态；首个新帧随后触发1秒直线发车阶段。
+    Data_Settings();
+    control_reset_vision_health();
+    motion_feedback_guard_reset();
 
     g_enable_element_process = !car_config::kNoElementCompetitionMode;
     std::printf("[RACE_MODE] element process %s, main loop enabled.\n",
