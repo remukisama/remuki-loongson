@@ -6,7 +6,8 @@
 struct i2c_client    *main_client;  // 创建一个全局的 iic 客户端设备结构体
 struct ls_cycle_data  all_timer;    // 定义循环检测设备所需定时器结构
 
-static bool is_init = true;         // 设备是否初始化标志位
+static bool is_init;                // 设备是否初始化标志位
+static bool is_stopping;            // 模块卸载时阻止定时器和工作队列重入
 
 /***************************** 文件操作指针集 -- 提供给上层接口 *****************************/
 static const struct file_operations i2c_ops = {
@@ -44,6 +45,8 @@ static struct i2c_driver i2c_drv = {
  ********************************************************************************/
 int device_init(struct ls_i2c_dev *dev)
 {
+    int ret;
+
     // 参数校验
     if (dev == NULL) {
         pr_err("%s: device_init dev is null\n", DEVICE_NAME);
@@ -52,12 +55,13 @@ int device_init(struct ls_i2c_dev *dev)
     // 获取陀螺仪 ID
     if (lq_i2c_icm42688_get_id(dev) == ICM42688_WHO_AM_I) {
         // 初始化ICM42688设备
-        if (lq_i2c_icm42688_init(dev) != 0) {
-            return -1;
-        }
+        ret = lq_i2c_icm42688_init(dev);
+        if (ret)
+            return ret;
         printk("%s: device_init -> init success, addr=0x%x\n", DEVICE_NAME, ICM42688_WHO_AM_I);
     } else {
         pr_err("%s: device_init -> init failed, addr=0x%x\n", DEVICE_NAME, ICM42688_WHO_AM_I);
+        return -ENODEV;
     }
     return 0;
 }
@@ -101,7 +105,8 @@ void cycle_detection_timer_callback(struct timer_list *timer)
     // 从timer指针反响解析出整个自定义结构体
     struct ls_cycle_data *data = container_of(timer, struct ls_cycle_data, cycle_detection);
     // 提交工作队列任务
-    schedule_work(&data->work);
+    if (!READ_ONCE(is_stopping) && data->wq)
+        queue_work(data->wq, &data->work);
 }
 
 /********************************************************************************
@@ -114,10 +119,15 @@ void cycle_work_handler(struct work_struct *work)
 {
     // 从work指针反响解析出整个自定义结构体
     struct ls_cycle_data *data = container_of(work, struct ls_cycle_data, work);
+    if (READ_ONCE(is_stopping))
+        return;
+
     // 循环检测设备逻辑代码
     device_inspection(data->Dev, device_init);
     // 重置定时器，实现下一次循环
-    mod_timer(&all_timer.cycle_detection, jiffies + msecs_to_jiffies(DETECT_INTERVAL_MS));
+    if (!READ_ONCE(is_stopping))
+        mod_timer(&all_timer.cycle_detection,
+                  jiffies + msecs_to_jiffies(DETECT_INTERVAL_MS));
 }
 
 /************************************ 上层接口的函数实现 ************************************/
@@ -152,6 +162,7 @@ long i2c_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
     uint8_t ID = 0;         // 设备ID，用于存放获取到的设备ID值
     int16_t data[6] = {0};  // 存放各种数据的数组
+    int ret;
     // 从 file 结构体中获取对应的字符设备结构体 cdev，cdev 结构体代表了字符设备在内核中的抽象表现
     struct cdev *cdev = f->f_path.dentry->d_inode->i_cdev;
     // 使用 container_of 宏根据 cdev 结构体的地址找到自定义结构体的地址
@@ -171,22 +182,28 @@ long i2c_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
                 return -EFAULT;
             break;
         case I2C_GET_ICM42688_ANG:  // 获取ICM42688的角速度值
-            icm42688_get_gyro_data(dev, data);
+            ret = icm42688_get_gyro_data(dev, data);
+            if (ret)
+                return ret;
             if (copy_to_user((int16_t*)arg, data, sizeof(data[0]) * 3))
                 return -EFAULT;
             break;
         case I2C_GET_ICM42688_ACC:  // 获取ICM42688的陀螺仪值
-            icm42688_get_accelerometer(dev, data);
+            ret = icm42688_get_accelerometer(dev, data);
+            if (ret)
+                return ret;
             if (copy_to_user((int16_t*)arg, data, sizeof(data[0]) * 3))
                 return -EFAULT;
             break;
         case I2C_GET_ICM42688_GYRO:  // 获取ICM42688的加速度、陀螺仪、温度值
-            icm42688_get_raw_data(dev, data);
+            ret = icm42688_get_raw_data(dev, data);
+            if (ret)
+                return ret;
             if (copy_to_user((int16_t*)arg, data, sizeof(data[0]) * 6))
                 return -EFAULT;
             break;
         default:
-            return -EFAULT;
+            return -ENOTTY;
     }
     return 0;
 }
@@ -269,12 +286,14 @@ int i2c_probe(struct i2c_client *client, const struct i2c_device_id *id)
     // 创建一个设备类，设备类用于在/sys/class目录下创建对应的目录，方便用户空间对设备进行管理
     ls_i2c->class = class_create(THIS_MODULE, DEVICE_NAME);
     if (IS_ERR(ls_i2c->class)) {
+        ret = PTR_ERR(ls_i2c->class);
         pr_err("%s: class_create failed, ret = %d!\n", DEVICE_NAME, ret);
         goto del_cdev;
     }
     // 用于在 /dev 目录下创建一个设备节点，用户空间程序可以通过该节点与设备进行交互
     ls_i2c->device = device_create(ls_i2c->class, NULL, ls_i2c->dev_id, NULL, DEVICE_NAME);
     if (IS_ERR(ls_i2c->device)) {
+        ret = PTR_ERR(ls_i2c->device);
         pr_err("%s: device_create failed, ret = %d!\n", DEVICE_NAME, ret);
         goto destroy_class;
     }
@@ -284,11 +303,20 @@ int i2c_probe(struct i2c_client *client, const struct i2c_device_id *id)
     i2c_set_clientdata(client, ls_i2c);
     // 保存 I2C 适配器指针
     ls_i2c->adapter = client->adapter;
-    // device_init(ls_i2c);
+    WRITE_ONCE(is_stopping, false);
+    is_init = false;
+    ret = device_init(ls_i2c);
+    if (ret) {
+        pr_err("%s: sensor initialization failed during probe, ret=%d\n",
+               DEVICE_NAME, ret);
+        goto destory_device;
+    }
+    is_init = true;
     // 开启定时器
     {
-        data->wq = create_workqueue("icm42688_cycle_wq");
+        data->wq = create_singlethread_workqueue("icm42688_cycle_wq");
         if (!data->wq) {
+            ret = -ENOMEM;
             pr_err("%s: create_workqueue failed, ret = %d!\n", DEVICE_NAME, ret);
             goto destory_device;
         }
@@ -307,7 +335,7 @@ destory_device: device_destroy(ls_i2c->class, ls_i2c->dev_id);          // 注�
 destroy_class:  class_destroy(ls_i2c->class);                           // 注销之前创建的设备类
 del_cdev:       cdev_del(&ls_i2c->cdev);                                // 从内核的字符设备管理系统中删除指定的字符设备
 del_unregister: unregister_chrdev_region(ls_i2c->dev_id, DEVICE_CNT);   // 注销之前分配的字符设备编号
-    return -EIO;
+    return ret;
 }
 
 /********************************************************************************
@@ -320,11 +348,11 @@ int i2c_remove(struct i2c_client *c)
 {
     struct ls_cycle_data *data = &all_timer;                // 获取定时器结构体的指针
     struct ls_i2c_dev *ls_i2c = i2c_get_clientdata(c);      // 获取与 i2c_client 结构体关联的设备私有数据
-    if (data) {
-        del_timer(&data->cycle_detection);                  // 停止定时器，避免继续提交工作
-    }
+    WRITE_ONCE(is_stopping, true);
+    if (data)
+        del_timer_sync(&data->cycle_detection);             // 停止定时器，避免继续提交工作
     if (data->wq) {
-        flush_workqueue(data->wq);                          // 等待工作队列无工作
+        cancel_work_sync(&data->work);                      // 等待正在执行的检测工作退出
         destroy_workqueue(data->wq);                        // 销毁工作队列，释放相关资源
         data->wq = NULL;
     }
@@ -343,9 +371,13 @@ int i2c_remove(struct i2c_client *c)
  ********************************************************************************/
 static int __init i2c_drv_init(void)
 {
+    int ret;
+
     // IIC 设备驱动注册入口函数
-    i2c_add_driver(&i2c_drv);
-    return 0;
+    ret = i2c_add_driver(&i2c_drv);
+    if (ret)
+        pr_err("%s: i2c_add_driver failed, ret=%d\n", DEVICE_NAME, ret);
+    return ret;
 }
 
 /********************************************************************************
@@ -362,6 +394,6 @@ static void __exit i2c_drv_exit(void)
 module_init(i2c_drv_init);                  // 指定加载函数
 module_exit(i2c_drv_exit);                  // 指定卸载函数
 MODULE_AUTHOR("LQ_012 <chiusir@163.com>");  // 作者以及邮箱
-MODULE_DESCRIPTION("ICM42605驱动");         // 模块简单介绍
+MODULE_DESCRIPTION("LQ426xxM/ICM42688 I2C driver"); // 模块简单介绍
 MODULE_VERSION("2.1");                      // 版本号
 MODULE_LICENSE("GPL");                      // 许可证声明

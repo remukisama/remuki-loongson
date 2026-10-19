@@ -7,6 +7,31 @@ static uint8_t _accelFS;
 static float   _gyroScale;
 static uint8_t _gyroFS;
 
+#define ICM42688_RESET_INITIAL_DELAY_MS  100
+#define ICM42688_RESET_RETRY_DELAY_MS     10
+#define ICM42688_RESET_RETRY_COUNT        90
+#define ICM42688_RESET_SETTLE_DELAY_MS     50
+#define ICM42688_IO_RETRY_DELAY_MS         10
+#define ICM42688_IO_RETRY_COUNT            10
+
+static int icm42688_write_reg_retry(struct ls_i2c_dev *dev, u8 reg, u8 value,
+                                    const char *name)
+{
+    int attempt;
+    int ret = -EREMOTEIO;
+
+    for (attempt = 0; attempt < ICM42688_IO_RETRY_COUNT; attempt++) {
+        ret = i2c_write_reg(dev, reg, value);
+        if (ret >= 1)
+            return 0;
+        msleep(ICM42688_IO_RETRY_DELAY_MS);
+    }
+
+    pr_err("%s: write %s failed after %d attempts, ret=%d\n",
+           DEVICE_NAME, name, ICM42688_IO_RETRY_COUNT, ret);
+    return -EREMOTEIO;
+}
+
 /********************************************************************************
  * @brief   设置陀螺仪测量范围
  * @param   dev : 自定义 I2C 相关结构体
@@ -17,7 +42,9 @@ static uint8_t _gyroFS;
 int icm42688_set_gyro_fsr(struct ls_i2c_dev *dev, icm42688_gyro_fsr_t fsr)
 {
     uint8_t reg;
-    i2c_write_reg(dev, REG_BANK_SEL, 0x00); // 切换到 BANK 0
+    if (icm42688_write_reg_retry(dev, REG_BANK_SEL, 0x00,
+                                 "BANK_SEL for gyro config"))
+        return -1;
     // 读取当前寄存器值
     if (i2c_read_regs(dev, UB0_REG_GYRO_CONFIG0, &reg, 1) < 0) {
         pr_err("%s: read GYRO_CONFIG0 failed\n", DEVICE_NAME);
@@ -44,7 +71,9 @@ int icm42688_set_gyro_fsr(struct ls_i2c_dev *dev, icm42688_gyro_fsr_t fsr)
 int icm42688_set_accel_fsr(struct ls_i2c_dev *dev, icm42688_accel_fsr_t fsr)
 {
     uint8_t reg;
-    i2c_write_reg(dev, REG_BANK_SEL, 0x00); // 切换到 BANK 0
+    if (icm42688_write_reg_retry(dev, REG_BANK_SEL, 0x00,
+                                 "BANK_SEL for accel config"))
+        return -1;
     // 读取当前寄存器值
     if (i2c_read_regs(dev, UB0_REG_ACCEL_CONFIG0, &reg, 1) < 0) {
         pr_err("%s: read ACCEL_CONFIG0 failed\n", DEVICE_NAME);
@@ -71,7 +100,9 @@ int icm42688_set_accel_fsr(struct ls_i2c_dev *dev, icm42688_accel_fsr_t fsr)
  ********************************************************************************/
 int icm42688_set_filters(struct ls_i2c_dev *dev, bool af, bool gf)
 {
-    i2c_write_reg(dev, REG_BANK_SEL, 0x02); // 切换到 BANK 2
+    if (icm42688_write_reg_retry(dev, REG_BANK_SEL, 0x02,
+                                 "BANK_SEL for accel filter"))
+        return -1;
     if (af == true) {
         if (i2c_write_reg(dev, UB2_REG_ACCEL_CONFIG_STATIC2, 0x00) < 1) {
             pr_err("%s: write ACCEL_CONFIG_STATIC2 failed\n", DEVICE_NAME);
@@ -84,7 +115,9 @@ int icm42688_set_filters(struct ls_i2c_dev *dev, bool af, bool gf)
         }
     }
 
-    i2c_write_reg(dev, REG_BANK_SEL, 0x01); // 切换到 BANK 1
+    if (icm42688_write_reg_retry(dev, REG_BANK_SEL, 0x01,
+                                 "BANK_SEL for gyro filter"))
+        return -1;
     if (gf == true) {
         if (i2c_write_reg(dev, UB1_REG_GYRO_CONFIG_STATIC2, 0x00 | 0x00) < 1) {
             pr_err("%s: write GYRO_CONFIG_STATIC2 failed\n", DEVICE_NAME);
@@ -95,6 +128,12 @@ int icm42688_set_filters(struct ls_i2c_dev *dev, bool af, bool gf)
             pr_err("%s: write GYRO_CONFIG_STATIC2 failed\n", DEVICE_NAME);
             return -1;
         }
+    }
+
+    /* Leave the device in bank 0 so periodic identity checks are reliable. */
+    if (icm42688_write_reg_retry(dev, REG_BANK_SEL, 0x00,
+                                 "BANK_SEL restore after filters")) {
+        return -1;
     }
     return 0;
 }
@@ -228,36 +267,98 @@ int icm42688_get_raw_data(struct ls_i2c_dev *dev, int16_t *dat)
  ********************************************************************************/
 int lq_i2c_icm42688_init(struct ls_i2c_dev *dev)
 {
-    u8 res;
+    u8 res = 0xff;
+    int ret;
+    int attempt;
+
     /* 复位操作 */
-    i2c_write_reg(dev, REG_BANK_SEL, 0x00);             // 切换到BANK 0
-    i2c_write_reg(dev, UB0_REG_DEVICE_CONFIG, 0x01);    // 复位
-    delay_ms(5);                                        // 等待ICM42688恢复正常
-    i2c_write_reg(dev, UB0_REG_DRIVE_CONFIG, 0x05);     // 控制通信速度(复位)
+    ret = icm42688_write_reg_retry(dev, REG_BANK_SEL, 0x00,
+                                   "BANK_SEL before reset");
+    if (ret)
+        return ret;
+    ret = icm42688_write_reg_retry(dev, UB0_REG_DEVICE_CONFIG, 0x01,
+                                   "DEVICE_CONFIG soft reset");
+    if (ret)
+        return ret;
+
+    /*
+     * The LQ426xxM module used on the target board needs about 140 ms before
+     * it acknowledges register accesses after a soft reset.  Poll WHO_AM_I
+     * for up to one second instead of assuming the device is ready in 5 ms.
+     */
+    msleep(ICM42688_RESET_INITIAL_DELAY_MS);
+    for (attempt = 0; attempt < ICM42688_RESET_RETRY_COUNT; attempt++) {
+        if (i2c_write_reg(dev, REG_BANK_SEL, 0x00) >= 1 &&
+            i2c_read_regs(dev, UB0_REG_WHO_AM_I, &res, 1) == 0 &&
+            res == ICM42688_WHO_AM_I) {
+            break;
+        }
+        msleep(ICM42688_RESET_RETRY_DELAY_MS);
+    }
+    if (attempt == ICM42688_RESET_RETRY_COUNT) {
+        pr_err("%s: WHO_AM_I did not recover after reset, last=0x%02x\n",
+               DEVICE_NAME, res);
+        return -ENODEV;
+    }
+    pr_info("%s: reset recovery complete in about %d ms, who_am_i=0x%02x\n",
+            DEVICE_NAME,
+            ICM42688_RESET_INITIAL_DELAY_MS +
+                attempt * ICM42688_RESET_RETRY_DELAY_MS,
+            res);
+
+    /* A first valid identity read can still be followed by a short NACK window. */
+    msleep(ICM42688_RESET_SETTLE_DELAY_MS);
+    ret = icm42688_write_reg_retry(dev, REG_BANK_SEL, 0x00,
+                                   "BANK_SEL after reset settle");
+    if (ret)
+        return ret;
+
+    ret = icm42688_write_reg_retry(dev, UB0_REG_DRIVE_CONFIG, 0x05,
+                                   "DRIVE_CONFIG");
+    if (ret)
+        return ret;
     delay_ms(5);
-    i2c_write_reg(dev, UB0_REG_INT_CONFIG, 0x02);       // 中断配置 0x02
+    ret = icm42688_write_reg_retry(dev, UB0_REG_INT_CONFIG, 0x02,
+                                   "INT_CONFIG");
+    if (ret)
+        return ret;
     delay_ms(5);
-    i2c_write_reg(dev, REG_BANK_SEL, 0x00);             // 切换到BANK 0
+    ret = icm42688_write_reg_retry(dev, REG_BANK_SEL, 0x00,
+                                   "BANK_SEL before identity verify");
+    if (ret)
+        return ret;
     res = i2c_read_reg_byte(dev, UB0_REG_WHO_AM_I);     // 读取设备 ID
     if (res != ICM42688_WHO_AM_I) {
-        pr_err("%s: init failed, who_am_i = 0x47 -> 0x%02x ?\n", DEVICE_NAME, res);
-        return -1;
+        pr_err("%s: init failed, expected who_am_i=0x%02x, got=0x%02x\n",
+               DEVICE_NAME, ICM42688_WHO_AM_I, res);
+        return -ENODEV;
     }
     delay_ms(1);
-    pr_err("%s: init success, who_am_i = 0x%02x\n", DEVICE_NAME, res);
+    pr_info("%s: identity verified, who_am_i=0x%02x\n", DEVICE_NAME, res);
     // 启用加速度计和陀螺仪，在低噪声(LN)模式
-    res = i2c_write_reg(dev, UB0_REG_PWR_MGMT0, 0x0F);
-    if (res < 1) {
-        pr_err("%s: init failed, pwr_mgmt0 = 0x%02x\n", DEVICE_NAME, res);
-        return -1;
-    }
+    ret = icm42688_write_reg_retry(dev, UB0_REG_PWR_MGMT0, 0x0F,
+                                   "PWR_MGMT0");
+    if (ret)
+        return ret;
     delay_ms(2);
-    i2c_write_reg(dev, UB0_REG_INT_CONFIG0, 0x00);       // 中断配置 0x00
+    ret = icm42688_write_reg_retry(dev, UB0_REG_INT_CONFIG0, 0x00,
+                                   "INT_CONFIG0");
+    if (ret)
+        return ret;
     delay_ms(2);
-    i2c_write_reg(dev, UB0_REG_INT_SOURCE0, 0x08);       // 中断源 0x08
+    ret = icm42688_write_reg_retry(dev, UB0_REG_INT_SOURCE0, 0x08,
+                                   "INT_SOURCE0");
+    if (ret)
+        return ret;
     delay_ms(2);
-    i2c_write_reg(dev, REG_BANK_SEL, 0x01);             // 切换到BANK 1
-    i2c_write_reg(dev, UB1_REG_SENSOR_CONFIG0, 0x80);   // 开启加速度计和陀螺仪
+    ret = icm42688_write_reg_retry(dev, REG_BANK_SEL, 0x01,
+                                   "BANK_SEL for SENSOR_CONFIG0");
+    if (ret)
+        return ret;
+    ret = icm42688_write_reg_retry(dev, UB1_REG_SENSOR_CONFIG0, 0x80,
+                                   "SENSOR_CONFIG0");
+    if (ret)
+        return ret;
     delay_ms(2);
     // 设置加速度计的满量程范围
     if (icm42688_set_accel_fsr(dev, ICM42688_ACCEL_FSR_4G) != 0) {
@@ -287,6 +388,8 @@ int lq_i2c_icm42688_init(struct ls_i2c_dev *dev)
  ********************************************************************************/
 uint8_t lq_i2c_icm42688_get_id(struct ls_i2c_dev *dev)
 {
+    if (i2c_write_reg(dev, REG_BANK_SEL, 0x00) < 1)
+        return 0xff;
     return i2c_read_reg_byte(dev, UB0_REG_WHO_AM_I); //获取ICM42688设备 ID
 }
 
@@ -298,5 +401,5 @@ uint8_t lq_i2c_icm42688_get_id(struct ls_i2c_dev *dev)
  ********************************************************************************/
 void delay_ms(uint16_t ms)
 {
-    mdelay(ms);
+    msleep(ms);
 }

@@ -1,4 +1,4 @@
-﻿{
+{
     "configurations": [
         {
             "name": "Linux",
@@ -26,7 +26,7 @@
             "intelliSenseMode": "linux-gcc-loongarch64",
             "compilerArgs": [
                 "-O3",
-                "-ffast-math"
+                "-fno-fast-math"
             ]
         }
     ],

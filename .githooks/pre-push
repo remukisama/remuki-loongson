@@ -1,0 +1,27 @@
+#!/bin/bash
+# 阻止直接推送到受保护分支 main。
+# 紧急情况可临时绕过：ALLOW_MAIN_PUSH=1 git push origin main
+
+remote="$1"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    case "${remote_ref}" in
+        refs/heads/main)
+            if [ "${ALLOW_MAIN_PUSH:-0}" != "1" ]; then
+                echo ""
+                echo "  ✋ 已阻止：main 是受保护分支，不接受直接 push。"
+                echo ""
+                echo "     正确做法："
+                echo "       git push origin dev            # 先推到 dev"
+                echo "       然后在 GitHub 上开 PR 合并到 main"
+                echo ""
+                echo "     确需紧急绕过（不建议）："
+                echo "       ALLOW_MAIN_PUSH=1 git push origin main"
+                echo ""
+                exit 1
+            fi
+            ;;
+    esac
+done
+
+exit 0

@@ -24,5 +24,19 @@
         "${workspaceFolder}/user_app/src",
         "${workspaceFolder}/example/src",
         "${workspaceFolder}/**"
-    ]
+    ],
+    "cmake.buildDirectory": "${workspaceFolder}/main/build",
+    "cmake.configureOnOpen": false,
+    "files.associations": {
+        "*.hpp": "cpp",
+        "*.h": "c",
+        "*.tcc": "cpp"
+    },
+    "search.exclude": {
+        "**/vendor/**": true,
+        "**/debug/**": true,
+        "**/tools/**": true,
+        "**/gpio_proj/lib/**": true,
+        "**/build*/**": true
+    }
 }

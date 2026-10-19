@@ -7,13 +7,21 @@
 ├── main/                  # Car application entry and build script
 ├── user_app/              # Control, image, IMU, encoder and NCNN code
 ├── example/               # Vendor demos and staged tuning tools
-├── libraries/             # Vendor application/common/driver libraries
+├── libraries/             # Vendor application/common/driver libraries (trimmed)
 ├── driver/                # Kernel drivers and deployment helpers
-├── tools/                 # Cross toolchain and runtime dependencies
-├── docs/                  # Datasheets and notes
 ├── gpio_proj/             # GPIO hardware watchdog daemon
-├── autoboot/              # Board-side gpio_manager installation package
-└── PROJECT_STRUCTURE.md
+├── board/                 # Board-side assets
+│   ├── kernel/            #   vmlinuz + flashing notes
+│   ├── deploy/autoboot/   #   gpio_manager installation package
+│   └── tools/             #   NCNN capture/infer helpers built on board
+├── scripts/               # check_env.sh + analysis/ (offline log tools)
+├── docs/                  # datasheets / guides / notes
+├── vendor/                # Official SDK V2.1.0 reference copy
+├── debug/                 # Field scripts (tools/) and captures (captures/)
+├── tools/                 # Cross toolchain and runtime dependencies (not in git)
+├── README.md
+├── PROJECT_STRUCTURE.md
+└── PROJECT_USAGE_GUIDE.md
 ```
 
 ## Safety Architecture
@@ -70,7 +78,7 @@ cd gpio_proj
 ./build.sh manager
 
 # On board: install/restart service
-cd /root/autoboot
+cd /root/autoboot   # 板端路径，由 board/deploy/autoboot 上传
 ./install.sh
 systemctl status gpio-manager --no-pager
 
@@ -81,7 +89,7 @@ cd /path/to/repo/main
 
 ## Autostart Package
 
-The current `autoboot/install.sh` installs and starts only `gpio-manager.service`. It explicitly disables `screen.service`; screen startup is not part of the present safety deployment path.
+The current `board/deploy/autoboot/install.sh` installs and starts only `gpio-manager.service`. It explicitly disables `screen.service`; screen startup is not part of the present safety deployment path.
 
 ## Main Build Commands
 

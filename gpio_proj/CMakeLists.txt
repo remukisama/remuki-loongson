@@ -22,7 +22,26 @@ set(BOARD "2K301" CACHE STRING "Board type: 2K301")
 add_definitions(-DBOARD_${BOARD})
 
 # ==================== 官方库路径 ====================
-set(LQ_LIB ${CMAKE_CURRENT_SOURCE_DIR}/lib/Loongson_2K300_301_LIB/libraries)
+# 查找顺序：旧位置(仓库内副本) -> vendor 官方 SDK -> 父仓裁剪版 libraries
+set(LQ_LIB "")
+foreach(cand IN ITEMS
+        "${CMAKE_CURRENT_SOURCE_DIR}/lib/Loongson_2K300_301_LIB/libraries"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/loongson_sdk_V2.1.0/libraries"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../libraries")
+    if(EXISTS "${cand}/common/inc/lq_utils.hpp" AND EXISTS "${cand}/common/src/lq_base_class.cpp")
+        set(LQ_LIB "${cand}")
+        break()
+    endif()
+endforeach()
+if(NOT LQ_LIB)
+    message(FATAL_ERROR
+        "未找到可用的 Loongson libraries！\n"
+        "请确认以下任一目录存在且包含 common/inc 与 common/src：\n"
+        "  gpio_proj/lib/Loongson_2K300_301_LIB/libraries\n"
+        "  vendor/loongson_sdk_V2.1.0/libraries\n"
+        "  libraries（父仓裁剪版，缺少 lq_base_class.cpp，不可单独用于 gpio_proj）")
+endif()
+message(STATUS "  LQ_LIB   : ${LQ_LIB}")
 
 set(LIB_COMMON_INC ${LQ_LIB}/common/inc)
 set(LIB_COMMON_SRC ${LQ_LIB}/common/src)

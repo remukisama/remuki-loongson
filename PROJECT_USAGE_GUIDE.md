@@ -16,10 +16,13 @@
 main/        主程序入口、CMake、交叉编译/部署脚本
 user_app/    图像、IMU、编码器、差速、PID、电机控制
 gpio_proj/   独立 GPIO 看门狗守护进程
-autoboot/    gpio_manager 的板端安装包
-libraries/   基础库和驱动库
+board/       板级资源：kernel/(内核) deploy/autoboot/(自启包) tools/(板端小工具)
+libraries/   基础库和驱动库（裁剪版）
 example/     调参和设备诊断示例
-tools/       工具链与第三方依赖
+vendor/      官方 SDK V2.1.0 原始包（仅参考）
+scripts/     环境自检与离线日志分析
+docs/        手册、专题指南、版本记录
+tools/       工具链与第三方依赖（不入库）
 ```
 
 ## 3. 编译
@@ -146,7 +149,7 @@ PWM 保持使能
 ```bash
 cd gpio_proj
 ./build.sh manager
-scp -O build/gpio_manager root@<board-ip>:/root/autoboot/bin/gpio_manager
+scp -O build/gpio_manager root@<board-ip>:/root/autoboot/bin/gpio_manager   # 源文件在 gpio_proj/build/
 ssh root@<board-ip> 'systemctl restart gpio-manager && systemctl status gpio-manager --no-pager'
 ```
 

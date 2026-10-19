@@ -22,7 +22,9 @@ driver/**/Module.symvers
 driver/**/modules.order
 
 # Local toolchains and extracted dependency packages
-tools/
+# 目录说明保留在版本库中，其余大文件不入库
+tools/*
+!tools/README.md
 main/toolchain_path.cmake
 
 # Editor and OS noise
@@ -32,16 +34,55 @@ Thumbs.db
 *.swo
 *.bak
 *.bak_*
+=*
+*.orig
+*.rej
+
+# Agent / editor backup snapshots
+.hermes_backups/
+*_backup_*/
+.bak/
+
+# Runtime logs and session captures (grows fast, keep out of git)
+main.log
+*.log
+debug/race_capture_*/
+debug/vision_capture_*/
+debug/remote_logs/
+debug/ncnn_capture_*
+
+# 现场实验数据：历史采集已在库中，新采集与调参记录一律不入库
+debug/captures/legacy_*/
+debug/captures/gyro_tune/
+*.csv
+
+# AI / agent tool state (local only)
+.claude/
+.agents/
+.codex/
+.tmp_versions/
+tmp/
+.restructure.sh
 
 # Compiled binaries / temp executables
 autoboot/bin/gpio_manager
+board/deploy/autoboot/bin/gpio_manager
 atim_pwm_disable
 
 # MATLAB autotune runtime files
 lq_autotune_stage.txt
 *.autotune_bak
 
-# IDE and tool directories
+# IDE and tool directories (keep .vscode tracked: shared IntelliSense config)
 .codegraph/
 .reasonix/
-.vscode/
+
+# debug 采集数据：整个 captures 视为实验产物，只保留历史已跟踪的几个采集目录
+debug/captures/*
+!debug/captures/race_capture_*/
+!debug/captures/vision_capture_*/
+!debug/captures/vision_race_capture_*/
+!debug/captures/remote_logs/
+# 历史已跟踪的日志随目录迁移继续保留
+!debug/captures/remote_logs/*
+!docs/notes/matlab_autotune/samples/*

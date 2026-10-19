@@ -8,6 +8,14 @@
 
 #define I2C_PROBE_RETRIES          5
 #define I2C_PROBE_RETRY_DELAY_MS   100
+#define I2C_PROBE_MASK_ALL         0x0f
+#define I2C_PROBE_MASK_ICM42688    0x08
+
+static unsigned int probe_mask = I2C_PROBE_MASK_ALL;
+module_param(probe_mask, uint, 0444);
+MODULE_PARM_DESC(probe_mask,
+                 "I2C device probe bit mask: bit0=MPU6050 bit1=LSM6DSR "
+                 "bit2=VL53L0X bit3=ICM42688");
 
 // 定义设备信息结构体
 struct i2c_dev_info {
@@ -83,9 +91,17 @@ static int __init dev_init(void)
         printk("LQ_I2C_ALL_DEV: get i2c adapter 1 failed!\n");
         return -ENODEV;
     }
-    printk("LQ_I2C_ALL_DEV init function, start probe multi devices\n");
+    printk("LQ_I2C_ALL_DEV init function, start probe devices, mask=0x%x\n",
+           probe_mask);
     // 遍历所有设备名称
     while (I2C_DEVS[i].name != NULL && client_count < ARRAY_SIZE(clients)) {
+        if (!(probe_mask & BIT(i))) {
+            printk(KERN_INFO
+                   "LQ_I2C_ALL_DEV: skip device %s addr=0x%02x by probe mask\n",
+                   I2C_DEVS[i].name, I2C_DEVS[i].addr);
+            i++;
+            continue;
+        }
         // 探测并注册该设备名对应的I2C设备。部分板卡上I2C刚释放后首次探测会短暂失败，需重试。
         clients[client_count] = lq_i2c_probe_device_with_retry(adapter, &I2C_DEVS[i]);
         // 检查注册结果

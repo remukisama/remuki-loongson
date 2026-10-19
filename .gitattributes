@@ -1,0 +1,22 @@
+# 统一行尾：脚本与源码一律 LF，避免在 Windows 上编辑后拷到板卡出现 bash^M
+*.sh          text eol=lf
+*.py          text eol=lf
+*.cmake       text eol=lf
+CMakeLists.txt text eol=lf
+*.c           text eol=lf
+*.h           text eol=lf
+*.cpp         text eol=lf
+*.hpp         text eol=lf
+*.md          text eol=lf
+*.json        text eol=lf
+*.service     text eol=lf
+
+# 二进制资源不做行尾转换
+*.pdf         binary
+*.bin         binary
+*.ko          binary
+*.param       text eol=lf
+vmlinuz       binary
+*.ncnn.bin    binary
+*.png         binary
+*.jpg         binary

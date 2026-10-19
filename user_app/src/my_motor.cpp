@@ -141,11 +141,54 @@ static constexpr float kTurnRecoveryMinWheel = 0.03f;       // 直角弯允许�
 static constexpr float kGuardedTurnReleaseRatio = 0.30f;
 static std::atomic<uint32_t> g_control_vision_frame_seq(0);
 static std::atomic<long long> g_control_last_vision_frame_ms(0);
+// 0=等待首个有效视觉帧，正数=启动直行起点，-1=已交还主循迹。
+static std::atomic<long long> g_startup_straight_start_ms(0);
+static std::atomic<bool> g_startup_straight_control_active(false);
 
 static long long control_now_ms()
 {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static bool update_startup_straight_phase(long long now_ms)
+{
+    if (car_config::kStartupStraightDurationMs <= 0) {
+        g_startup_straight_control_active.store(false, std::memory_order_release);
+        return false;
+    }
+
+    long long start_ms = g_startup_straight_start_ms.load(std::memory_order_acquire);
+    if (start_ms == 0) {
+        long long expected = 0;
+        if (g_startup_straight_start_ms.compare_exchange_strong(
+                expected, now_ms, std::memory_order_acq_rel)) {
+            start_ms = now_ms;
+            std::printf("[STARTUP_STRAIGHT] begin duration=%dms speed=%.2fm/s; "
+                        "visual/element steering held, gyro heading hold active.\n",
+                        car_config::kStartupStraightDurationMs,
+                        car_config::kStartupStraightSpeedGoal);
+        } else {
+            start_ms = expected;
+        }
+    }
+
+    if (start_ms < 0) {
+        g_startup_straight_control_active.store(false, std::memory_order_release);
+        return false;
+    }
+
+    if (now_ms - start_ms < car_config::kStartupStraightDurationMs) {
+        return true;
+    }
+
+    long long expected = start_ms;
+    if (g_startup_straight_start_ms.compare_exchange_strong(
+            expected, -1, std::memory_order_acq_rel)) {
+        std::printf("[STARTUP_STRAIGHT] complete; handing control to line patrol and elements.\n");
+    }
+    g_startup_straight_control_active.store(false, std::memory_order_release);
+    return false;
 }
 
 void control_mark_vision_frame_ready(void)
@@ -190,6 +233,8 @@ void control_reset_vision_health(void)
 {
     g_control_last_vision_frame_ms.store(0, std::memory_order_release);
     g_control_vision_frame_seq.store(0, std::memory_order_release);
+    g_startup_straight_start_ms.store(0, std::memory_order_release);
+    g_startup_straight_control_active.store(false, std::memory_order_release);
 }
 
 // ===============================================================================
@@ -503,6 +548,8 @@ static void distribute_wheel_speeds(float speed_goal, float diff_speed, float ef
 
 void speed_dif_cascade(float inner_dt)
 {
+    const bool startup_straight_active =
+        g_startup_straight_control_active.load(std::memory_order_acquire);
     static auto last_visual_frame_time_ms = 0LL;
     static uint32_t last_processed_seq = 0;
     static float last_steer_error = 0.0f;
@@ -1316,6 +1363,31 @@ void speed_dif_cascade(float inner_dt)
         dbg_near_far_release_reason = near_far_release_reason;
     }
 
+    if (startup_straight_active) {
+        // 启动阶段只屏蔽视觉/元素产生的转向命令；图像处理仍在后台更新，
+        // 到时即可直接接管。目标角速度保持0，让IMU角速度环抑制车身偏航。
+        planned_speed_goal = car_config::kStartupStraightSpeedGoal;
+        target_gyro_z = 0.0f;
+        raw_steer_error = 0.0f;
+        last_steer_error = 0.0f;
+        steer_integral = 0.0f;
+        min_wheel_for_diff = 0.0f;
+        guarded_turn_sign = 0.0f;
+        guarded_turn_release_ratio = 0.0f;
+        near_center_persistent_add_dps = 0.0f;
+        near_center_persistent_sign = 0.0f;
+        near_center_persistent_since_ms = 0;
+
+        dbg_raw_steer_error = 0.0f;
+        dbg_steer_error = 0.0f;
+        dbg_diff_steer = 0.0f;
+        dbg_visual_pd_out = 0.0f;
+        dbg_target_gyro_z = 0.0f;
+        dbg_deadband_active = 6;
+        dbg_near_center_add_dps = 0.0f;
+        dbg_near_center_persistent_add_dps = 0.0f;
+    }
+
     Mpu6050Data imu_data;
     if (!imu.read_processed_data(imu_data)) {
         // IMU硬失败：降级为纯视觉PD控制，不退出
@@ -1641,6 +1713,15 @@ void Speed_BiHuan(void)
     control_start_ms = 0;
 
     const long long vision_age_ms = control_now_ms() - last_vision_ms;
+    const bool startup_straight_phase =
+        (SystemData.Stop != 1) && update_startup_straight_phase(control_now_ms());
+    const bool startup_straight_control_active =
+        startup_straight_phase && vision_age_ms <= kVisionFreshTimeoutMs;
+    g_startup_straight_control_active.store(
+        startup_straight_control_active, std::memory_order_release);
+    if (startup_straight_control_active) {
+        planned_speed_goal = car_config::kStartupStraightSpeedGoal;
+    }
     if (vision_age_ms > kVisionFatalTimeoutMs) {
         // 致命超时：500ms无视觉帧，退出程序
         static int vision_guard_warn_count = 0;
